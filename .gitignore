@@ -1,6 +1,67 @@
-/target
+# Rust
+/target/
 **/*.rs.bk
+
+# Local environment and secrets
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
+*keypair*.json
+*secret*.json
+*private*.json
 
+# Local wallet/demo outputs
+dev-keypair.json
+imported-keypair.json
+*.signature.json
+*.proof.json
+*.batch.json
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.sock
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Codex/agent local workspace metadata
+.codex/
+.agents/
+
+# Frontend artifacts for future dashboard work
+node_modules/
+dist/
+build/
+.next/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# Database and container local state
+postgres-data/
+pgdata/
+docker-data/
+.docker/
+
+# Test and coverage outputs
+tarpaulin-report.html
+lcov.info
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak

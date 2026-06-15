@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "crates/wallet-core",
+    "crates/merkle-core",
     "apps/wallet-cli",
+    "apps/merkle-cli",
 ]
 
 [workspace.package]
@@ -21,3 +23,5 @@ serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "1.0"
 
+[workspace.dependencies.proptest]
+version = "1.6"

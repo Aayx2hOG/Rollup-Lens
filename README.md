@@ -9,10 +9,13 @@ analytics APIs, and a dashboard.
 ```text
 crates/
   wallet-core/      Reusable signing, verification, and address logic
+  merkle-core/      Deterministic Merkle roots and inclusion proofs
 apps/
   wallet-cli/       CLI wrapper around wallet-core
+  merkle-cli/       CLI wrapper around merkle-core
 docs/
   phase-1-wallet.md
+  phase-2-merkle.md
 ```
 
 ## Phase 1: Wallet CLI
@@ -97,3 +100,39 @@ Run tests:
 ```bash
 cargo test
 ```
+
+## Phase 2: Merkle Tree CLI
+
+Create a JSON leaf file:
+
+```json
+[
+  { "account": "alice", "balance": 100 },
+  { "account": "bob", "balance": 50 },
+  { "account": "carol", "balance": 25 }
+]
+```
+
+Compute a Merkle root:
+
+```bash
+cargo run -p merkle-cli -- root leaves.json
+```
+
+Generate an inclusion proof:
+
+```bash
+cargo run -p merkle-cli -- prove leaves.json 1 > proof.json
+```
+
+Verify the proof:
+
+```bash
+cargo run -p merkle-cli -- verify \
+  --leaf '{"account":"bob","balance":50}' \
+  --proof proof.json \
+  --root "<root-hex>"
+```
+
+Merkle proofs are emitted as JSON so later API services and dashboards can
+consume them directly.
