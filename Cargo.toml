@@ -3,8 +3,10 @@ resolver = "2"
 members = [
     "crates/wallet-core",
     "crates/merkle-core",
+    "crates/chain-core",
     "apps/wallet-cli",
     "apps/merkle-cli",
+    "apps/chain-cli",
 ]
 
 [workspace.package]

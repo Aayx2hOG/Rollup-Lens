@@ -10,12 +10,15 @@ analytics APIs, and a dashboard.
 crates/
   wallet-core/      Reusable signing, verification, and address logic
   merkle-core/      Deterministic Merkle roots and inclusion proofs
+  chain-core/       Accounts, transactions, blocks, state roots, validation
 apps/
   wallet-cli/       CLI wrapper around wallet-core
   merkle-cli/       CLI wrapper around merkle-core
+  chain-cli/        JSON-backed local blockchain CLI
 docs/
   phase-1-wallet.md
   phase-2-merkle.md
+  phase-3-chain.md
 ```
 
 ## Phase 1: Wallet CLI
@@ -136,3 +139,56 @@ cargo run -p merkle-cli -- verify \
 
 Merkle proofs are emitted as JSON so later API services and dashboards can
 consume them directly.
+
+## Phase 3: Minimal Blockchain CLI
+
+Initialize a local JSON chain:
+
+```bash
+cargo run -p chain-cli -- --chain-file chain.json init
+```
+
+Create funded genesis accounts before producing blocks:
+
+```bash
+cargo run -p chain-cli -- --chain-file chain.json account create \
+  --balance 100 \
+  --key-output alice.json
+
+cargo run -p chain-cli -- --chain-file chain.json account create \
+  --balance 0 \
+  --key-output bob.json
+```
+
+Finalize the genesis block:
+
+```bash
+cargo run -p chain-cli -- --chain-file chain.json genesis finalize
+```
+
+Queue a signed transfer:
+
+```bash
+cargo run -p chain-cli -- --chain-file chain.json tx send \
+  --key-file alice.json \
+  --to "<bob-address>" \
+  --amount 25
+```
+
+Produce a block from pending transactions:
+
+```bash
+cargo run -p chain-cli -- --chain-file chain.json block produce
+```
+
+Inspect state and validate the full chain from genesis:
+
+```bash
+cargo run -p chain-cli -- --chain-file chain.json state
+cargo run -p chain-cli -- --chain-file chain.json validate
+```
+
+Block `0` is the genesis block. It has the null parent hash, no transactions,
+and a deterministic Merkle state root over the initial accounts. Later blocks
+include parent hashes, signed transactions, state roots, and block hashes.
+Validation replays the chain from the explicit genesis block.
