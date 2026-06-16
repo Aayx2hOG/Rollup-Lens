@@ -15,10 +15,12 @@ apps/
   wallet-cli/       CLI wrapper around wallet-core
   merkle-cli/       CLI wrapper around merkle-core
   chain-cli/        JSON-backed local blockchain CLI
+  explorer-api/     Read-only HTTP explorer over Phase 3 chain JSON
 docs/
   phase-1-wallet.md
   phase-2-merkle.md
   phase-3-chain.md
+  phase-4-explorer.md
 ```
 
 ## Phase 1: Wallet CLI
@@ -192,3 +194,29 @@ Block `0` is the genesis block. It has the null parent hash, no transactions,
 and a deterministic Merkle state root over the initial accounts. Later blocks
 include parent hashes, signed transactions, state roots, and block hashes.
 Validation replays the chain from the explicit genesis block.
+
+## Phase 4: Blockchain Explorer API
+
+Start a read-only explorer API over a Phase 3 chain file:
+
+```bash
+cargo run -p explorer-api -- --chain-file chain.json --bind 0.0.0.0:3000
+```
+
+Available endpoints:
+
+```text
+GET /health
+GET /
+GET /chain/summary
+GET /blocks
+GET /blocks/:height
+GET /blocks/hash/:hash
+GET /accounts/:address
+GET /transactions/:hash
+GET /search/:query
+```
+
+`/search/:query` resolves block hashes, block heights, account addresses, and
+transaction hashes. Transaction hashes are SHA-256 commitments over the
+serialized signed transfer.
