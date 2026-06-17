@@ -6,6 +6,7 @@
 .env
 .env.*
 !.env.example
+prisma/.env
 *.pem
 *.key
 *.cert
@@ -16,6 +17,9 @@
 *private*.json
 
 # Local wallet/demo outputs
+chain.json
+alice.json
+bob.json
 dev-keypair.json
 imported-keypair.json
 *.signature.json

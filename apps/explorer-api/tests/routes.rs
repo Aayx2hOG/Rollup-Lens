@@ -5,9 +5,10 @@ use axum::{
     http::{Request, StatusCode},
 };
 use chain_core::{
-    add_pending_transaction, finalize_genesis, new_chain, produce_block, sign_transfer, Account,
+    add_pending_transaction, finalize_genesis, new_chain, produce_block, sign_transfer,
+    transaction_hash, Account,
 };
-use explorer_api::{app, transaction_hash};
+use explorer_api::app;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -64,7 +65,11 @@ async fn fetches_blocks_accounts_and_transactions() {
     assert_eq!(block["height"], json!(1));
     assert_eq!(block["block_hash"], json!(fixture.latest_block_hash));
 
-    let account = get_json(app.clone(), &format!("/accounts/{}", fixture.alice_address)).await;
+    let account = get_json(
+        app.clone(),
+        &format!("/accounts/{}", path_segment(&fixture.alice_address)),
+    )
+    .await;
     assert_eq!(account["address"], json!(fixture.alice_address));
     assert_eq!(account["balance"], json!(60));
     assert_eq!(account["nonce"], json!(1));
@@ -102,7 +107,11 @@ async fn searches_by_height_hash_address_and_transaction() {
         json!(fixture.latest_block_hash)
     );
 
-    let by_address = get_json(app.clone(), &format!("/search/{}", fixture.bob_address)).await;
+    let by_address = get_json(
+        app.clone(),
+        &format!("/search/{}", path_segment(&fixture.bob_address)),
+    )
+    .await;
     assert_eq!(by_address["kind"], json!("Account"));
     assert_eq!(by_address["data"]["balance"], json!(40));
 
@@ -181,4 +190,16 @@ async fn get_json(app: axum::Router, uri: &str) -> Value {
 
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }

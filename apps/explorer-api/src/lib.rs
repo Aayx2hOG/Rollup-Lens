@@ -7,10 +7,9 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use chain_core::{state_root, validate_chain, Account, Block, Chain, Transfer};
+use chain_core::{state_root, transaction_hash, validate_chain, Account, Block, Chain, Transfer};
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -249,15 +248,6 @@ fn find_transaction_by_hash(chain: &Chain, hash: &str) -> Option<TransactionView
     }
 
     None
-}
-
-pub fn transaction_hash(transaction: &Transfer) -> String {
-    let payload = serde_json::to_vec(transaction).expect("serializing a transfer should not fail");
-    encode_hex(&Sha256::digest(payload))
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl IntoResponse for ApiError {

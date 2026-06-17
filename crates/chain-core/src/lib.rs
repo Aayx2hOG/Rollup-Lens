@@ -11,6 +11,7 @@ use wallet_core::{
 const NULL_PARENT_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Account {
     pub address: String,
     pub balance: u64,
@@ -18,6 +19,7 @@ pub struct Account {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Transfer {
     pub from: String,
     pub to: String,
@@ -28,6 +30,7 @@ pub struct Transfer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Block {
     pub height: u64,
     pub parent_hash: String,
@@ -37,6 +40,7 @@ pub struct Block {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Chain {
     pub genesis_accounts: Vec<Account>,
     pub accounts: BTreeMap<String, Account>,
@@ -310,6 +314,11 @@ pub fn state_root(accounts: &BTreeMap<String, Account>) -> String {
         .collect::<Vec<_>>();
 
     root_hex(&leaves)
+}
+
+pub fn transaction_hash(transaction: &Transfer) -> String {
+    let payload = serde_json::to_vec(transaction).expect("serializing a transfer should not fail");
+    encode_hex(&Sha256::digest(payload))
 }
 
 pub fn validate_transaction(
@@ -614,5 +623,18 @@ mod tests {
             produce_block(&mut chain),
             Err(ChainError::GenesisNotFinalized)
         );
+    }
+
+    #[test]
+    fn rejects_unknown_chain_json_fields() {
+        let result = serde_json::from_value::<Chain>(json!({
+            "genesis_accounts": [],
+            "accounts": {},
+            "pending_transactions": [],
+            "blocks": [],
+            "unexpected": true
+        }));
+
+        assert!(result.is_err());
     }
 }

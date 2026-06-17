@@ -15,13 +15,24 @@ apps/
   wallet-cli/       CLI wrapper around wallet-core
   merkle-cli/       CLI wrapper around merkle-core
   chain-cli/        JSON-backed local blockchain CLI
+  chain-indexer/    Prisma/Postgres indexer for chain JSON data
   explorer-api/     Read-only HTTP explorer over Phase 3 chain JSON
 docs/
+  system-design.md
   phase-1-wallet.md
   phase-2-merkle.md
   phase-3-chain.md
   phase-4-explorer.md
 ```
+
+CLI commands are collected in [`apps/README.md`](apps/README.md).
+
+## System Design
+
+The current and planned architecture is documented in
+[`docs/system-design.md`](docs/system-design.md). It includes a Mermaid
+flowchart and SVG diagram covering the write path, chain storage, indexing,
+read API, cache, explorer UI, rollup batches, and observability.
 
 ## Phase 1: Wallet CLI
 
@@ -220,3 +231,58 @@ GET /search/:query
 `/search/:query` resolves block hashes, block heights, account addresses, and
 transaction hashes. Transaction hashes are SHA-256 commitments over the
 serialized signed transfer.
+
+## Phase 5: Prisma/Postgres Indexer
+
+The Postgres schema is defined in [`prisma/schema.prisma`](prisma/schema.prisma),
+with the matching SQL migration in
+[`prisma/migrations/0001_init/migration.sql`](prisma/migrations/0001_init/migration.sql).
+
+Start a local Postgres container for development:
+
+```bash
+docker run --name zk-rollup-postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=zk_rollup \
+  -p 5432:5432 \
+  -d postgres:16
+```
+
+If the container already exists, start it instead:
+
+```bash
+docker start zk-rollup-postgres
+```
+
+Create the local shadow database used by Prisma Migrate:
+
+```bash
+docker exec zk-rollup-postgres createdb -U postgres zk_rollup_shadow
+```
+
+Create a local Prisma env file:
+
+```bash
+cp prisma/.env.example prisma/.env
+```
+
+For the local container above, `prisma/.env` should contain:
+
+```env
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/zk_rollup"
+```
+
+Apply Prisma migrations, then index a validated local chain file:
+
+```bash
+bunx prisma migrate dev
+cargo run -p chain-indexer -- --chain-file chain.json
+```
+
+`--init-schema` is a Rust-only local shortcut when you are not using Prisma
+Migrate:
+
+```bash
+cargo run -p chain-indexer -- --chain-file chain.json --init-schema
+```

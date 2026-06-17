@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Block {
+  height           BigInt             @id
+  parentHash       String             @map("parent_hash")
+  stateRoot        String             @map("state_root")
+  blockHash        String             @unique @map("block_hash")
+  transactionCount Int                @map("transaction_count")
+  rawBlock         Json               @map("raw_block")
+  transactions     ChainTransaction[]
+
+  @@map("blocks")
+}
+
+model ChainTransaction {
+  hash            String  @id
+  blockHeight     BigInt? @map("block_height")
+  transactionIndex Int    @map("transaction_index")
+  fromAddress     String  @map("from_address")
+  toAddress       String  @map("to_address")
+  amount          BigInt
+  nonce           BigInt
+  publicKeyBase64 String  @map("public_key_base64")
+  signatureBase64 String  @map("signature_base64")
+  rawTransfer     Json    @map("raw_transfer")
+  block           Block?  @relation(fields: [blockHeight], references: [height], onDelete: Cascade)
+
+  @@index([blockHeight])
+  @@index([fromAddress])
+  @@index([toAddress])
+  @@map("transactions")
+}
+
+model Account {
+  address String @id
+  balance BigInt
+  nonce   BigInt
+
+  @@map("accounts")
+}
+
+model IndexerCheckpoint {
+  id                String  @id
+  lastIndexedHeight BigInt? @map("last_indexed_height")
+
+  @@map("indexer_checkpoints")
+}
