@@ -1,9 +1,12 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, Context, Result};
 use chain_core::{
     add_genesis_account, add_pending_transaction, finalize_genesis, new_chain, next_nonce,
-    produce_block, sign_transfer, state_root, validate_chain, Chain,
+    produce_block, rollup_batch_commitment, sign_transfer, state_root, validate_chain, Chain,
 };
 use clap::{Parser, Subcommand};
 use wallet_core::{address_from_public_key, create_keypair, validate_keypair, DevKeypair};
@@ -43,6 +46,11 @@ enum Command {
         command: BlockCommand,
     },
 
+    Rollup {
+        #[command(subcommand)]
+        command: RollupCommand,
+    },
+
     State,
 
     Validate,
@@ -78,6 +86,18 @@ enum TxCommand {
 #[derive(Debug, Subcommand)]
 enum BlockCommand {
     Produce,
+}
+
+#[derive(Debug, Subcommand)]
+enum RollupCommand {
+    Batch {
+        #[arg(long)]
+        batch_number: u64,
+        #[arg(long)]
+        start_height: u64,
+        #[arg(long)]
+        end_height: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -146,6 +166,18 @@ fn main() -> Result<()> {
             write_chain(&cli.chain_file, &chain)?;
             println!("{}", serde_json::to_string_pretty(&block)?);
         }
+        Command::Rollup {
+            command:
+                RollupCommand::Batch {
+                    batch_number,
+                    start_height,
+                    end_height,
+                },
+        } => {
+            let chain = read_chain(&cli.chain_file)?;
+            let batch = rollup_batch_commitment(&chain, batch_number, start_height, end_height)?;
+            println!("{}", serde_json::to_string_pretty(&batch)?);
+        }
         Command::State => {
             let chain = read_chain(&cli.chain_file)?;
             println!(
@@ -169,27 +201,27 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn ensure_chain_does_not_exist(path: &PathBuf) -> Result<()> {
+fn ensure_chain_does_not_exist(path: &Path) -> Result<()> {
     if path.exists() {
         bail!("chain file {} already exists", path.display());
     }
     Ok(())
 }
 
-fn read_chain(path: &PathBuf) -> Result<Chain> {
+fn read_chain(path: &Path) -> Result<Chain> {
     let data = fs::read_to_string(path)
         .with_context(|| format!("failed to read chain file {}", path.display()))?;
     serde_json::from_str(&data)
         .with_context(|| format!("failed to parse chain file {}", path.display()))
 }
 
-fn write_chain(path: &PathBuf, chain: &Chain) -> Result<()> {
+fn write_chain(path: &Path, chain: &Chain) -> Result<()> {
     let json = serde_json::to_string_pretty(chain)?;
     fs::write(path, format!("{json}\n"))
         .with_context(|| format!("failed to write chain file {}", path.display()))
 }
 
-fn read_keypair(path: &PathBuf) -> Result<DevKeypair> {
+fn read_keypair(path: &Path) -> Result<DevKeypair> {
     let data = fs::read_to_string(path)
         .with_context(|| format!("failed to read key file {}", path.display()))?;
     let keypair: DevKeypair = serde_json::from_str(&data)

@@ -11,6 +11,8 @@ crates/
   wallet-core/      Reusable signing, verification, and address logic
   merkle-core/      Deterministic Merkle roots and inclusion proofs
   chain-core/       Accounts, transactions, blocks, state roots, validation
+contracts/
+  RollupSettlement.sol  Optimistic L1 settlement rules for rollup batches
 apps/
   wallet-cli/       CLI wrapper around wallet-core
   merkle-cli/       CLI wrapper around merkle-core
@@ -201,10 +203,28 @@ cargo run -p chain-cli -- --chain-file chain.json state
 cargo run -p chain-cli -- --chain-file chain.json validate
 ```
 
+Generate a rollup batch commitment suitable for the settlement contract:
+
+```bash
+cargo run -p chain-cli -- --chain-file chain.json rollup batch \
+  --batch-number 0 \
+  --start-height 1 \
+  --end-height 1
+```
+
 Block `0` is the genesis block. It has the null parent hash, no transactions,
 and a deterministic Merkle state root over the initial accounts. Later blocks
 include parent hashes, signed transactions, state roots, and block hashes.
 Validation replays the chain from the explicit genesis block.
+
+## Rollup Settlement Security
+
+[`contracts/RollupSettlement.sol`](contracts/RollupSettlement.sol) adds an
+optimistic settlement layer around the Rust state machine. The contract requires
+a bonded sequencer, state-root continuity, transaction/data commitments, a
+single pending batch, challenge bonds, a challenge window before finality, and
+forced-withdrawal requests for censorship resistance. The Rust CLI can export
+the roots and hashes that map directly to `submitBatch`.
 
 ## Phase 4: Blockchain Explorer API
 

@@ -9,6 +9,11 @@ use wallet_core::{
 };
 
 const NULL_PARENT_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const TRANSFER_PAYLOAD_DOMAIN: &str = "zk-rollup-transfer-v1";
+const TRANSACTION_HASH_DOMAIN: &str = "zk-rollup-transaction-v1";
+const BLOCK_HASH_DOMAIN: &str = "zk-rollup-block-v1";
+const BATCH_DATA_HASH_DOMAIN: &str = "zk-rollup-batch-data-v1";
+const LOCAL_CHAIN_ID: &str = "zk-rollup-local-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -48,8 +53,24 @@ pub struct Chain {
     pub blocks: Vec<Block>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RollupBatchCommitment {
+    pub batch_number: u64,
+    pub start_block_height: u64,
+    pub end_block_height: u64,
+    pub prev_state_root: String,
+    pub new_state_root: String,
+    pub transaction_root: String,
+    pub block_hash_root: String,
+    pub data_hash: String,
+    pub transaction_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct UnsignedTransfer<'a> {
+    domain: &'static str,
+    chain_id: &'static str,
     from: &'a str,
     to: &'a str,
     amount: u64,
@@ -59,10 +80,24 @@ struct UnsignedTransfer<'a> {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct BlockCommitment<'a> {
+    domain: &'static str,
+    chain_id: &'static str,
     height: u64,
     parent_hash: &'a str,
     transactions: &'a [Transfer],
     state_root: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct BatchDataCommitment<'a> {
+    domain: &'static str,
+    chain_id: &'static str,
+    batch_number: u64,
+    start_block_height: u64,
+    end_block_height: u64,
+    prev_state_root: &'a str,
+    new_state_root: &'a str,
+    blocks: &'a [Block],
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -113,6 +148,12 @@ pub enum ChainError {
     InvalidBlockHash { height: u64 },
     #[error("current account snapshot does not match replayed chain state")]
     AccountSnapshotMismatch,
+    #[error("rollup batch start height must be greater than zero")]
+    InvalidBatchStart,
+    #[error("rollup batch end height {end} is before start height {start}")]
+    InvalidBatchRange { start: u64, end: u64 },
+    #[error("rollup batch block height {height} does not exist")]
+    MissingBatchBlock { height: u64 },
 }
 
 impl From<WalletError> for ChainError {
@@ -317,8 +358,91 @@ pub fn state_root(accounts: &BTreeMap<String, Account>) -> String {
 }
 
 pub fn transaction_hash(transaction: &Transfer) -> String {
-    let payload = serde_json::to_vec(transaction).expect("serializing a transfer should not fail");
+    let payload = serde_json::to_vec(&json!({
+        "domain": TRANSACTION_HASH_DOMAIN,
+        "chain_id": LOCAL_CHAIN_ID,
+        "transfer": transaction,
+    }))
+    .expect("serializing a transfer commitment should not fail");
     encode_hex(&Sha256::digest(payload))
+}
+
+pub fn rollup_batch_commitment(
+    chain: &Chain,
+    batch_number: u64,
+    start_block_height: u64,
+    end_block_height: u64,
+) -> Result<RollupBatchCommitment, ChainError> {
+    validate_chain(chain)?;
+
+    if start_block_height == 0 {
+        return Err(ChainError::InvalidBatchStart);
+    }
+    if end_block_height < start_block_height {
+        return Err(ChainError::InvalidBatchRange {
+            start: start_block_height,
+            end: end_block_height,
+        });
+    }
+
+    let previous_block = block_by_height(chain, start_block_height - 1)?;
+    let blocks = (start_block_height..=end_block_height)
+        .map(|height| block_by_height(chain, height).cloned())
+        .collect::<Result<Vec<_>, _>>()?;
+    let last_block = blocks
+        .last()
+        .expect("valid batch range must produce at least one block");
+
+    let transaction_leaves =
+        blocks
+            .iter()
+            .flat_map(|block| {
+                block.transactions.iter().enumerate().map(
+                    move |(transaction_index, transaction)| {
+                        json!({
+                            "block_height": block.height,
+                            "transaction_index": transaction_index,
+                            "transaction_hash": transaction_hash(transaction),
+                            "transfer": transaction,
+                        })
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+    let block_hash_leaves = blocks
+        .iter()
+        .map(|block| {
+            json!({
+                "height": block.height,
+                "block_hash": block.block_hash,
+                "state_root": block.state_root,
+            })
+        })
+        .collect::<Vec<_>>();
+    let data = BatchDataCommitment {
+        domain: BATCH_DATA_HASH_DOMAIN,
+        chain_id: LOCAL_CHAIN_ID,
+        batch_number,
+        start_block_height,
+        end_block_height,
+        prev_state_root: &previous_block.state_root,
+        new_state_root: &last_block.state_root,
+        blocks: &blocks,
+    };
+    let data_payload =
+        serde_json::to_vec(&data).expect("serializing a rollup batch should not fail");
+
+    Ok(RollupBatchCommitment {
+        batch_number,
+        start_block_height,
+        end_block_height,
+        prev_state_root: previous_block.state_root.clone(),
+        new_state_root: last_block.state_root.clone(),
+        transaction_root: root_hex(&transaction_leaves),
+        block_hash_root: root_hex(&block_hash_leaves),
+        data_hash: encode_hex(&Sha256::digest(data_payload)),
+        transaction_count: transaction_leaves.len(),
+    })
 }
 
 pub fn validate_transaction(
@@ -429,6 +553,14 @@ fn accounts_from_genesis(
     Ok(accounts)
 }
 
+fn block_by_height(chain: &Chain, height: u64) -> Result<&Block, ChainError> {
+    chain
+        .blocks
+        .iter()
+        .find(|block| block.height == height)
+        .ok_or(ChainError::MissingBatchBlock { height })
+}
+
 fn transfer_payload(
     from: &str,
     to: &str,
@@ -437,6 +569,8 @@ fn transfer_payload(
     public_key_base64: &str,
 ) -> String {
     serde_json::to_string(&UnsignedTransfer {
+        domain: TRANSFER_PAYLOAD_DOMAIN,
+        chain_id: LOCAL_CHAIN_ID,
         from,
         to,
         amount,
@@ -453,6 +587,8 @@ fn block_hash(
     state_root: &str,
 ) -> String {
     let payload = serde_json::to_vec(&BlockCommitment {
+        domain: BLOCK_HASH_DOMAIN,
+        chain_id: LOCAL_CHAIN_ID,
         height,
         parent_hash,
         transactions,
@@ -522,6 +658,47 @@ mod tests {
                 expected: 1,
                 actual: 0,
             })
+        );
+    }
+
+    #[test]
+    fn rejects_signature_from_wrong_protocol_domain() {
+        let alice = create_keypair();
+        let bob = create_keypair();
+        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
+        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let mut chain = new_chain(vec![Account {
+            address: alice_address.clone(),
+            balance: 100,
+            nonce: 0,
+        }])
+        .unwrap();
+        finalize_genesis(&mut chain).unwrap();
+
+        let public_key_base64 = public_key_from_secret(&alice.secret_key_base64).unwrap();
+        let wrong_payload = serde_json::to_string(&json!({
+            "domain": "different-protocol",
+            "chain_id": LOCAL_CHAIN_ID,
+            "from": alice_address,
+            "to": bob_address,
+            "amount": 10,
+            "nonce": 0,
+            "public_key_base64": public_key_base64,
+        }))
+        .unwrap();
+        let signed = sign_message(&alice.secret_key_base64, &wrong_payload).unwrap();
+        let transaction = Transfer {
+            from: address_from_public_key(&signed.public_key_base64).unwrap(),
+            to: bob_address,
+            amount: 10,
+            nonce: 0,
+            public_key_base64: signed.public_key_base64,
+            signature_base64: signed.signature_base64,
+        };
+
+        assert_eq!(
+            add_pending_transaction(&mut chain, transaction),
+            Err(ChainError::InvalidSignature)
         );
     }
 
@@ -636,5 +813,57 @@ mod tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn builds_rollup_batch_commitment_from_block_range() {
+        let alice = create_keypair();
+        let bob = create_keypair();
+        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
+        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let mut chain = new_chain(vec![Account {
+            address: alice_address,
+            balance: 100,
+            nonce: 0,
+        }])
+        .unwrap();
+        let genesis = finalize_genesis(&mut chain).unwrap();
+
+        let first = sign_transfer(&alice.secret_key_base64, bob_address.clone(), 25, 0).unwrap();
+        add_pending_transaction(&mut chain, first).unwrap();
+        let block = produce_block(&mut chain).unwrap();
+
+        let batch = rollup_batch_commitment(&chain, 0, 1, 1).unwrap();
+
+        assert_eq!(batch.batch_number, 0);
+        assert_eq!(batch.start_block_height, 1);
+        assert_eq!(batch.end_block_height, 1);
+        assert_eq!(batch.prev_state_root, genesis.state_root);
+        assert_eq!(batch.new_state_root, block.state_root);
+        assert_eq!(batch.transaction_count, 1);
+        assert_eq!(batch.transaction_root.len(), 64);
+        assert_eq!(batch.block_hash_root.len(), 64);
+        assert_eq!(batch.data_hash.len(), 64);
+    }
+
+    #[test]
+    fn rejects_rollup_batch_that_starts_at_genesis() {
+        let chain = new_chain(Vec::new()).unwrap();
+
+        assert_eq!(
+            rollup_batch_commitment(&chain, 0, 0, 0),
+            Err(ChainError::InvalidBatchStart)
+        );
+    }
+
+    #[test]
+    fn rejects_rollup_batch_missing_block() {
+        let mut chain = new_chain(Vec::new()).unwrap();
+        finalize_genesis(&mut chain).unwrap();
+
+        assert_eq!(
+            rollup_batch_commitment(&chain, 0, 1, 1),
+            Err(ChainError::MissingBatchBlock { height: 1 })
+        );
     }
 }
