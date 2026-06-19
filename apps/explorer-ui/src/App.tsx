@@ -56,6 +56,10 @@ export function App() {
     retry: false,
   });
   const connectionError = firstError(summary.error, blocks.error, health.error);
+  const connectionMessage = connectionError ?? "Backend request failed";
+  const hasCoreData = Boolean(summary.data && blocks.data);
+  const isOffline = Boolean(connectionError && !hasCoreData);
+  const isStale = Boolean(connectionError && hasCoreData);
 
   useEffect(() => {
     if (selectedHeight === null && blocks.data?.[0]) {
@@ -119,8 +123,8 @@ export function App() {
           <div>
             <h1 className="text-2xl font-semibold leading-tight text-white sm:text-3xl">RollupLens Explorer</h1>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-white/56">
-              <Badge tone={health.data?.status === "ok" ? "good" : "warn"}>
-                {connectionError ? "offline" : health.data?.status ?? "connecting"}
+              <Badge tone={health.data?.status === "ok" && !isStale ? "good" : "warn"}>
+                {isOffline ? "offline" : isStale ? "stale" : health.data?.status ?? "connecting"}
               </Badge>
               <span>Live chain read path</span>
               <span className="hidden text-white/24 sm:inline">/</span>
@@ -136,7 +140,8 @@ export function App() {
         </div>
       </header>
 
-      {connectionError && <ConnectionError message={connectionError} />}
+      {isOffline && <ConnectionError message={connectionMessage} />}
+      {isStale && <StaleDataNotice message={connectionMessage} />}
 
       <AnimatePresence>
         {(searchResult || searchError) && (
@@ -253,6 +258,25 @@ function ConnectionError({ message }: { message: string }) {
           <div className="flex items-center gap-2 text-sm font-semibold text-rose">
             <XCircle className="h-4 w-4" />
             Backend connection failed
+          </div>
+          <div className="mt-2 text-sm text-white/68">{message}</div>
+        </div>
+        <div className="hash max-w-full rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-white/58 sm:max-w-md">
+          {API_BASE}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function StaleDataNotice({ message }: { message: string }) {
+  return (
+    <Panel className="border-amber/25 bg-amber/10 p-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-amber">
+            <ShieldAlert className="h-4 w-4" />
+            Showing last successful backend data
           </div>
           <div className="mt-2 text-sm text-white/68">{message}</div>
         </div>

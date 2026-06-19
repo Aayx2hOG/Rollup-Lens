@@ -183,3 +183,13 @@ cd apps/explorer-ui
 bun install
 bun run dev
 ```
+
+For a deployed no-database live demo, run the backend with auto-generated
+blocks:
+
+```bash
+cargo run -p explorer-api -- \
+  --auto-demo \
+  --auto-demo-interval-seconds 10 \
+  --bind 0.0.0.0:3000
+```

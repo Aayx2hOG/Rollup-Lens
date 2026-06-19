@@ -342,3 +342,16 @@ bun run dev
 
 During development, Vite proxies `/api/*` to the explorer API on
 `http://127.0.0.1:3000`.
+
+For a no-database live demo backend, run the API in auto-demo mode:
+
+```bash
+cargo run -p explorer-api -- \
+  --auto-demo \
+  --auto-demo-interval-seconds 10 \
+  --bind 0.0.0.0:3000
+```
+
+Auto-demo mode creates a server-side chain and produces a new signed transfer
+block on a timer. It is suitable for a free Render deployment without Postgres;
+state resets if the free service restarts.
