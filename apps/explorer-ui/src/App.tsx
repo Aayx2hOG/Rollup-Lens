@@ -55,11 +55,12 @@ export function App() {
     enabled: Boolean(selectedTx),
     retry: false,
   });
-  const connectionError = firstError(summary.error, blocks.error, health.error);
+  const connectionError = firstError(summary.error, blocks.error);
   const connectionMessage = connectionError ?? "Backend request failed";
   const hasCoreData = Boolean(summary.data && blocks.data);
   const isOffline = Boolean(connectionError && !hasCoreData);
   const isStale = Boolean(connectionError && hasCoreData);
+  const readStatus = isOffline ? "offline" : isStale ? "stale" : hasCoreData ? "ok" : "connecting";
 
   useEffect(() => {
     if (selectedHeight === null && blocks.data?.[0]) {
@@ -123,8 +124,8 @@ export function App() {
           <div>
             <h1 className="text-2xl font-semibold leading-tight text-white sm:text-3xl">RollupLens Explorer</h1>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-white/56">
-              <Badge tone={health.data?.status === "ok" && !isStale ? "good" : "warn"}>
-                {isOffline ? "offline" : isStale ? "stale" : health.data?.status ?? "connecting"}
+              <Badge tone={readStatus === "ok" ? "good" : "warn"}>
+                {readStatus}
               </Badge>
               <span>Live chain read path</span>
               <span className="hidden text-white/24 sm:inline">/</span>
@@ -596,9 +597,9 @@ function IndexerView({
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
       <Panel className="p-4">
-        <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="Read path health" action={health?.status ?? "connecting"} flush />
+        <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="Read path health" action={health?.status ?? "optional"} flush />
         <div className="mt-4 grid gap-3">
-          <StatusLine label="API status" ok={health?.status === "ok"} value={health?.status ?? "unknown"} />
+          <StatusLine label="Health endpoint" ok={health?.status === "ok"} value={health?.status ?? "unavailable"} />
           <StatusLine label="Chain validation" ok={Boolean(summary?.valid)} value={summary?.valid ? "valid" : "invalid"} />
           <StatusLine label="Indexed height" ok value={summary?.height ?? "none"} />
           <StatusLine label="Block rows" ok value={summary?.block_count ?? 0} />
