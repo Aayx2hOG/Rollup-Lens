@@ -19,6 +19,9 @@ struct Cli {
     #[arg(long)]
     database_url: Option<String>,
 
+    #[arg(long)]
+    json_mode: bool,
+
     #[arg(long, default_value = "0.0.0.0:3000")]
     bind: SocketAddr,
 }
@@ -30,7 +33,10 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to bind explorer API to {}", cli.bind))?;
 
-    let router = if let Some(database_url) = database_url(cli.database_url) {
+    let router = if cli.json_mode {
+        println!("serving chain JSON file {}", cli.chain_file.display());
+        app(cli.chain_file)
+    } else if let Some(database_url) = database_url(cli.database_url) {
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(&database_url)

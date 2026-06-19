@@ -231,7 +231,7 @@ the roots and hashes that map directly to `submitBatch`.
 Start a read-only explorer API over a Phase 3 chain file:
 
 ```bash
-cargo run -p explorer-api -- --chain-file chain.json --bind 0.0.0.0:3000
+cargo run -p explorer-api -- --json-mode --chain-file chain.json --bind 0.0.0.0:3000
 ```
 
 Available endpoints:
@@ -328,3 +328,17 @@ cargo run -p chain-indexer -- --chain-file chain.json --init-schema
 In Postgres mode, the explorer API keeps a short in-memory cache for hot read
 endpoints and exposes recent persistent errors through `GET /errors` and
 `GET /errors/latest`.
+
+## Explorer UI
+
+The React explorer frontend lives in [`apps/explorer-ui`](apps/explorer-ui).
+It uses Bun, Vite, Tailwind, TanStack Query, Framer Motion, and lucide icons.
+
+```bash
+cd apps/explorer-ui
+bun install
+bun run dev
+```
+
+During development, Vite proxies `/api/*` to the explorer API on
+`http://127.0.0.1:3000`.

@@ -75,6 +75,16 @@ struct TransactionView {
 }
 
 #[derive(Debug, Serialize)]
+struct BlockView {
+    height: u64,
+    parent_hash: String,
+    transactions: Vec<Transfer>,
+    state_root: String,
+    block_hash: String,
+    transaction_views: Vec<TransactionView>,
+}
+
+#[derive(Debug, Serialize)]
 struct ErrorEventView {
     id: i64,
     service: String,
@@ -88,7 +98,7 @@ struct ErrorEventView {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", content = "data")]
 enum SearchResult {
-    Block(Block),
+    Block(BlockView),
     Account(Account),
     Transaction(TransactionView),
 }
@@ -377,11 +387,11 @@ impl ChainSource {
         }
     }
 
-    async fn block_by_height(&self, height: u64) -> Result<Option<Block>, ApiError> {
+    async fn block_by_height(&self, height: u64) -> Result<Option<BlockView>, ApiError> {
         match self {
             ChainSource::Json { chain_file } => {
                 let chain = read_chain(chain_file)?;
-                Ok(find_block_by_height(&chain, height).cloned())
+                Ok(find_block_by_height(&chain, height).map(block_view))
             }
             ChainSource::Postgres { pool } => {
                 let row = sqlx::query("SELECT raw_block FROM blocks WHERE height = $1")
@@ -390,17 +400,20 @@ impl ChainSource {
                     .await
                     .map_err(database_error)?;
 
-                row.map(|row| parse_json_value(row.get("raw_block"), "block"))
-                    .transpose()
+                row.map(|row| {
+                    parse_json_value::<Block>(row.get("raw_block"), "block")
+                        .map(|block| block_view(&block))
+                })
+                .transpose()
             }
         }
     }
 
-    async fn block_by_hash(&self, hash: &str) -> Result<Option<Block>, ApiError> {
+    async fn block_by_hash(&self, hash: &str) -> Result<Option<BlockView>, ApiError> {
         match self {
             ChainSource::Json { chain_file } => {
                 let chain = read_chain(chain_file)?;
-                Ok(find_block_by_hash(&chain, hash).cloned())
+                Ok(find_block_by_hash(&chain, hash).map(block_view))
             }
             ChainSource::Postgres { pool } => {
                 let row = sqlx::query("SELECT raw_block FROM blocks WHERE block_hash = $1")
@@ -409,8 +422,11 @@ impl ChainSource {
                     .await
                     .map_err(database_error)?;
 
-                row.map(|row| parse_json_value(row.get("raw_block"), "block"))
-                    .transpose()
+                row.map(|row| {
+                    parse_json_value::<Block>(row.get("raw_block"), "block")
+                        .map(|block| block_view(&block))
+                })
+                .transpose()
             }
         }
     }
@@ -635,6 +651,27 @@ fn block_summary(block: &Block) -> BlockSummary {
         state_root: block.state_root.clone(),
         block_hash: block.block_hash.clone(),
         transaction_count: block.transactions.len(),
+    }
+}
+
+fn block_view(block: &Block) -> BlockView {
+    BlockView {
+        height: block.height,
+        parent_hash: block.parent_hash.clone(),
+        transactions: block.transactions.clone(),
+        state_root: block.state_root.clone(),
+        block_hash: block.block_hash.clone(),
+        transaction_views: block
+            .transactions
+            .iter()
+            .enumerate()
+            .map(|(transaction_index, transaction)| TransactionView {
+                hash: transaction_hash(transaction),
+                block_height: Some(block.height),
+                transaction_index,
+                transfer: transaction.clone(),
+            })
+            .collect(),
     }
 }
 

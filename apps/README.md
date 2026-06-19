@@ -9,6 +9,8 @@ chain-cli       local JSON-backed blockchain state machine
 chain-indexer   Prisma/Postgres indexer for chain JSON data
 ```
 
+It also includes a React explorer frontend at `apps/explorer-ui`.
+
 ## Setup
 
 Create a local Prisma environment file:
@@ -164,4 +166,20 @@ You can still override the env file per command:
 cargo run -p chain-indexer -- \
   --chain-file chain.json \
   --database-url "postgresql://postgres:postgres@localhost:5432/zk_rollup"
+```
+
+## Explorer UI
+
+Run the API against the local JSON chain, bypassing `prisma/.env`:
+
+```bash
+cargo run -p explorer-api -- --json-mode --chain-file chain.json --bind 127.0.0.1:3000
+```
+
+Then start the frontend:
+
+```bash
+cd apps/explorer-ui
+bun install
+bun run dev
 ```
