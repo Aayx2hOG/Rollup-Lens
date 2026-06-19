@@ -1,5 +1,5 @@
 const configuredBase = import.meta.env.VITE_EXPLORER_API_BASE as string | undefined;
-const API_BASE = configuredBase?.replace(/\/$/, "") ?? "/api";
+export const API_BASE = configuredBase?.replace(/\/$/, "") ?? "/api";
 
 export type ChainSummary = {
   height: number | null;

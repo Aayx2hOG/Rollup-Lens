@@ -1,0 +1,52 @@
+{
+  "genesis_accounts": [
+    {
+      "address": "uSbOuIR3rEvYN9H4pSLcugOldjE=",
+      "balance": 100,
+      "nonce": 0
+    },
+    {
+      "address": "3IQQ5l3o6d5kIjc4so3ADuqw80k=",
+      "balance": 0,
+      "nonce": 0
+    }
+  ],
+  "accounts": {
+    "3IQQ5l3o6d5kIjc4so3ADuqw80k=": {
+      "address": "3IQQ5l3o6d5kIjc4so3ADuqw80k=",
+      "balance": 25,
+      "nonce": 0
+    },
+    "uSbOuIR3rEvYN9H4pSLcugOldjE=": {
+      "address": "uSbOuIR3rEvYN9H4pSLcugOldjE=",
+      "balance": 75,
+      "nonce": 1
+    }
+  },
+  "pending_transactions": [],
+  "blocks": [
+    {
+      "height": 0,
+      "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transactions": [],
+      "state_root": "7dbe2edd8351a25dd474559c27c9556b804b06e1cd121d4f4a227884f185b566",
+      "block_hash": "30206dcf9c5736f4a4094cd5435e6659cbcd87a48b7e1cdd8ab46d7689e9eeeb"
+    },
+    {
+      "height": 1,
+      "parent_hash": "30206dcf9c5736f4a4094cd5435e6659cbcd87a48b7e1cdd8ab46d7689e9eeeb",
+      "transactions": [
+        {
+          "from": "uSbOuIR3rEvYN9H4pSLcugOldjE=",
+          "to": "3IQQ5l3o6d5kIjc4so3ADuqw80k=",
+          "amount": 25,
+          "nonce": 0,
+          "public_key_base64": "efKkbFP/2yzGsh4iSVJykggCON0c9RavzdEy2AYkzfQ=",
+          "signature_base64": "Iyz0pmgqssoD/rCoM8yk5dk2TuJjaD+9RGopotgV/gmoEd/tDYUGaqgDeDnsBedMiGJ4N1ck4ipIAWyFsTm2Dw=="
+        }
+      ],
+      "state_root": "4d6232faf60125881e30279e68c97e6ae3483b5631ea061bc92739eb2382f95a",
+      "block_hash": "455275f0a900178dd8fa53f8a5c757889788bce95ce8573aeb6ca0999739519f"
+    }
+  ]
+}

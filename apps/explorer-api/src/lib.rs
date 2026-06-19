@@ -18,6 +18,7 @@ use chain_core::{state_root, transaction_hash, validate_chain, Account, Block, C
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
+use tower_http::cors::CorsLayer;
 
 const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
 
@@ -138,6 +139,7 @@ fn app_with_source(source: ChainSource) -> Router {
         .route("/errors", get(errors))
         .route("/errors/latest", get(latest_error))
         .route("/search/:query", get(search))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
