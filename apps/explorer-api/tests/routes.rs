@@ -8,12 +8,26 @@ use chain_core::{
     add_pending_transaction, finalize_genesis, new_chain, produce_block, sign_transfer,
     transaction_hash, Account,
 };
-use explorer_api::app;
+use explorer_api::{app, app_with_pool};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use wallet_core::{address_from_public_key, create_keypair};
+
+#[tokio::test]
+async fn postgres_router_exposes_static_routes_without_database_queries() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://postgres:postgres@localhost/zk_rollup")
+        .unwrap();
+    let app = app_with_pool(pool);
+
+    let index = get_json(app.clone(), "/").await;
+    assert_eq!(index["name"], json!("zk-rollup explorer api"));
+
+    let health = get_json(app, "/health").await;
+    assert_eq!(health["status"], json!("ok"));
+}
 
 #[tokio::test]
 async fn returns_api_index() {
