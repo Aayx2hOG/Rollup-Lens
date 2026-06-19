@@ -300,9 +300,31 @@ bunx prisma migrate dev
 cargo run -p chain-indexer -- --chain-file chain.json
 ```
 
+Run the indexer as a cron-style polling worker while `chain.json` changes:
+
+```bash
+cargo run -p chain-indexer -- \
+  --chain-file chain.json \
+  --watch \
+  --poll-interval-seconds 5
+```
+
+Persist known-good chain snapshots after successful indexing:
+
+```bash
+cargo run -p chain-indexer -- \
+  --chain-file chain.json \
+  --watch \
+  --backup-dir backups/chains
+```
+
 `--init-schema` is a Rust-only local shortcut when you are not using Prisma
 Migrate:
 
 ```bash
 cargo run -p chain-indexer -- --chain-file chain.json --init-schema
 ```
+
+In Postgres mode, the explorer API keeps a short in-memory cache for hot read
+endpoints and exposes recent persistent errors through `GET /errors` and
+`GET /errors/latest`.

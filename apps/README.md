@@ -133,6 +133,24 @@ bunx prisma migrate dev
 cargo run -p chain-indexer -- --chain-file chain.json
 ```
 
+Run it as a long-lived polling worker:
+
+```bash
+cargo run -p chain-indexer -- \
+  --chain-file chain.json \
+  --watch \
+  --poll-interval-seconds 5
+```
+
+Use `--backup-dir` to save known-good chain snapshots after successful indexing:
+
+```bash
+cargo run -p chain-indexer -- \
+  --chain-file chain.json \
+  --watch \
+  --backup-dir backups/chains
+```
+
 Use `--init-schema` for local development when you want the Rust indexer to
 apply the checked-in SQL migration without Prisma:
 

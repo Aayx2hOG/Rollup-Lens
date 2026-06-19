@@ -1,11 +1,18 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result};
 use chain_core::{transaction_hash, validate_chain, Chain};
 use clap::Parser;
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 
-const INIT_SQL: &str = include_str!("../../../prisma/migrations/0001_init/migration.sql");
+const INIT_SQL: &[&str] = &[
+    include_str!("../../../prisma/migrations/0001_init/migration.sql"),
+    include_str!("../../../prisma/migrations/0002_error_events/migration.sql"),
+];
 const PRISMA_ENV_PATH: &str = "prisma/.env";
 
 #[derive(Debug, Parser)]
@@ -20,15 +27,25 @@ struct Cli {
 
     #[arg(long)]
     init_schema: bool,
+
+    #[arg(long)]
+    watch: bool,
+
+    #[arg(long, default_value_t = 5)]
+    poll_interval_seconds: u64,
+
+    #[arg(long)]
+    backup_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let database_url = database_url(cli.database_url)?;
-    let chain = read_chain(&cli.chain_file)?;
-    validate_chain(&chain).context("chain validation failed; refusing to index invalid data")?;
+    if cli.poll_interval_seconds == 0 {
+        anyhow::bail!("--poll-interval-seconds must be greater than zero");
+    }
 
+    let database_url = database_url(cli.database_url)?;
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
@@ -39,16 +56,64 @@ async fn main() -> Result<()> {
         init_schema(&pool).await?;
     }
 
-    let result = reindex_chain(&pool, &chain).await?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "indexed_blocks": result.blocks,
-            "indexed_transactions": result.transactions,
-            "indexed_accounts": result.accounts,
-            "last_indexed_height": result.last_indexed_height,
-        }))?
-    );
+    if cli.watch {
+        watch_chain(
+            &pool,
+            cli.chain_file,
+            Duration::from_secs(cli.poll_interval_seconds),
+            cli.backup_dir,
+        )
+        .await?;
+    } else {
+        let chain_data = match read_chain_data(&cli.chain_file) {
+            Ok(chain_data) => chain_data,
+            Err(error) => {
+                record_error_event(
+                    &pool,
+                    "error",
+                    "failed to read chain file",
+                    serde_json::json!({
+                        "chain_file": cli.chain_file.display().to_string(),
+                        "error": format!("{error:#}"),
+                    }),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let result = match index_chain_data(&pool, &cli.chain_file, &chain_data).await {
+            Ok(result) => result,
+            Err(error) => {
+                record_error_event(
+                    &pool,
+                    "error",
+                    "index run failed",
+                    serde_json::json!({
+                        "chain_file": cli.chain_file.display().to_string(),
+                        "error": format!("{error:#}"),
+                    }),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if let Some(backup_dir) = cli.backup_dir {
+            if let Err(error) = write_chain_backup(&backup_dir, &chain_data, result) {
+                record_error_event(
+                    &pool,
+                    "warning",
+                    "failed to write chain backup",
+                    serde_json::json!({
+                        "backup_dir": backup_dir.display().to_string(),
+                        "error": format!("{error:#}"),
+                    }),
+                )
+                .await;
+                return Err(error);
+            }
+        }
+        print_index_result("indexed", result)?;
+    }
 
     Ok(())
 }
@@ -80,23 +145,184 @@ fn database_url_from_prisma_env() -> Option<String> {
     None
 }
 
-fn read_chain(path: &PathBuf) -> Result<Chain> {
-    let data = fs::read_to_string(path)
-        .with_context(|| format!("failed to read chain file {}", path.display()))?;
-    serde_json::from_str(&data)
+fn read_chain_data(path: &PathBuf) -> Result<String> {
+    fs::read_to_string(path)
+        .with_context(|| format!("failed to read chain file {}", path.display()))
+}
+
+fn parse_chain(path: &PathBuf, data: &str) -> Result<Chain> {
+    serde_json::from_str(data)
         .with_context(|| format!("failed to parse chain file {}", path.display()))
 }
 
 async fn init_schema(pool: &PgPool) -> Result<()> {
-    for statement in INIT_SQL
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
-    {
-        pool.execute(statement)
-            .await
-            .with_context(|| format!("failed to execute schema statement: {statement}"))?;
+    for migration in INIT_SQL {
+        for statement in migration
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+        {
+            pool.execute(statement)
+                .await
+                .with_context(|| format!("failed to execute schema statement: {statement}"))?;
+        }
     }
+
+    Ok(())
+}
+
+async fn watch_chain(
+    pool: &PgPool,
+    chain_file: PathBuf,
+    poll_interval: Duration,
+    backup_dir: Option<PathBuf>,
+) -> Result<()> {
+    let mut last_indexed_data: Option<String> = None;
+    let mut last_error_signature: Option<String> = None;
+
+    println!(
+        "watching {} every {}s",
+        chain_file.display(),
+        poll_interval.as_secs()
+    );
+
+    loop {
+        match read_chain_data(&chain_file) {
+            Ok(chain_data) if last_indexed_data.as_ref() == Some(&chain_data) => {
+                println!("chain file unchanged; skipping index run");
+            }
+            Ok(chain_data) => match index_chain_data(pool, &chain_file, &chain_data).await {
+                Ok(result) => {
+                    if let Some(backup_dir) = &backup_dir {
+                        if let Err(error) = write_chain_backup(backup_dir, &chain_data, result) {
+                            eprintln!("failed to write chain backup: {error:#}");
+                            record_error_event(
+                                pool,
+                                "warning",
+                                "failed to write chain backup",
+                                serde_json::json!({
+                                    "backup_dir": backup_dir.display().to_string(),
+                                    "error": format!("{error:#}"),
+                                }),
+                            )
+                            .await;
+                        }
+                    }
+                    print_index_result("indexed", result)?;
+                    last_indexed_data = Some(chain_data);
+                    last_error_signature = None;
+                }
+                Err(error) => {
+                    eprintln!("index run failed: {error:#}");
+                    let error_text = format!("{error:#}");
+                    let signature = format!("index:{error_text}");
+                    if last_error_signature.as_ref() != Some(&signature) {
+                        record_error_event(
+                            pool,
+                            "error",
+                            "index run failed",
+                            serde_json::json!({
+                                "chain_file": chain_file.display().to_string(),
+                                "error": error_text,
+                            }),
+                        )
+                        .await;
+                        last_error_signature = Some(signature);
+                    }
+                }
+            },
+            Err(error) => {
+                eprintln!("failed to read chain file: {error:#}");
+                let error_text = format!("{error:#}");
+                let signature = format!("read:{error_text}");
+                if last_error_signature.as_ref() != Some(&signature) {
+                    record_error_event(
+                        pool,
+                        "error",
+                        "failed to read chain file",
+                        serde_json::json!({
+                            "chain_file": chain_file.display().to_string(),
+                            "error": error_text,
+                        }),
+                    )
+                    .await;
+                    last_error_signature = Some(signature);
+                }
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+fn write_chain_backup(
+    backup_dir: &PathBuf,
+    chain_data: &str,
+    result: IndexResult,
+) -> Result<PathBuf> {
+    fs::create_dir_all(backup_dir)
+        .with_context(|| format!("failed to create backup dir {}", backup_dir.display()))?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs();
+    let height = result
+        .last_indexed_height
+        .map(|height| height.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let backup_path = backup_dir.join(format!("chain-{timestamp}-height-{height}.json"));
+
+    fs::write(&backup_path, chain_data)
+        .with_context(|| format!("failed to write backup {}", backup_path.display()))?;
+    println!("wrote chain backup {}", backup_path.display());
+
+    Ok(backup_path)
+}
+
+async fn record_error_event(
+    pool: &PgPool,
+    severity: &str,
+    message: &str,
+    context: serde_json::Value,
+) {
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO error_events (service, severity, message, context)
+        VALUES ('chain-indexer', $1, $2, $3)
+        "#,
+    )
+    .bind(severity)
+    .bind(message)
+    .bind(context)
+    .execute(pool)
+    .await
+    {
+        eprintln!("failed to persist error event: {error}");
+    }
+}
+
+async fn index_chain_data(
+    pool: &PgPool,
+    chain_file: &PathBuf,
+    chain_data: &str,
+) -> Result<IndexResult> {
+    let chain = parse_chain(chain_file, chain_data)?;
+    validate_chain(&chain).context("chain validation failed; refusing to index invalid data")?;
+    reindex_chain(pool, &chain).await
+}
+
+fn print_index_result(status: &str, result: IndexResult) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": status,
+            "indexed_blocks": result.blocks,
+            "indexed_transactions": result.transactions,
+            "indexed_accounts": result.accounts,
+            "last_indexed_height": result.last_indexed_height,
+        }))?
+    );
 
     Ok(())
 }

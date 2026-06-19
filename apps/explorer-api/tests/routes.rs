@@ -16,17 +16,14 @@ use tower::ServiceExt;
 use wallet_core::{address_from_public_key, create_keypair};
 
 #[tokio::test]
-async fn postgres_router_exposes_static_routes_without_database_queries() {
+async fn postgres_router_exposes_index_without_database_queries() {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgresql://postgres:postgres@localhost/zk_rollup")
         .unwrap();
     let app = app_with_pool(pool);
 
-    let index = get_json(app.clone(), "/").await;
+    let index = get_json(app, "/").await;
     assert_eq!(index["name"], json!("zk-rollup explorer api"));
-
-    let health = get_json(app, "/health").await;
-    assert_eq!(health["status"], json!("ok"));
 }
 
 #[tokio::test]

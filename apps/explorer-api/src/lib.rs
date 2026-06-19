@@ -1,4 +1,11 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::{Path, State},
@@ -9,12 +16,26 @@ use axum::{
 };
 use chain_core::{state_root, transaction_hash, validate_chain, Account, Block, Chain, Transfer};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
+
+const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 struct AppState {
     source: ChainSource,
+    cache: Arc<Mutex<ResponseCache>>,
+}
+
+#[derive(Debug, Default)]
+struct ResponseCache {
+    entries: HashMap<String, CacheEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    expires_at: Instant,
+    value: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +75,17 @@ struct TransactionView {
 }
 
 #[derive(Debug, Serialize)]
+struct ErrorEventView {
+    id: i64,
+    service: String,
+    severity: String,
+    message: String,
+    context: Value,
+    created_at: String,
+    resolved_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "kind", content = "data")]
 enum SearchResult {
     Block(Block),
@@ -79,7 +111,10 @@ pub fn app_with_pool(pool: PgPool) -> Router {
 }
 
 fn app_with_source(source: ChainSource) -> Router {
-    let state = Arc::new(AppState { source });
+    let state = Arc::new(AppState {
+        source,
+        cache: Arc::new(Mutex::new(ResponseCache::default())),
+    });
 
     Router::new()
         .route("/", get(index))
@@ -90,15 +125,27 @@ fn app_with_source(source: ChainSource) -> Router {
         .route("/blocks/hash/:hash", get(block_by_hash))
         .route("/accounts/:address", get(account_by_address))
         .route("/transactions/:hash", get(transaction_by_hash))
+        .route("/errors", get(errors))
+        .route("/errors/latest", get(latest_error))
         .route("/search/:query", get(search))
         .with_state(state)
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok" }))
+async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let latest_error = state.source.latest_error().await?;
+    let status = if latest_error.is_some() {
+        "degraded"
+    } else {
+        "ok"
+    };
+
+    Ok(Json(json!({
+        "status": status,
+        "latest_error": latest_error,
+    })))
 }
 
-async fn index() -> Json<serde_json::Value> {
+async fn index() -> Json<Value> {
     Json(json!({
         "name": "zk-rollup explorer api",
         "endpoints": [
@@ -109,87 +156,123 @@ async fn index() -> Json<serde_json::Value> {
             "GET /blocks/hash/:hash",
             "GET /accounts/:address",
             "GET /transactions/:hash",
+            "GET /errors",
+            "GET /errors/latest",
             "GET /search/:query"
         ]
     }))
 }
 
-async fn chain_summary(State(state): State<Arc<AppState>>) -> Result<Json<ChainSummary>, ApiError> {
-    state.source.chain_summary().await.map(Json)
+async fn chain_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    cached_json(state, "chain:summary".to_string(), |source| async move {
+        source.chain_summary().await
+    })
+    .await
 }
 
-async fn blocks(State(state): State<Arc<AppState>>) -> Result<Json<Vec<BlockSummary>>, ApiError> {
-    state.source.blocks().await.map(Json)
+async fn blocks(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    cached_json(state, "blocks".to_string(), |source| async move {
+        source.blocks().await
+    })
+    .await
 }
 
 async fn block_by_height(
     State(state): State<Arc<AppState>>,
     Path(height): Path<u64>,
-) -> Result<Json<Block>, ApiError> {
-    state
-        .source
-        .block_by_height(height)
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("block height {height} not found")))
+) -> Result<Json<Value>, ApiError> {
+    cached_json(
+        state,
+        format!("blocks:height:{height}"),
+        |source| async move {
+            source
+                .block_by_height(height)
+                .await?
+                .ok_or_else(|| ApiError::NotFound(format!("block height {height} not found")))
+        },
+    )
+    .await
 }
 
 async fn block_by_hash(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-) -> Result<Json<Block>, ApiError> {
-    state
-        .source
-        .block_by_hash(&hash)
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("block hash {hash} not found")))
+) -> Result<Json<Value>, ApiError> {
+    cached_json(state, format!("blocks:hash:{hash}"), |source| async move {
+        source
+            .block_by_hash(&hash)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("block hash {hash} not found")))
+    })
+    .await
 }
 
 async fn account_by_address(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,
-) -> Result<Json<Account>, ApiError> {
-    state
-        .source
-        .account_by_address(&address)
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("account {address} not found")))
+) -> Result<Json<Value>, ApiError> {
+    cached_json(state, format!("accounts:{address}"), |source| async move {
+        source
+            .account_by_address(&address)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("account {address} not found")))
+    })
+    .await
 }
 
 async fn transaction_by_hash(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-) -> Result<Json<TransactionView>, ApiError> {
-    state
-        .source
-        .transaction_by_hash(&hash)
-        .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("transaction {hash} not found")))
+) -> Result<Json<Value>, ApiError> {
+    cached_json(state, format!("transactions:{hash}"), |source| async move {
+        source
+            .transaction_by_hash(&hash)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("transaction {hash} not found")))
+    })
+    .await
+}
+
+async fn errors(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    cached_json(state, "errors".to_string(), |source| async move {
+        source.error_events().await
+    })
+    .await
+}
+
+async fn latest_error(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    cached_json(state, "errors:latest".to_string(), |source| async move {
+        source
+            .latest_error()
+            .await?
+            .ok_or_else(|| ApiError::NotFound("no error events found".to_string()))
+    })
+    .await
 }
 
 async fn search(
     State(state): State<Arc<AppState>>,
     Path(query): Path<String>,
-) -> Result<Json<SearchResult>, ApiError> {
-    if let Some(block) = state.source.block_by_hash(&query).await? {
-        return Ok(Json(SearchResult::Block(block)));
-    }
-    if let Ok(height) = query.parse::<u64>() {
-        if let Some(block) = state.source.block_by_height(height).await? {
-            return Ok(Json(SearchResult::Block(block)));
+) -> Result<Json<Value>, ApiError> {
+    cached_json(state, format!("search:{query}"), |source| async move {
+        if let Some(block) = source.block_by_hash(&query).await? {
+            return Ok(SearchResult::Block(block));
         }
-    }
-    if let Some(account) = state.source.account_by_address(&query).await? {
-        return Ok(Json(SearchResult::Account(account)));
-    }
-    if let Some(transaction) = state.source.transaction_by_hash(&query).await? {
-        return Ok(Json(SearchResult::Transaction(transaction)));
-    }
+        if let Ok(height) = query.parse::<u64>() {
+            if let Some(block) = source.block_by_height(height).await? {
+                return Ok(SearchResult::Block(block));
+            }
+        }
+        if let Some(account) = source.account_by_address(&query).await? {
+            return Ok(SearchResult::Account(account));
+        }
+        if let Some(transaction) = source.transaction_by_hash(&query).await? {
+            return Ok(SearchResult::Transaction(transaction));
+        }
 
-    Err(ApiError::NotFound(format!("no result for {query}")))
+        Err(ApiError::NotFound(format!("no result for {query}")))
+    })
+    .await
 }
 
 fn read_chain(path: &PathBuf) -> Result<Chain, ApiError> {
@@ -199,7 +282,66 @@ fn read_chain(path: &PathBuf) -> Result<Chain, ApiError> {
         .map_err(|error| ApiError::ParseChain(format!("{}: {error}", path.display())))
 }
 
+async fn cached_json<T, F, Fut>(
+    state: Arc<AppState>,
+    key: String,
+    load: F,
+) -> Result<Json<Value>, ApiError>
+where
+    T: Serialize,
+    F: FnOnce(ChainSource) -> Fut,
+    Fut: Future<Output = Result<T, ApiError>>,
+{
+    if let Some(value) = state.cache_get(&key) {
+        return Ok(Json(value));
+    }
+
+    let value = serde_json::to_value(load(state.source.clone()).await?)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
+    state.cache_set(key, value.clone());
+    Ok(Json(value))
+}
+
+impl AppState {
+    fn cache_get(&self, key: &str) -> Option<Value> {
+        if !self.source.cache_enabled() {
+            return None;
+        }
+
+        let now = Instant::now();
+        let mut cache = self.cache.lock().ok()?;
+        match cache.entries.get(key) {
+            Some(entry) if entry.expires_at > now => Some(entry.value.clone()),
+            Some(_) => {
+                cache.entries.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn cache_set(&self, key: String, value: Value) {
+        if !self.source.cache_enabled() {
+            return;
+        }
+
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.entries.insert(
+                key,
+                CacheEntry {
+                    expires_at: Instant::now() + POSTGRES_CACHE_TTL,
+                    value,
+                },
+            );
+        }
+    }
+}
+
 impl ChainSource {
+    fn cache_enabled(&self) -> bool {
+        matches!(self, ChainSource::Postgres { .. })
+    }
+
     async fn chain_summary(&self) -> Result<ChainSummary, ApiError> {
         match self {
             ChainSource::Json { chain_file } => {
@@ -317,6 +459,63 @@ impl ChainSource {
                 .map_err(database_error)?;
 
                 row.map(transaction_from_row).transpose()
+            }
+        }
+    }
+
+    async fn error_events(&self) -> Result<Vec<ErrorEventView>, ApiError> {
+        match self {
+            ChainSource::Json { .. } => Ok(Vec::new()),
+            ChainSource::Postgres { pool } => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        service,
+                        severity,
+                        message,
+                        context,
+                        created_at::text AS created_at,
+                        resolved_at::text AS resolved_at
+                    FROM error_events
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                    "#,
+                )
+                .fetch_all(pool)
+                .await
+                .map_err(database_error)?;
+
+                rows.into_iter().map(error_event_from_row).collect()
+            }
+        }
+    }
+
+    async fn latest_error(&self) -> Result<Option<ErrorEventView>, ApiError> {
+        match self {
+            ChainSource::Json { .. } => Ok(None),
+            ChainSource::Postgres { pool } => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        service,
+                        severity,
+                        message,
+                        context,
+                        created_at::text AS created_at,
+                        resolved_at::text AS resolved_at
+                    FROM error_events
+                    WHERE resolved_at IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    "#,
+                )
+                .fetch_optional(pool)
+                .await
+                .map_err(database_error)?;
+
+                row.map(error_event_from_row).transpose()
             }
         }
     }
@@ -466,6 +665,18 @@ fn transaction_from_row(row: sqlx::postgres::PgRow) -> Result<TransactionView, A
             .transpose()?,
         transaction_index: usize_from_i32(row.get("transaction_index"), "transaction index")?,
         transfer: parse_json_value(row.get("raw_transfer"), "transaction")?,
+    })
+}
+
+fn error_event_from_row(row: sqlx::postgres::PgRow) -> Result<ErrorEventView, ApiError> {
+    Ok(ErrorEventView {
+        id: row.get("id"),
+        service: row.get("service"),
+        severity: row.get("severity"),
+        message: row.get("message"),
+        context: row.get("context"),
+        created_at: row.get("created_at"),
+        resolved_at: row.get("resolved_at"),
     })
 }
 
