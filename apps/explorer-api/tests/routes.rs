@@ -1,16 +1,22 @@
-use std::path::PathBuf;
+use std::{
+    env,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{Request, Response, StatusCode},
 };
 use chain_core::{
-    add_pending_transaction, finalize_genesis, new_chain, produce_block, sign_transfer,
-    transaction_hash, Account,
+    add_pending_transaction, finalize_genesis, new_chain, next_nonce, produce_block,
+    rollup_batch_commitment, sign_transfer, transaction_hash, Account, Chain,
+    RollupBatchCommitment,
 };
 use explorer_api::{app, app_with_pool};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use wallet_core::{address_from_public_key, create_keypair};
@@ -84,6 +90,52 @@ async fn returns_chain_summary_and_latest_blocks() {
 }
 
 #[tokio::test]
+async fn paginates_json_blocks_across_multiple_pages() {
+    let fixture = ChainFixture::with_transaction_blocks(3);
+    let app = app(fixture.chain_file.clone());
+
+    let first_page = get_json(app.clone(), "/blocks?limit=2").await;
+    assert_eq!(first_page["total"], json!(4));
+    assert_eq!(first_page["limit"], json!(2));
+    assert_eq!(first_page["offset"], json!(0));
+    assert_eq!(first_page["next_offset"], json!(2));
+    assert_eq!(first_page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(first_page["items"][0]["height"], json!(3));
+    assert_eq!(first_page["items"][1]["height"], json!(2));
+
+    let second_page = get_json(app.clone(), "/blocks?limit=2&offset=2").await;
+    assert_eq!(second_page["total"], json!(4));
+    assert_eq!(second_page["next_offset"], json!(null));
+    assert_eq!(second_page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(second_page["items"][0]["height"], json!(1));
+    assert_eq!(second_page["items"][1]["height"], json!(0));
+
+    let empty_page = get_json(app, "/blocks?limit=2&offset=10").await;
+    assert_eq!(empty_page["total"], json!(4));
+    assert_eq!(empty_page["next_offset"], json!(null));
+    assert_eq!(empty_page["items"].as_array().unwrap().len(), 0);
+
+    let _temp_dir_kept_alive = fixture.temp_dir;
+}
+
+#[tokio::test]
+async fn rejects_invalid_pagination_limits() {
+    let fixture = ChainFixture::new();
+    let app = app(fixture.chain_file.clone());
+
+    let zero = get_response(app.clone(), "/blocks?limit=0").await;
+    assert_eq!(zero.status(), StatusCode::BAD_REQUEST);
+
+    let too_large = get_response(app.clone(), "/blocks?limit=101").await;
+    assert_eq!(too_large.status(), StatusCode::BAD_REQUEST);
+
+    let rollup_zero = get_response(app, "/rollup/batches?limit=0").await;
+    assert_eq!(rollup_zero.status(), StatusCode::BAD_REQUEST);
+
+    let _temp_dir_kept_alive = fixture.temp_dir;
+}
+
+#[tokio::test]
 async fn fetches_blocks_accounts_and_transactions() {
     let fixture = ChainFixture::new();
     let app = app(fixture.chain_file.clone());
@@ -114,6 +166,41 @@ async fn fetches_blocks_accounts_and_transactions() {
     assert_eq!(transaction["block_height"], json!(1));
     assert_eq!(transaction["transaction_index"], json!(0));
     assert_eq!(transaction["transfer"]["amount"], json!(40));
+
+    let _temp_dir_kept_alive = fixture.temp_dir;
+}
+
+#[tokio::test]
+async fn returns_not_found_for_missing_resources() {
+    let fixture = ChainFixture::new();
+    let app = app(fixture.chain_file.clone());
+
+    assert_eq!(
+        get_response(app.clone(), "/blocks/999").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_response(app.clone(), "/blocks/hash/not-a-block")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_response(app.clone(), "/accounts/not-an-account")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_response(app.clone(), "/transactions/not-a-tx")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get_response(app, "/rollup/batches/999").await.status(),
+        StatusCode::NOT_FOUND
+    );
 
     let _temp_dir_kept_alive = fixture.temp_dir;
 }
@@ -182,6 +269,11 @@ async fn returns_rollup_batches_from_chain_blocks() {
     assert_eq!(batches["items"][0]["transaction_count"], json!(1));
     assert_eq!(batches["items"][0]["status"], json!("built"));
 
+    let empty_page = get_json(app.clone(), "/rollup/batches?limit=1&offset=1").await;
+    assert_eq!(empty_page["total"], json!(1));
+    assert_eq!(empty_page["items"].as_array().unwrap().len(), 0);
+    assert_eq!(empty_page["next_offset"], json!(null));
+
     let batch = get_json(app, "/rollup/batches/0").await;
     assert_eq!(batch["batch_number"], json!(0));
     assert_eq!(batch["transactions"].as_array().unwrap().len(), 1);
@@ -194,9 +286,87 @@ async fn returns_rollup_batches_from_chain_blocks() {
     let _temp_dir_kept_alive = fixture.temp_dir;
 }
 
+#[tokio::test]
+async fn postgres_source_serves_indexed_chain_pages_and_details() {
+    let Some(database_url) = optional_test_database_url() else {
+        eprintln!("skipping Postgres integration test; set TEST_DATABASE_URL or DATABASE_URL");
+        return;
+    };
+
+    let fixture = ChainFixture::with_transaction_blocks(3);
+    let (pool, schema) = setup_postgres_test_database(&database_url).await;
+    insert_indexed_chain(&pool, &fixture.chain).await;
+
+    let app = app_with_pool(pool.clone());
+    let summary = get_json(app.clone(), "/chain/summary").await;
+    assert_eq!(summary["height"], json!(3));
+    assert_eq!(summary["block_count"], json!(4));
+    assert_eq!(summary["transaction_count"], json!(3));
+    assert_eq!(summary["pending_transaction_count"], json!(0));
+    assert_eq!(summary["account_count"], json!(2));
+    assert_eq!(summary["valid"], json!(true));
+
+    let blocks = get_json(app.clone(), "/blocks?limit=2&offset=1").await;
+    assert_eq!(blocks["total"], json!(4));
+    assert_eq!(blocks["limit"], json!(2));
+    assert_eq!(blocks["offset"], json!(1));
+    assert_eq!(blocks["next_offset"], json!(3));
+    assert_eq!(blocks["items"].as_array().unwrap().len(), 2);
+    assert_eq!(blocks["items"][0]["height"], json!(2));
+    assert_eq!(blocks["items"][1]["height"], json!(1));
+
+    let latest = get_json(
+        app.clone(),
+        &format!("/blocks/hash/{}", fixture.latest_block_hash),
+    )
+    .await;
+    assert_eq!(latest["height"], json!(3));
+    assert_eq!(latest["block_hash"], json!(fixture.latest_block_hash));
+
+    let account = get_json(
+        app.clone(),
+        &format!("/accounts/{}", path_segment(&fixture.alice_address)),
+    )
+    .await;
+    assert_eq!(account["address"], json!(fixture.alice_address));
+
+    let transaction = get_json(
+        app.clone(),
+        &format!("/transactions/{}", fixture.transaction_hash),
+    )
+    .await;
+    assert_eq!(transaction["hash"], json!(fixture.transaction_hash));
+    assert_eq!(transaction["block_height"], json!(1));
+
+    let batches = get_json(app.clone(), "/rollup/batches?limit=1").await;
+    assert_eq!(batches["total"], json!(1));
+    assert_eq!(batches["items"][0]["batch_number"], json!(0));
+    assert_eq!(batches["items"][0]["end_block_height"], json!(3));
+    assert_eq!(batches["items"][0]["transaction_count"], json!(3));
+
+    let batch = get_json(app.clone(), "/rollup/batches/0").await;
+    assert_eq!(batch["transactions"].as_array().unwrap().len(), 3);
+
+    insert_error_event(&pool).await;
+    let health = get_json(app.clone(), "/health").await;
+    assert_eq!(health["status"], json!("degraded"));
+    assert_eq!(
+        health["latest_error"]["message"],
+        json!("test indexer failure")
+    );
+
+    let errors = get_json(app, "/errors").await;
+    assert_eq!(errors.as_array().unwrap().len(), 1);
+    assert_eq!(errors[0]["severity"], json!("error"));
+
+    teardown_postgres_test_database(&pool, &schema).await;
+    let _temp_dir_kept_alive = fixture.temp_dir;
+}
+
 struct ChainFixture {
     temp_dir: TempDir,
     chain_file: PathBuf,
+    chain: Chain,
     alice_address: String,
     bob_address: String,
     latest_block_hash: String,
@@ -205,6 +375,10 @@ struct ChainFixture {
 
 impl ChainFixture {
     fn new() -> Self {
+        Self::with_transaction_blocks(1)
+    }
+
+    fn with_transaction_blocks(count: usize) -> Self {
         let temp_dir = TempDir::new().unwrap();
         let chain_file = temp_dir.path().join("chain.json");
 
@@ -212,41 +386,288 @@ impl ChainFixture {
         let bob = create_keypair();
         let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
         let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
-        let mut chain = new_chain(vec![Account {
-            address: alice_address.clone(),
-            balance: 100,
-            nonce: 0,
-        }])
+        let mut chain = new_chain(vec![
+            Account {
+                address: alice_address.clone(),
+                balance: 100,
+                nonce: 0,
+            },
+            Account {
+                address: bob_address.clone(),
+                balance: 0,
+                nonce: 0,
+            },
+        ])
         .unwrap();
 
         finalize_genesis(&mut chain).unwrap();
-        let transfer = sign_transfer(&alice.secret_key_base64, bob_address.clone(), 40, 0).unwrap();
-        let hash = transaction_hash(&transfer);
-        add_pending_transaction(&mut chain, transfer).unwrap();
-        let block = produce_block(&mut chain).unwrap();
+        let mut first_hash = None;
+        let mut latest_block_hash = chain.blocks.last().unwrap().block_hash.clone();
+        for index in 0..count {
+            let alice_sends = index % 2 == 0;
+            let (secret_key, from, to) = if alice_sends {
+                (
+                    &alice.secret_key_base64,
+                    &alice_address,
+                    bob_address.clone(),
+                )
+            } else {
+                (&bob.secret_key_base64, &bob_address, alice_address.clone())
+            };
+            let nonce = next_nonce(&chain, from).unwrap();
+            let transfer = sign_transfer(secret_key, to, 40, nonce).unwrap();
+            first_hash.get_or_insert_with(|| transaction_hash(&transfer));
+            add_pending_transaction(&mut chain, transfer).unwrap();
+            let block = produce_block(&mut chain).unwrap();
+            latest_block_hash = block.block_hash;
+        }
 
         std::fs::write(&chain_file, serde_json::to_string_pretty(&chain).unwrap()).unwrap();
 
         Self {
             temp_dir,
             chain_file,
+            chain,
             alice_address,
             bob_address,
-            latest_block_hash: block.block_hash,
-            transaction_hash: hash,
+            latest_block_hash,
+            transaction_hash: first_hash.unwrap_or_default(),
         }
     }
 }
 
-async fn get_json(app: axum::Router, uri: &str) -> Value {
-    let response = app
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+const INIT_SQL: &[&str] = &[
+    include_str!("../../../prisma/migrations/0001_init/migration.sql"),
+    include_str!("../../../prisma/migrations/0002_error_events/migration.sql"),
+    include_str!("../../../prisma/migrations/0003_rollup_batches/migration.sql"),
+];
+
+fn optional_test_database_url() -> Option<String> {
+    env::var("TEST_DATABASE_URL")
+        .ok()
+        .or_else(|| env::var("DATABASE_URL").ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+async fn setup_postgres_test_database(database_url: &str) -> (PgPool, String) {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
         .await
-        .unwrap();
+        .expect("connect to Postgres test database");
+    let schema = format!("explorer_api_test_{}", unique_suffix());
+
+    sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
+        .execute(&pool)
+        .await
+        .expect("create isolated test schema");
+    sqlx::query(&format!(r#"SET search_path TO "{schema}""#))
+        .execute(&pool)
+        .await
+        .expect("set isolated test schema search path");
+
+    for migration in INIT_SQL {
+        for statement in migration
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+        {
+            pool.execute(statement)
+                .await
+                .expect("apply test database migration");
+        }
+    }
+
+    (pool, schema)
+}
+
+async fn teardown_postgres_test_database(pool: &PgPool, schema: &str) {
+    let _ = sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#))
+        .execute(pool)
+        .await;
+}
+
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after Unix epoch")
+        .as_nanos()
+}
+
+async fn insert_indexed_chain(pool: &PgPool, chain: &Chain) {
+    for block in &chain.blocks {
+        sqlx::query(
+            r#"
+            INSERT INTO blocks (
+                height, parent_hash, state_root, block_hash, transaction_count, raw_block
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(block.height as i64)
+        .bind(&block.parent_hash)
+        .bind(&block.state_root)
+        .bind(&block.block_hash)
+        .bind(block.transactions.len() as i32)
+        .bind(serde_json::to_value(block).unwrap())
+        .execute(pool)
+        .await
+        .expect("insert indexed block");
+
+        for (transaction_index, transaction) in block.transactions.iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO transactions (
+                    hash,
+                    block_height,
+                    transaction_index,
+                    from_address,
+                    to_address,
+                    amount,
+                    nonce,
+                    public_key_base64,
+                    signature_base64,
+                    raw_transfer
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                "#,
+            )
+            .bind(transaction_hash(transaction))
+            .bind(block.height as i64)
+            .bind(transaction_index as i32)
+            .bind(&transaction.from)
+            .bind(&transaction.to)
+            .bind(transaction.amount as i64)
+            .bind(transaction.nonce as i64)
+            .bind(&transaction.public_key_base64)
+            .bind(&transaction.signature_base64)
+            .bind(serde_json::to_value(transaction).unwrap())
+            .execute(pool)
+            .await
+            .expect("insert indexed transaction");
+        }
+    }
+
+    for account in chain.accounts.values() {
+        sqlx::query(
+            r#"
+            INSERT INTO accounts (address, balance, nonce)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(&account.address)
+        .bind(account.balance as i64)
+        .bind(account.nonce as i64)
+        .execute(pool)
+        .await
+        .expect("insert indexed account");
+    }
+
+    if let Some(latest) = chain.blocks.last() {
+        sqlx::query(
+            r#"
+            INSERT INTO indexer_checkpoints (id, last_indexed_height)
+            VALUES ('chain', $1)
+            "#,
+        )
+        .bind(latest.height as i64)
+        .execute(pool)
+        .await
+        .expect("insert indexer checkpoint");
+    }
+
+    if chain.blocks.last().is_some_and(|block| block.height >= 1) {
+        let commitment = rollup_batch_commitment(
+            chain,
+            0,
+            1,
+            chain.blocks.last().expect("checked above").height,
+        )
+        .expect("build rollup batch commitment");
+        insert_rollup_batch(pool, chain, &commitment).await;
+    }
+}
+
+async fn insert_rollup_batch(pool: &PgPool, chain: &Chain, commitment: &RollupBatchCommitment) {
+    sqlx::query(
+        r#"
+        INSERT INTO rollup_batches (
+            batch_number,
+            start_block_height,
+            end_block_height,
+            prev_state_root,
+            new_state_root,
+            transaction_root,
+            block_hash_root,
+            data_hash,
+            transaction_count,
+            status,
+            raw_commitment
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'built', $10)
+        "#,
+    )
+    .bind(commitment.batch_number as i64)
+    .bind(commitment.start_block_height as i64)
+    .bind(commitment.end_block_height as i64)
+    .bind(&commitment.prev_state_root)
+    .bind(&commitment.new_state_root)
+    .bind(&commitment.transaction_root)
+    .bind(&commitment.block_hash_root)
+    .bind(&commitment.data_hash)
+    .bind(commitment.transaction_count as i32)
+    .bind(serde_json::to_value(commitment).unwrap())
+    .execute(pool)
+    .await
+    .expect("insert rollup batch");
+
+    for block in chain.blocks.iter().filter(|block| {
+        block.height >= commitment.start_block_height && block.height <= commitment.end_block_height
+    }) {
+        for (transaction_index, transaction) in block.transactions.iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO rollup_batch_transactions (
+                    batch_number, transaction_hash, block_height, transaction_index
+                )
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(commitment.batch_number as i64)
+            .bind(transaction_hash(transaction))
+            .bind(block.height as i64)
+            .bind(transaction_index as i32)
+            .execute(pool)
+            .await
+            .expect("insert rollup batch transaction");
+        }
+    }
+}
+
+async fn insert_error_event(pool: &PgPool) {
+    sqlx::query(
+        r#"
+        INSERT INTO error_events (service, severity, message, context)
+        VALUES ('chain-indexer', 'error', 'test indexer failure', '{"test": true}'::jsonb)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("insert error event");
+}
+
+async fn get_json(app: axum::Router, uri: &str) -> Value {
+    let response = get_response(app, uri).await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn get_response(app: axum::Router, uri: &str) -> Response<Body> {
+    app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
 }
 
 fn path_segment(value: &str) -> String {
