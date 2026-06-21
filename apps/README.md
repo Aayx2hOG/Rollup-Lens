@@ -184,6 +184,14 @@ bun install
 bun run dev
 ```
 
+The dashboard includes overview, block, account, rollup batch, and indexer
+health views. Rollup batch data is available from the API at:
+
+```text
+GET /rollup/batches
+GET /rollup/batches/:batch_number
+```
+
 For a deployed no-database live demo, run the backend with auto-generated
 blocks:
 

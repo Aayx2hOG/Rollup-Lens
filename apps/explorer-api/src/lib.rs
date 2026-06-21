@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs,
+    fmt, fs,
     future::Future,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -8,19 +8,24 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
-use chain_core::{state_root, transaction_hash, validate_chain, Account, Block, Chain, Transfer};
-use serde::Serialize;
+use chain_core::{
+    rollup_batch_commitment, state_root, transaction_hash, validate_chain, Account, Block, Chain,
+    RollupBatchCommitment, Transfer,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
 
 const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
+const DEFAULT_PAGE_LIMIT: usize = 50;
+const MAX_PAGE_LIMIT: usize = 100;
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -67,6 +72,65 @@ struct BlockSummary {
     transaction_count: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct PageQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PageParams {
+    limit: usize,
+    offset: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct Page<T> {
+    items: Vec<T>,
+    limit: usize,
+    offset: usize,
+    total: usize,
+    next_offset: Option<usize>,
+}
+
+impl PageQuery {
+    fn page_params(self) -> Result<PageParams, ApiError> {
+        let limit = self.limit.unwrap_or(DEFAULT_PAGE_LIMIT);
+        if limit == 0 {
+            return Err(ApiError::BadRequest(
+                "limit must be greater than zero".to_string(),
+            ));
+        }
+        if limit > MAX_PAGE_LIMIT {
+            return Err(ApiError::BadRequest(format!(
+                "limit must be less than or equal to {MAX_PAGE_LIMIT}"
+            )));
+        }
+
+        Ok(PageParams {
+            limit,
+            offset: self.offset.unwrap_or(0),
+        })
+    }
+}
+
+impl fmt::Display for PageParams {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "limit:{}:offset:{}", self.limit, self.offset)
+    }
+}
+
+fn page_from_items<T>(items: Vec<T>, total: usize, page: PageParams) -> Page<T> {
+    let consumed = page.offset.saturating_add(items.len());
+    Page {
+        items,
+        limit: page.limit,
+        offset: page.offset,
+        total,
+        next_offset: (consumed < total).then_some(consumed),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct TransactionView {
     hash: String,
@@ -97,6 +161,27 @@ struct ErrorEventView {
 }
 
 #[derive(Debug, Serialize)]
+struct RollupBatchSummary {
+    batch_number: u64,
+    start_block_height: u64,
+    end_block_height: u64,
+    prev_state_root: String,
+    new_state_root: String,
+    transaction_root: String,
+    block_hash_root: String,
+    data_hash: String,
+    transaction_count: usize,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RollupBatchView {
+    #[serde(flatten)]
+    summary: RollupBatchSummary,
+    transactions: Vec<TransactionView>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "kind", content = "data")]
 enum SearchResult {
     Block(BlockView),
@@ -106,6 +191,7 @@ enum SearchResult {
 
 #[derive(Debug)]
 enum ApiError {
+    BadRequest(String),
     NotFound(String),
     ReadChain(String),
     ParseChain(String),
@@ -138,6 +224,8 @@ fn app_with_source(source: ChainSource) -> Router {
         .route("/transactions/:hash", get(transaction_by_hash))
         .route("/errors", get(errors))
         .route("/errors/latest", get(latest_error))
+        .route("/rollup/batches", get(rollup_batches))
+        .route("/rollup/batches/:batch_number", get(rollup_batch_by_number))
         .route("/search/:query", get(search))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -170,6 +258,8 @@ async fn index() -> Json<Value> {
             "GET /transactions/:hash",
             "GET /errors",
             "GET /errors/latest",
+            "GET /rollup/batches",
+            "GET /rollup/batches/:batch_number",
             "GET /search/:query"
         ]
     }))
@@ -182,9 +272,13 @@ async fn chain_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>
     .await
 }
 
-async fn blocks(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    cached_json(state, "blocks".to_string(), |source| async move {
-        source.blocks().await
+async fn blocks(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = query.page_params()?;
+    cached_json(state, format!("blocks:{page}"), |source| async move {
+        source.blocks(page).await
     })
     .await
 }
@@ -259,6 +353,36 @@ async fn latest_error(State(state): State<Arc<AppState>>) -> Result<Json<Value>,
             .await?
             .ok_or_else(|| ApiError::NotFound("no error events found".to_string()))
     })
+    .await
+}
+
+async fn rollup_batches(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = query.page_params()?;
+    cached_json(
+        state,
+        format!("rollup:batches:{page}"),
+        |source| async move { source.rollup_batches(page).await },
+    )
+    .await
+}
+
+async fn rollup_batch_by_number(
+    State(state): State<Arc<AppState>>,
+    Path(batch_number): Path<u64>,
+) -> Result<Json<Value>, ApiError> {
+    cached_json(
+        state,
+        format!("rollup:batches:{batch_number}"),
+        |source| async move {
+            source
+                .rollup_batch_by_number(batch_number)
+                .await?
+                .ok_or_else(|| ApiError::NotFound(format!("rollup batch {batch_number} not found")))
+        },
+    )
     .await
 }
 
@@ -364,27 +488,48 @@ impl ChainSource {
         }
     }
 
-    async fn blocks(&self) -> Result<Vec<BlockSummary>, ApiError> {
+    async fn blocks(&self, page: PageParams) -> Result<Page<BlockSummary>, ApiError> {
         match self {
             ChainSource::Json { chain_file } => {
                 let chain = read_chain(chain_file)?;
                 let mut blocks = chain.blocks.iter().map(block_summary).collect::<Vec<_>>();
                 blocks.reverse();
-                Ok(blocks)
+                let total = blocks.len();
+                let items = blocks
+                    .into_iter()
+                    .skip(page.offset)
+                    .take(page.limit)
+                    .collect();
+                Ok(page_from_items(items, total, page))
             }
             ChainSource::Postgres { pool } => {
+                let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blocks")
+                    .fetch_one(pool)
+                    .await
+                    .map_err(database_error)?;
                 let rows = sqlx::query(
                     r#"
                     SELECT height, parent_hash, state_root, block_hash, transaction_count
                     FROM blocks
                     ORDER BY height DESC
+                    LIMIT $1 OFFSET $2
                     "#,
                 )
+                .bind(to_i64_from_usize(page.limit, "page limit")?)
+                .bind(to_i64_from_usize(page.offset, "page offset")?)
                 .fetch_all(pool)
                 .await
                 .map_err(database_error)?;
 
-                rows.into_iter().map(block_summary_from_row).collect()
+                let items = rows
+                    .into_iter()
+                    .map(block_summary_from_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(page_from_items(
+                    items,
+                    usize_from_i64(total, "block count")?,
+                    page,
+                ))
             }
         }
     }
@@ -534,6 +679,126 @@ impl ChainSource {
                 .map_err(database_error)?;
 
                 row.map(error_event_from_row).transpose()
+            }
+        }
+    }
+
+    async fn rollup_batches(&self, page: PageParams) -> Result<Page<RollupBatchSummary>, ApiError> {
+        match self {
+            ChainSource::Json { chain_file } => {
+                let chain = read_chain(chain_file)?;
+                let batches = json_rollup_batch(&chain)
+                    .map(|batch| vec![batch.summary])
+                    .unwrap_or_default();
+                let total = batches.len();
+                let items = batches
+                    .into_iter()
+                    .skip(page.offset)
+                    .take(page.limit)
+                    .collect();
+                Ok(page_from_items(items, total, page))
+            }
+            ChainSource::Postgres { pool } => {
+                let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rollup_batches")
+                    .fetch_one(pool)
+                    .await
+                    .map_err(database_error)?;
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        batch_number,
+                        start_block_height,
+                        end_block_height,
+                        prev_state_root,
+                        new_state_root,
+                        transaction_root,
+                        block_hash_root,
+                        data_hash,
+                        transaction_count,
+                        status
+                    FROM rollup_batches
+                    ORDER BY batch_number DESC
+                    LIMIT $1 OFFSET $2
+                    "#,
+                )
+                .bind(to_i64_from_usize(page.limit, "page limit")?)
+                .bind(to_i64_from_usize(page.offset, "page offset")?)
+                .fetch_all(pool)
+                .await
+                .map_err(database_error)?;
+
+                let items = rows
+                    .into_iter()
+                    .map(rollup_batch_summary_from_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(page_from_items(
+                    items,
+                    usize_from_i64(total, "rollup batch count")?,
+                    page,
+                ))
+            }
+        }
+    }
+
+    async fn rollup_batch_by_number(
+        &self,
+        batch_number: u64,
+    ) -> Result<Option<RollupBatchView>, ApiError> {
+        match self {
+            ChainSource::Json { chain_file } => {
+                let chain = read_chain(chain_file)?;
+                Ok(json_rollup_batch(&chain)
+                    .filter(|batch| batch.summary.batch_number == batch_number))
+            }
+            ChainSource::Postgres { pool } => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        batch_number,
+                        start_block_height,
+                        end_block_height,
+                        prev_state_root,
+                        new_state_root,
+                        transaction_root,
+                        block_hash_root,
+                        data_hash,
+                        transaction_count,
+                        status
+                    FROM rollup_batches
+                    WHERE batch_number = $1
+                    "#,
+                )
+                .bind(to_i64(batch_number, "rollup batch number")?)
+                .fetch_optional(pool)
+                .await
+                .map_err(database_error)?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+
+                let summary = rollup_batch_summary_from_row(row)?;
+                let transaction_rows = sqlx::query(
+                    r#"
+                    SELECT t.hash, t.block_height, t.transaction_index, t.raw_transfer
+                    FROM rollup_batch_transactions rbt
+                    JOIN transactions t ON t.hash = rbt.transaction_hash
+                    WHERE rbt.batch_number = $1
+                    ORDER BY rbt.block_height ASC, rbt.transaction_index ASC
+                    "#,
+                )
+                .bind(to_i64(batch_number, "rollup batch number")?)
+                .fetch_all(pool)
+                .await
+                .map_err(database_error)?;
+                let transactions = transaction_rows
+                    .into_iter()
+                    .map(transaction_from_row)
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok(Some(RollupBatchView {
+                    summary,
+                    transactions,
+                }))
             }
         }
     }
@@ -719,6 +984,78 @@ fn error_event_from_row(row: sqlx::postgres::PgRow) -> Result<ErrorEventView, Ap
     })
 }
 
+fn rollup_batch_summary_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<RollupBatchSummary, ApiError> {
+    Ok(RollupBatchSummary {
+        batch_number: from_i64(row.get("batch_number"), "rollup batch number")?,
+        start_block_height: from_i64(
+            row.get("start_block_height"),
+            "rollup batch start block height",
+        )?,
+        end_block_height: from_i64(row.get("end_block_height"), "rollup batch end block height")?,
+        prev_state_root: row.get("prev_state_root"),
+        new_state_root: row.get("new_state_root"),
+        transaction_root: row.get("transaction_root"),
+        block_hash_root: row.get("block_hash_root"),
+        data_hash: row.get("data_hash"),
+        transaction_count: usize_from_i32(row.get("transaction_count"), "transaction count")?,
+        status: row.get("status"),
+    })
+}
+
+fn json_rollup_batch(chain: &Chain) -> Option<RollupBatchView> {
+    let end_height = chain.blocks.last()?.height;
+    if end_height == 0 {
+        return None;
+    }
+
+    let commitment = rollup_batch_commitment(chain, 0, 1, end_height).ok()?;
+    Some(rollup_batch_view(chain, commitment, "built"))
+}
+
+fn rollup_batch_view(
+    chain: &Chain,
+    commitment: RollupBatchCommitment,
+    status: &str,
+) -> RollupBatchView {
+    let transactions =
+        chain
+            .blocks
+            .iter()
+            .filter(|block| {
+                block.height >= commitment.start_block_height
+                    && block.height <= commitment.end_block_height
+            })
+            .flat_map(|block| {
+                block.transactions.iter().enumerate().map(
+                    move |(transaction_index, transaction)| TransactionView {
+                        hash: transaction_hash(transaction),
+                        block_height: Some(block.height),
+                        transaction_index,
+                        transfer: transaction.clone(),
+                    },
+                )
+            })
+            .collect();
+
+    RollupBatchView {
+        summary: RollupBatchSummary {
+            batch_number: commitment.batch_number,
+            start_block_height: commitment.start_block_height,
+            end_block_height: commitment.end_block_height,
+            prev_state_root: commitment.prev_state_root,
+            new_state_root: commitment.new_state_root,
+            transaction_root: commitment.transaction_root,
+            block_hash_root: commitment.block_hash_root,
+            data_hash: commitment.data_hash,
+            transaction_count: commitment.transaction_count,
+            status: status.to_string(),
+        },
+        transactions,
+    }
+}
+
 fn find_block_by_height(chain: &Chain, height: u64) -> Option<&Block> {
     chain.blocks.iter().find(|block| block.height == height)
 }
@@ -774,6 +1111,11 @@ fn to_i64(value: u64, label: &str) -> Result<i64, ApiError> {
         .map_err(|_| ApiError::InvalidIndexedData(format!("{label} exceeds BIGINT range")))
 }
 
+fn to_i64_from_usize(value: usize, label: &str) -> Result<i64, ApiError> {
+    i64::try_from(value)
+        .map_err(|_| ApiError::InvalidIndexedData(format!("{label} exceeds BIGINT range")))
+}
+
 fn from_i64(value: i64, label: &str) -> Result<u64, ApiError> {
     u64::try_from(value).map_err(|_| ApiError::InvalidIndexedData(format!("{label} is negative")))
 }
@@ -790,6 +1132,7 @@ fn usize_from_i32(value: i32, label: &str) -> Result<usize, ApiError> {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::NotFound(message) => (StatusCode::NOT_FOUND, message),
             ApiError::ReadChain(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
             ApiError::ParseChain(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),

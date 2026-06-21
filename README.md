@@ -245,6 +245,8 @@ GET /blocks/:height
 GET /blocks/hash/:hash
 GET /accounts/:address
 GET /transactions/:hash
+GET /rollup/batches
+GET /rollup/batches/:batch_number
 GET /search/:query
 ```
 
@@ -328,6 +330,10 @@ cargo run -p chain-indexer -- --chain-file chain.json --init-schema
 In Postgres mode, the explorer API keeps a short in-memory cache for hot read
 endpoints and exposes recent persistent errors through `GET /errors` and
 `GET /errors/latest`.
+
+The indexer also rebuilds deterministic rollup batch rows for post-genesis
+blocks. Batch `0` covers block `1` through the latest indexed block and is
+available through `GET /rollup/batches` and `GET /rollup/batches/:batch_number`.
 
 ## Explorer UI
 

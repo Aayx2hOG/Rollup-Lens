@@ -11,6 +11,7 @@ import {
   Gauge,
   Hash,
   Layers3,
+  PackageCheck,
   RefreshCcw,
   Search,
   ShieldAlert,
@@ -18,11 +19,21 @@ import {
   XCircle,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
-import { API_BASE, api, type Account, type Block, type BlockSummary, type SearchResult, type Transfer } from "./lib/api";
+import {
+  API_BASE,
+  api,
+  type Account,
+  type Block,
+  type BlockSummary,
+  type RollupBatch,
+  type RollupBatchSummary,
+  type SearchResult,
+  type Transfer,
+} from "./lib/api";
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
 import { Badge, IconButton, Panel, Shell, Skeleton, Stat } from "./components/ui";
 
-const tabs = ["Overview", "Blocks", "Accounts", "Indexer"] as const;
+const tabs = ["Overview", "Blocks", "Accounts", "Rollup", "Indexer"] as const;
 type Tab = (typeof tabs)[number];
 
 export function App() {
@@ -31,13 +42,15 @@ export function App() {
   const [selectedHeight, setSelectedHeight] = useState<number | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [selectedTx, setSelectedTx] = useState<string | null>(null);
+  const [selectedBatch, setSelectedBatch] = useState<number | null>(null);
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const summary = useQuery({ queryKey: ["summary"], queryFn: api.summary });
-  const blocks = useQuery({ queryKey: ["blocks"], queryFn: api.blocks });
+  const blocks = useQuery({ queryKey: ["blocks"], queryFn: () => api.blocks() });
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const errors = useQuery({ queryKey: ["errors"], queryFn: api.errors });
+  const rollupBatches = useQuery({ queryKey: ["rollup-batches"], queryFn: () => api.rollupBatches() });
   const block = useQuery({
     queryKey: ["block", selectedHeight],
     queryFn: () => api.block(selectedHeight!),
@@ -55,18 +68,33 @@ export function App() {
     enabled: Boolean(selectedTx),
     retry: false,
   });
+  const rollupBatch = useQuery({
+    queryKey: ["rollup-batch", selectedBatch],
+    queryFn: () => api.rollupBatch(selectedBatch!),
+    enabled: selectedBatch !== null,
+  });
   const connectionError = firstError(summary.error, blocks.error);
   const connectionMessage = connectionError ?? "Backend request failed";
   const hasCoreData = Boolean(summary.data && blocks.data);
   const isOffline = Boolean(connectionError && !hasCoreData);
   const isStale = Boolean(connectionError && hasCoreData);
   const readStatus = isOffline ? "offline" : isStale ? "stale" : hasCoreData ? "ok" : "connecting";
+  const blockItems = blocks.data?.items ?? [];
+  const blockTotal = blocks.data?.total ?? blockItems.length;
+  const batchItems = rollupBatches.data?.items ?? [];
+  const batchTotal = rollupBatches.data?.total ?? batchItems.length;
 
   useEffect(() => {
-    if (selectedHeight === null && blocks.data?.[0]) {
-      setSelectedHeight(blocks.data[0].height);
+    if (selectedHeight === null && blockItems[0]) {
+      setSelectedHeight(blockItems[0].height);
     }
-  }, [blocks.data, selectedHeight]);
+  }, [blockItems, selectedHeight]);
+
+  useEffect(() => {
+    if (selectedBatch === null && batchItems[0]) {
+      setSelectedBatch(batchItems[0].batch_number);
+    }
+  }, [batchItems, selectedBatch]);
 
   const accountsFromBlocks = useMemo(() => {
     const seen = new Map<string, { address: string; touches: number; sent: number; received: number }>();
@@ -199,7 +227,8 @@ export function App() {
       {activeTab === "Overview" && (
         <Overview
           summary={summary.data}
-          blocks={blocks.data ?? []}
+          blocks={blockItems}
+          blockTotal={blockTotal}
           selectedBlock={block.data}
           onSelectBlock={setSelectedHeight}
           onSelectAccount={(address) => {
@@ -211,7 +240,8 @@ export function App() {
 
       {activeTab === "Blocks" && (
         <BlocksView
-          blocks={blocks.data ?? []}
+          blocks={blockItems}
+          blockTotal={blockTotal}
           selectedHeight={selectedHeight}
           selectedBlock={block.data}
           blockLoading={block.isLoading}
@@ -234,6 +264,21 @@ export function App() {
           account={account.data}
           accountError={account.error instanceof Error ? account.error.message : null}
           onSelectAccount={setSelectedAccount}
+        />
+      )}
+
+      {activeTab === "Rollup" && (
+        <RollupView
+          batches={batchItems}
+          batchTotal={batchTotal}
+          selectedBatchNumber={selectedBatch}
+          selectedBatch={rollupBatch.data}
+          batchLoading={rollupBatch.isLoading}
+          onSelectBatch={setSelectedBatch}
+          onSelectTx={(hash) => {
+            setSelectedTx(hash);
+            setActiveTab("Blocks");
+          }}
         />
       )}
 
@@ -344,12 +389,14 @@ function summarizeResult(result: SearchResult | null) {
 function Overview({
   summary,
   blocks,
+  blockTotal,
   selectedBlock,
   onSelectBlock,
   onSelectAccount,
 }: {
   summary?: { state_root: string; latest_block_hash: string | null; block_count: number };
   blocks: BlockSummary[];
+  blockTotal: number;
   selectedBlock?: Block;
   onSelectBlock: (height: number) => void;
   onSelectAccount: (address: string) => void;
@@ -357,7 +404,7 @@ function Overview({
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_0.8fr]">
       <Panel className="overflow-hidden">
-        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Latest blocks" action={pluralize(blocks.length, "block")} />
+        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Latest blocks" action={`${blocks.length}/${blockTotal} loaded`} />
         <div className="divide-y divide-white/8">
           {blocks.map((block) => (
             <button
@@ -402,6 +449,7 @@ function Overview({
 
 function BlocksView({
   blocks,
+  blockTotal,
   selectedHeight,
   selectedBlock,
   blockLoading,
@@ -413,6 +461,7 @@ function BlocksView({
   onSelectTx,
 }: {
   blocks: BlockSummary[];
+  blockTotal: number;
   selectedHeight: number | null;
   selectedBlock?: Block;
   blockLoading: boolean;
@@ -426,7 +475,7 @@ function BlocksView({
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[23rem_1fr]">
       <Panel className="overflow-hidden">
-        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Block stream" action={`${blocks.length} indexed`} />
+        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Block stream" action={`${blocks.length}/${blockTotal} indexed`} />
         <div className="max-h-[36rem] overflow-auto">
           {blocks.map((block) => (
             <button
@@ -621,6 +670,115 @@ function IndexerView({
               </div>
             ))}
           </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function RollupView({
+  batches,
+  batchTotal,
+  selectedBatchNumber,
+  selectedBatch,
+  batchLoading,
+  onSelectBatch,
+  onSelectTx,
+}: {
+  batches: RollupBatchSummary[];
+  batchTotal: number;
+  selectedBatchNumber: number | null;
+  selectedBatch?: RollupBatch;
+  batchLoading: boolean;
+  onSelectBatch: (batchNumber: number) => void;
+  onSelectTx: (hash: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[24rem_1fr]">
+      <Panel className="overflow-hidden">
+        <SectionTitle icon={<PackageCheck className="h-4 w-4" />} title="Rollup batches" action={`${batches.length}/${batchTotal} built`} />
+        <div className="max-h-[36rem] overflow-auto">
+          {batches.length === 0 ? (
+            <div className="px-4 py-10 text-sm text-white/48">No post-genesis blocks are available for batching.</div>
+          ) : (
+            batches.map((batch) => (
+              <button
+                key={batch.batch_number}
+                onClick={() => onSelectBatch(batch.batch_number)}
+                className={cn(
+                  "w-full border-b border-white/8 px-4 py-3 text-left transition",
+                  selectedBatchNumber === batch.batch_number ? "bg-mint/10" : "hover:bg-white/[0.045]",
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-white">Batch {batch.batch_number}</div>
+                  <Badge tone={batch.status === "built" ? "good" : "neutral"}>{batch.status}</Badge>
+                </div>
+                <div className="mt-2 text-xs text-white/46">
+                  blocks {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "tx", "txs")}
+                </div>
+                <div className="hash mt-2 text-xs text-white/48">{shortHash(batch.data_hash, 10, 8)}</div>
+              </button>
+            ))
+          )}
+        </div>
+      </Panel>
+
+      <Panel className="p-4">
+        <SectionTitle
+          icon={<Layers3 className="h-4 w-4" />}
+          title="Batch detail"
+          action={selectedBatch ? `batch ${selectedBatch.batch_number}` : "none"}
+          flush
+        />
+        {batchLoading ? (
+          <Skeleton className="mt-4 h-80" />
+        ) : selectedBatch ? (
+          <div className="mt-4 grid gap-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <MetricLine label="Start block" value={selectedBatch.start_block_height} />
+              <MetricLine label="End block" value={selectedBatch.end_block_height} />
+              <MetricLine label="Transactions" value={selectedBatch.transaction_count} />
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <HashLine label="Previous state root" value={selectedBatch.prev_state_root} />
+              <HashLine label="New state root" value={selectedBatch.new_state_root} />
+              <HashLine label="Transaction root" value={selectedBatch.transaction_root} />
+              <HashLine label="Block hash root" value={selectedBatch.block_hash_root} />
+              <HashLine label="Data hash" value={selectedBatch.data_hash} />
+            </div>
+            <div className="overflow-hidden rounded-lg border border-white/10">
+              <div className="grid grid-cols-[auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
+                <span>Block</span>
+                <span>Transaction</span>
+                <span>Open</span>
+              </div>
+              {selectedBatch.transactions.length === 0 ? (
+                <div className="px-3 py-6 text-sm text-white/48">This batch has no transactions.</div>
+              ) : (
+                selectedBatch.transactions.map((transaction) => (
+                  <div
+                    key={transaction.hash}
+                    className="grid grid-cols-[auto_1fr_auto] items-center gap-3 border-b border-white/8 px-3 py-3 text-sm last:border-b-0"
+                  >
+                    <span className="rounded-md bg-white/[0.06] px-2 py-1 text-xs font-semibold text-white/72">
+                      {transaction.block_height ?? "pending"}
+                    </span>
+                    <span className="hash min-w-0 text-white/72">{transaction.hash}</span>
+                    <button
+                      onClick={() => onSelectTx(transaction.hash)}
+                      className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.045] px-2 py-1 text-xs text-white/58 transition hover:border-mint/30 hover:text-mint"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      View
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 text-sm text-white/50">Select a built batch from the list.</div>
         )}
       </Panel>
     </div>

@@ -30,6 +30,7 @@ model ChainTransaction {
   signatureBase64 String  @map("signature_base64")
   rawTransfer     Json    @map("raw_transfer")
   block           Block?  @relation(fields: [blockHeight], references: [height], onDelete: Cascade)
+  rollupBatches   RollupBatchTransaction[]
 
   @@index([blockHeight])
   @@index([fromAddress])
@@ -63,4 +64,37 @@ model ErrorEvent {
 
   @@index([createdAt])
   @@map("error_events")
+}
+
+model RollupBatch {
+  batchNumber     BigInt                    @id @map("batch_number")
+  startBlockHeight BigInt                   @map("start_block_height")
+  endBlockHeight   BigInt                   @map("end_block_height")
+  prevStateRoot   String                    @map("prev_state_root")
+  newStateRoot    String                    @map("new_state_root")
+  transactionRoot String                    @map("transaction_root")
+  blockHashRoot   String                    @map("block_hash_root")
+  dataHash        String                    @unique @map("data_hash")
+  transactionCount Int                      @map("transaction_count")
+  status          String
+  rawCommitment   Json                      @map("raw_commitment")
+  transactions    RollupBatchTransaction[]
+
+  @@index([startBlockHeight])
+  @@index([endBlockHeight])
+  @@map("rollup_batches")
+}
+
+model RollupBatchTransaction {
+  batchNumber      BigInt           @map("batch_number")
+  transactionHash  String           @map("transaction_hash")
+  blockHeight      BigInt           @map("block_height")
+  transactionIndex Int              @map("transaction_index")
+  batch            RollupBatch      @relation(fields: [batchNumber], references: [batchNumber], onDelete: Cascade)
+  transaction      ChainTransaction @relation(fields: [transactionHash], references: [hash], onDelete: Cascade)
+
+  @@id([batchNumber, transactionHash])
+  @@index([transactionHash])
+  @@index([blockHeight])
+  @@map("rollup_batch_transactions")
 }

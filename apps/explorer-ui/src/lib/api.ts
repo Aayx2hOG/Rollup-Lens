@@ -26,6 +26,14 @@ export type BlockSummary = {
   transaction_count: number;
 };
 
+export type Page<T> = {
+  items: T[];
+  limit: number;
+  offset: number;
+  total: number;
+  next_offset: number | null;
+};
+
 export type Transfer = {
   from: string;
   to: string;
@@ -67,6 +75,23 @@ export type ErrorEvent = {
   resolved_at: string | null;
 };
 
+export type RollupBatchSummary = {
+  batch_number: number;
+  start_block_height: number;
+  end_block_height: number;
+  prev_state_root: string;
+  new_state_root: string;
+  transaction_root: string;
+  block_hash_root: string;
+  data_hash: string;
+  transaction_count: number;
+  status: string;
+};
+
+export type RollupBatch = RollupBatchSummary & {
+  transactions: TransactionView[];
+};
+
 export type SearchResult =
   | { kind: "Block"; data: Block }
   | { kind: "Account"; data: Account }
@@ -94,10 +119,12 @@ async function request<T>(path: string): Promise<T> {
 export const api = {
   health: () => request<Health>("/health"),
   summary: () => request<ChainSummary>("/chain/summary"),
-  blocks: () => request<BlockSummary[]>("/blocks"),
+  blocks: (limit = 50, offset = 0) => request<Page<BlockSummary>>(`/blocks?limit=${limit}&offset=${offset}`),
   block: (height: number) => request<Block>(`/blocks/${height}`),
   account: (address: string) => request<Account>(`/accounts/${encodeURIComponent(address)}`),
   transaction: (hash: string) => request<TransactionView>(`/transactions/${encodeURIComponent(hash)}`),
   errors: () => request<ErrorEvent[]>("/errors"),
+  rollupBatches: (limit = 50, offset = 0) => request<Page<RollupBatchSummary>>(`/rollup/batches?limit=${limit}&offset=${offset}`),
+  rollupBatch: (batchNumber: number) => request<RollupBatch>(`/rollup/batches/${batchNumber}`),
   search: (query: string) => request<SearchResult>(`/search/${encodeURIComponent(query)}`),
 };

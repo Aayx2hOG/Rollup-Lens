@@ -5,13 +5,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chain_core::{transaction_hash, validate_chain, Chain};
+use chain_core::{rollup_batch_commitment, transaction_hash, validate_chain, Chain};
 use clap::Parser;
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 
 const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0001_init/migration.sql"),
     include_str!("../../../prisma/migrations/0002_error_events/migration.sql"),
+    include_str!("../../../prisma/migrations/0003_rollup_batches/migration.sql"),
 ];
 const PRISMA_ENV_PATH: &str = "prisma/.env";
 
@@ -123,6 +124,7 @@ struct IndexResult {
     blocks: usize,
     transactions: usize,
     accounts: usize,
+    rollup_batches: usize,
     last_indexed_height: Option<u64>,
 }
 
@@ -320,6 +322,7 @@ fn print_index_result(status: &str, result: IndexResult) -> Result<()> {
             "indexed_blocks": result.blocks,
             "indexed_transactions": result.transactions,
             "indexed_accounts": result.accounts,
+            "indexed_rollup_batches": result.rollup_batches,
             "last_indexed_height": result.last_indexed_height,
         }))?
     );
@@ -333,6 +336,14 @@ async fn reindex_chain(pool: &PgPool, chain: &Chain) -> Result<IndexResult> {
         .await
         .context("failed to start index transaction")?;
 
+    sqlx::query("DELETE FROM rollup_batch_transactions")
+        .execute(&mut *tx)
+        .await
+        .context("failed to clear rollup batch transactions")?;
+    sqlx::query("DELETE FROM rollup_batches")
+        .execute(&mut *tx)
+        .await
+        .context("failed to clear rollup batches")?;
     sqlx::query("DELETE FROM transactions")
         .execute(&mut *tx)
         .await
@@ -411,6 +422,17 @@ async fn reindex_chain(pool: &PgPool, chain: &Chain) -> Result<IndexResult> {
     }
 
     let last_indexed_height = chain.blocks.last().map(|block| block.height);
+    let rollup_batches = if let Some(end_height) = last_indexed_height {
+        if end_height >= 1 {
+            insert_rollup_batch(&mut tx, chain, 0, 1, end_height).await?;
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     sqlx::query(
         r#"
         INSERT INTO indexer_checkpoints (id, last_indexed_height)
@@ -433,8 +455,93 @@ async fn reindex_chain(pool: &PgPool, chain: &Chain) -> Result<IndexResult> {
         blocks: chain.blocks.len(),
         transactions: transaction_count,
         accounts: chain.accounts.len(),
+        rollup_batches,
         last_indexed_height,
     })
+}
+
+async fn insert_rollup_batch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain: &Chain,
+    batch_number: u64,
+    start_height: u64,
+    end_height: u64,
+) -> Result<()> {
+    let commitment = rollup_batch_commitment(chain, batch_number, start_height, end_height)
+        .context("failed to build rollup batch commitment")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO rollup_batches (
+            batch_number,
+            start_block_height,
+            end_block_height,
+            prev_state_root,
+            new_state_root,
+            transaction_root,
+            block_hash_root,
+            data_hash,
+            transaction_count,
+            status,
+            raw_commitment
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'built', $10)
+        "#,
+    )
+    .bind(to_i64(commitment.batch_number, "rollup batch number")?)
+    .bind(to_i64(
+        commitment.start_block_height,
+        "rollup batch start block height",
+    )?)
+    .bind(to_i64(
+        commitment.end_block_height,
+        "rollup batch end block height",
+    )?)
+    .bind(&commitment.prev_state_root)
+    .bind(&commitment.new_state_root)
+    .bind(&commitment.transaction_root)
+    .bind(&commitment.block_hash_root)
+    .bind(&commitment.data_hash)
+    .bind(to_i32(
+        commitment.transaction_count,
+        "rollup batch transaction count",
+    )?)
+    .bind(serde_json::to_value(&commitment)?)
+    .execute(&mut **tx)
+    .await
+    .with_context(|| format!("failed to insert rollup batch {batch_number}"))?;
+
+    for block in chain
+        .blocks
+        .iter()
+        .filter(|block| block.height >= start_height && block.height <= end_height)
+    {
+        for (transaction_index, transaction) in block.transactions.iter().enumerate() {
+            let hash = transaction_hash(transaction);
+            sqlx::query(
+                r#"
+                INSERT INTO rollup_batch_transactions (
+                    batch_number, transaction_hash, block_height, transaction_index
+                )
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(to_i64(batch_number, "rollup batch number")?)
+            .bind(&hash)
+            .bind(to_i64(
+                block.height,
+                "rollup batch transaction block height",
+            )?)
+            .bind(to_i32(transaction_index, "rollup batch transaction index")?)
+            .execute(&mut **tx)
+            .await
+            .with_context(|| {
+                format!("failed to link transaction {hash} to rollup batch {batch_number}")
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn insert_transaction(

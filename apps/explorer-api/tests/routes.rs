@@ -54,11 +54,31 @@ async fn returns_chain_summary_and_latest_blocks() {
     assert_eq!(summary["genesis_finalized"], json!(true));
     assert_eq!(summary["valid"], json!(true));
 
-    let blocks = get_json(app, "/blocks").await;
-    assert_eq!(blocks.as_array().unwrap().len(), 2);
-    assert_eq!(blocks[0]["height"], json!(1));
-    assert_eq!(blocks[0]["transaction_count"], json!(1));
-    assert_eq!(blocks[1]["height"], json!(0));
+    let blocks = get_json(app.clone(), "/blocks").await;
+    assert_eq!(blocks["total"], json!(2));
+    assert_eq!(blocks["limit"], json!(50));
+    assert_eq!(blocks["offset"], json!(0));
+    assert_eq!(blocks["next_offset"], json!(null));
+    assert_eq!(blocks["items"].as_array().unwrap().len(), 2);
+    assert_eq!(blocks["items"][0]["height"], json!(1));
+    assert_eq!(blocks["items"][0]["transaction_count"], json!(1));
+    assert_eq!(blocks["items"][1]["height"], json!(0));
+
+    let first_page = get_json(app.clone(), "/blocks?limit=1").await;
+    assert_eq!(first_page["total"], json!(2));
+    assert_eq!(first_page["limit"], json!(1));
+    assert_eq!(first_page["offset"], json!(0));
+    assert_eq!(first_page["next_offset"], json!(1));
+    assert_eq!(first_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(first_page["items"][0]["height"], json!(1));
+
+    let second_page = get_json(app, "/blocks?limit=1&offset=1").await;
+    assert_eq!(second_page["total"], json!(2));
+    assert_eq!(second_page["limit"], json!(1));
+    assert_eq!(second_page["offset"], json!(1));
+    assert_eq!(second_page["next_offset"], json!(null));
+    assert_eq!(second_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(second_page["items"][0]["height"], json!(0));
 
     let _temp_dir_kept_alive = fixture.temp_dir;
 }
@@ -144,6 +164,32 @@ async fn searches_by_height_hash_address_and_transaction() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let _temp_dir_kept_alive = fixture.temp_dir;
+}
+
+#[tokio::test]
+async fn returns_rollup_batches_from_chain_blocks() {
+    let fixture = ChainFixture::new();
+    let app = app(fixture.chain_file.clone());
+
+    let batches = get_json(app.clone(), "/rollup/batches").await;
+    assert_eq!(batches["total"], json!(1));
+    assert_eq!(batches["items"].as_array().unwrap().len(), 1);
+    assert_eq!(batches["items"][0]["batch_number"], json!(0));
+    assert_eq!(batches["items"][0]["start_block_height"], json!(1));
+    assert_eq!(batches["items"][0]["end_block_height"], json!(1));
+    assert_eq!(batches["items"][0]["transaction_count"], json!(1));
+    assert_eq!(batches["items"][0]["status"], json!("built"));
+
+    let batch = get_json(app, "/rollup/batches/0").await;
+    assert_eq!(batch["batch_number"], json!(0));
+    assert_eq!(batch["transactions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        batch["transactions"][0]["hash"],
+        json!(fixture.transaction_hash)
+    );
+    assert_eq!(batch["transactions"][0]["block_height"], json!(1));
 
     let _temp_dir_kept_alive = fixture.temp_dir;
 }
