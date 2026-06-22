@@ -23,13 +23,11 @@ the contract owns finality rules for submitted rollup batches.
 
 ## Contract Inputs From Rust
 
-Generate a batch commitment from the local chain:
+Generate a batch through the explorer API sequencer, then export the settlement
+arguments:
 
 ```bash
-cargo run -p chain-cli -- --chain-file chain.json rollup batch \
-  --batch-number 0 \
-  --start-height 1 \
-  --end-height 1
+curl http://127.0.0.1:3000/rollup/batches/0/settlement-calldata
 ```
 
 The output maps to `submitBatch`:
@@ -43,8 +41,23 @@ block_hash_root  -> blockHashRoot
 data_hash        -> dataHash
 ```
 
-Hex strings from the CLI should be submitted as Solidity `bytes32` values with a
-`0x` prefix.
+The API response includes both named `args` and `ordered_args`. The latter is
+the direct argument order for `submitBatch(uint256,bytes32,bytes32,bytes32,bytes32,bytes32)`.
+
+## Tests
+
+The Foundry harness in `contracts/test/RollupSettlement.t.sol` covers:
+
+- bonded sequencer submission
+- challenge-window finalization
+- rejection of challenged batches
+- replacement of a rejected batch number
+
+Run:
+
+```bash
+forge test
+```
 
 ## Next Hardening Steps
 

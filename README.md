@@ -88,6 +88,7 @@ POST /rollup/transactions
 GET  /rollup/batches
 POST /rollup/batches
 GET  /rollup/batches/:batch_number
+GET  /rollup/batches/:batch_number/settlement-calldata
 GET  /errors
 GET  /errors/latest
 GET  /search/:query
@@ -101,6 +102,10 @@ already-pending transactions.
 validates them deterministically, writes the next block, updates account
 snapshots, marks pool rows as included or failed, and rebuilds the deterministic
 rollup batch commitment.
+
+`GET /rollup/batches/:batch_number/settlement-calldata` exports the built batch
+in the argument order expected by `RollupSettlement.submitBatch`, including
+Solidity-ready `0x`-prefixed `bytes32` roots.
 
 ## Explorer UI
 
@@ -156,6 +161,12 @@ cargo run -p merkle-cli -- verify \
 [`contracts/RollupSettlement.sol`](contracts/RollupSettlement.sol) models an
 optimistic settlement layer with bonded sequencing, state-root continuity,
 challenge windows, and forced-withdrawal requests.
+
+Run the contract tests with Foundry:
+
+```bash
+forge test
+```
 
 ## Checks
 

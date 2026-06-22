@@ -214,6 +214,26 @@ struct RollupBatchView {
 }
 
 #[derive(Debug, Serialize)]
+struct SettlementCalldata {
+    contract_name: String,
+    function: String,
+    signature: String,
+    args: SettlementSubmitBatchArgs,
+    ordered_args: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettlementSubmitBatchArgs {
+    batch_number: u64,
+    prev_state_root: String,
+    new_state_root: String,
+    transaction_root: String,
+    block_hash_root: String,
+    data_hash: String,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "kind", content = "data")]
 enum SearchResult {
     Block(BlockView),
@@ -256,6 +276,10 @@ pub fn app_with_pool(pool: PgPool) -> Router {
             get(rollup_batches).post(sequence_rollup_batch),
         )
         .route("/rollup/batches/:batch_number", get(rollup_batch_by_number))
+        .route(
+            "/rollup/batches/:batch_number/settlement-calldata",
+            get(rollup_batch_settlement_calldata),
+        )
         .route("/search/:query", get(search))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -297,6 +321,7 @@ async fn index() -> Json<Value> {
             "GET /rollup/batches",
             "POST /rollup/batches",
             "GET /rollup/batches/:batch_number",
+            "GET /rollup/batches/:batch_number/settlement-calldata",
             "GET /search/:query"
         ]
     }))
@@ -475,6 +500,27 @@ async fn rollup_batch_by_number(
                 .rollup_batch_by_number(batch_number)
                 .await?
                 .ok_or_else(|| ApiError::NotFound(format!("rollup batch {batch_number} not found")))
+        },
+    )
+    .await
+}
+
+async fn rollup_batch_settlement_calldata(
+    State(state): State<Arc<AppState>>,
+    Path(batch_number): Path<u64>,
+) -> Result<Json<Value>, ApiError> {
+    cached_json(
+        state,
+        format!("rollup:batches:{batch_number}:settlement-calldata"),
+        |source| async move {
+            let batch = source
+                .rollup_batch_by_number(batch_number)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!("rollup batch {batch_number} not found"))
+                })?;
+
+            settlement_calldata_from_batch(&batch.summary)
         },
     )
     .await
@@ -1592,6 +1638,45 @@ fn rollup_batch_summary_from_row(
     })
 }
 
+fn settlement_calldata_from_batch(
+    batch: &RollupBatchSummary,
+) -> Result<SettlementCalldata, ApiError> {
+    let args = SettlementSubmitBatchArgs {
+        batch_number: batch.batch_number,
+        prev_state_root: bytes32_hex(&batch.prev_state_root, "previous state root")?,
+        new_state_root: bytes32_hex(&batch.new_state_root, "new state root")?,
+        transaction_root: bytes32_hex(&batch.transaction_root, "transaction root")?,
+        block_hash_root: bytes32_hex(&batch.block_hash_root, "block hash root")?,
+        data_hash: bytes32_hex(&batch.data_hash, "data hash")?,
+    };
+
+    Ok(SettlementCalldata {
+        contract_name: "RollupSettlement".to_string(),
+        function: "submitBatch".to_string(),
+        signature: "submitBatch(uint256,bytes32,bytes32,bytes32,bytes32,bytes32)".to_string(),
+        ordered_args: vec![
+            json!(args.batch_number),
+            json!(args.prev_state_root),
+            json!(args.new_state_root),
+            json!(args.transaction_root),
+            json!(args.block_hash_root),
+            json!(args.data_hash),
+        ],
+        args,
+    })
+}
+
+fn bytes32_hex(value: &str, label: &str) -> Result<String, ApiError> {
+    let hex = value.strip_prefix("0x").unwrap_or(value);
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::InvalidIndexedData(format!(
+            "{label} must be a 32-byte hex string"
+        )));
+    }
+
+    Ok(format!("0x{}", hex.to_ascii_lowercase()))
+}
+
 fn parse_json_value<T: serde::de::DeserializeOwned>(
     value: serde_json::Value,
     label: &str,
@@ -1630,6 +1715,52 @@ fn usize_from_i64(value: i64, label: &str) -> Result<usize, ApiError> {
 
 fn usize_from_i32(value: i32, label: &str) -> Result<usize, ApiError> {
     usize::try_from(value).map_err(|_| ApiError::InvalidIndexedData(format!("{label} is negative")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settlement_calldata_uses_contract_argument_order_and_bytes32_hex() {
+        let batch = RollupBatchSummary {
+            batch_number: 7,
+            start_block_height: 1,
+            end_block_height: 3,
+            prev_state_root: "A".repeat(64),
+            new_state_root: "b".repeat(64),
+            transaction_root: "c".repeat(64),
+            block_hash_root: "d".repeat(64),
+            data_hash: "e".repeat(64),
+            transaction_count: 4,
+            status: "built".to_string(),
+        };
+
+        let calldata = settlement_calldata_from_batch(&batch).expect("valid calldata");
+
+        assert_eq!(calldata.contract_name, "RollupSettlement");
+        assert_eq!(calldata.function, "submitBatch");
+        assert_eq!(
+            calldata.signature,
+            "submitBatch(uint256,bytes32,bytes32,bytes32,bytes32,bytes32)"
+        );
+        assert_eq!(calldata.args.batch_number, 7);
+        assert_eq!(
+            calldata.args.prev_state_root,
+            format!("0x{}", "a".repeat(64))
+        );
+        assert_eq!(
+            calldata.ordered_args,
+            vec![
+                json!(7),
+                json!(format!("0x{}", "a".repeat(64))),
+                json!(format!("0x{}", "b".repeat(64))),
+                json!(format!("0x{}", "c".repeat(64))),
+                json!(format!("0x{}", "d".repeat(64))),
+                json!(format!("0x{}", "e".repeat(64))),
+            ]
+        );
+    }
 }
 
 impl IntoResponse for ApiError {

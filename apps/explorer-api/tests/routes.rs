@@ -91,6 +91,28 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
     let batch = get_json(app.clone(), "/rollup/batches/0").await;
     assert_eq!(batch["transactions"].as_array().unwrap().len(), 3);
 
+    let settlement = get_json(app.clone(), "/rollup/batches/0/settlement-calldata").await;
+    assert_eq!(settlement["contract_name"], json!("RollupSettlement"));
+    assert_eq!(settlement["function"], json!("submitBatch"));
+    assert_eq!(
+        settlement["signature"],
+        json!("submitBatch(uint256,bytes32,bytes32,bytes32,bytes32,bytes32)")
+    );
+    assert_eq!(settlement["args"]["batchNumber"], json!(0));
+    assert_eq!(settlement["ordered_args"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        settlement["ordered_args"][1],
+        settlement["args"]["prevStateRoot"]
+    );
+    assert_eq!(
+        settlement["ordered_args"][2],
+        settlement["args"]["newStateRoot"]
+    );
+    assert!(settlement["args"]["prevStateRoot"]
+        .as_str()
+        .expect("state root should be a string")
+        .starts_with("0x"));
+
     let new_transfer = sign_transfer(
         &fixture.alice_secret_key,
         fixture.bob_address.clone(),

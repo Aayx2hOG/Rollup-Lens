@@ -66,6 +66,10 @@ tarpaulin-report.html
 lcov.info
 .nyc_output/
 
+# Solidity / Foundry artifacts
+cache/
+out/
+
 # Temporary files
 tmp/
 temp/

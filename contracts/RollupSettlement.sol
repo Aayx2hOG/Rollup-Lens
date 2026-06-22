@@ -40,10 +40,10 @@ contract RollupSettlement {
     error PendingBatchExists();
     error ChallengeWindowOpen();
     error ChallengeWindowClosed();
-    error BatchChallenged();
+    error BatchAlreadyChallenged();
     error BatchNotChallenged();
-    error BatchFinalized();
-    error BatchRejected();
+    error BatchAlreadyFinalized();
+    error BatchAlreadyRejected();
     error BatchNotFinalized();
     error WithdrawalAlreadyResolved();
     error WithdrawalDelayOpen();
@@ -195,9 +195,9 @@ contract RollupSettlement {
     function challengeBatch(uint256 batchNumber, bytes calldata proof) external payable {
         Batch storage batch = batches[batchNumber];
         if (batch.submittedAt == 0) revert InvalidBatchNumber();
-        if (batch.finalized) revert BatchFinalized();
-        if (batch.rejected) revert BatchRejected();
-        if (batch.challenged) revert BatchChallenged();
+        if (batch.finalized) revert BatchAlreadyFinalized();
+        if (batch.rejected) revert BatchAlreadyRejected();
+        if (batch.challenged) revert BatchAlreadyChallenged();
         if (proof.length == 0) revert EmptyChallengeProof();
         if (msg.value != challengeBond) revert InvalidBond();
         if (block.timestamp >= batch.submittedAt + challengeWindow) revert ChallengeWindowClosed();
@@ -210,7 +210,7 @@ contract RollupSettlement {
     function rejectChallengedBatch(uint256 batchNumber) external onlyOwner {
         Batch storage batch = batches[batchNumber];
         if (!batch.challenged) revert BatchNotChallenged();
-        if (batch.finalized) revert BatchFinalized();
+        if (batch.finalized) revert BatchAlreadyFinalized();
 
         batch.rejected = true;
         hasPendingBatch = false;
@@ -233,8 +233,8 @@ contract RollupSettlement {
     function dismissChallenge(uint256 batchNumber) external onlyOwner {
         Batch storage batch = batches[batchNumber];
         if (!batch.challenged) revert BatchNotChallenged();
-        if (batch.finalized) revert BatchFinalized();
-        if (batch.rejected) revert BatchRejected();
+        if (batch.finalized) revert BatchAlreadyFinalized();
+        if (batch.rejected) revert BatchAlreadyRejected();
 
         batch.challenged = false;
         batch.challenger = address(0);
@@ -246,9 +246,9 @@ contract RollupSettlement {
     function finalizeBatch(uint256 batchNumber) external {
         Batch storage batch = batches[batchNumber];
         if (batch.submittedAt == 0) revert InvalidBatchNumber();
-        if (batch.finalized) revert BatchFinalized();
-        if (batch.rejected) revert BatchRejected();
-        if (batch.challenged) revert BatchChallenged();
+        if (batch.finalized) revert BatchAlreadyFinalized();
+        if (batch.rejected) revert BatchAlreadyRejected();
+        if (batch.challenged) revert BatchAlreadyChallenged();
         if (block.timestamp < batch.submittedAt + challengeWindow) revert ChallengeWindowOpen();
         if (batch.prevStateRoot != finalizedStateRoot) revert InvalidStateTransition();
 
