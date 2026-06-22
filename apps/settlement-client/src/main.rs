@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const DEFAULT_API_URL: &str = "http://127.0.0.1:3000";
@@ -36,6 +36,9 @@ struct Cli {
 
     #[arg(long, env = "CAST_BIN", default_value = "cast")]
     cast_bin: String,
+
+    #[arg(long, env = "EVM_CHAIN_ID")]
+    chain_id: Option<u64>,
 
     #[arg(long, global = true)]
     dry_run: bool,
@@ -75,6 +78,14 @@ enum SettlementCommand {
 struct SettlementCalldata {
     signature: String,
     ordered_args: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct SettlementStatusUpdate<'a> {
+    status: &'a str,
+    tx_hash: &'a str,
+    contract_address: &'a str,
+    chain_id: Option<u64>,
 }
 
 #[tokio::main]
@@ -119,6 +130,10 @@ async fn main() -> Result<()> {
                 action: "send",
                 args,
                 value: None,
+                persisted_status: Some(PersistedStatus {
+                    batch_number: *batch_number,
+                    status: "submitted",
+                }),
             }
         }
         SettlementCommand::FinalizeBatch { batch_number } => CastCommand {
@@ -129,11 +144,16 @@ async fn main() -> Result<()> {
                 batch_number.to_string(),
             ],
             value: None,
+            persisted_status: Some(PersistedStatus {
+                batch_number: *batch_number,
+                status: "finalized",
+            }),
         },
         SettlementCommand::DepositBond { value } => CastCommand {
             action: "send",
             args: vec![contract.clone(), DEPOSIT_BOND_SIGNATURE.to_string()],
             value: Some(value.clone()),
+            persisted_status: None,
         },
         SettlementCommand::SetSequencer { sequencer } => {
             validate_hex_address(&sequencer, "sequencer address")?;
@@ -145,11 +165,24 @@ async fn main() -> Result<()> {
                     sequencer.clone(),
                 ],
                 value: None,
+                persisted_status: None,
             }
         }
     };
 
-    run_cast(&cli, &rpc_url, &private_key, command)
+    let output = run_cast(&cli, &rpc_url, &private_key, command)?;
+    if let Some(persisted) = output.persisted_status {
+        persist_settlement_status(
+            &cli.api_url,
+            persisted.batch_number,
+            persisted.status,
+            &output.tx_hash,
+            &contract,
+            cli.chain_id,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn fetch_settlement_calldata(api_url: &str, batch_number: u64) -> Result<SettlementCalldata> {
@@ -175,9 +208,27 @@ struct CastCommand {
     action: &'static str,
     args: Vec<String>,
     value: Option<String>,
+    persisted_status: Option<PersistedStatus>,
 }
 
-fn run_cast(cli: &Cli, rpc_url: &str, private_key: &str, command: CastCommand) -> Result<()> {
+#[derive(Debug, Clone, Copy)]
+struct PersistedStatus {
+    batch_number: u64,
+    status: &'static str,
+}
+
+#[derive(Debug)]
+struct CastOutput {
+    tx_hash: String,
+    persisted_status: Option<PersistedStatus>,
+}
+
+fn run_cast(
+    cli: &Cli,
+    rpc_url: &str,
+    private_key: &str,
+    command: CastCommand,
+) -> Result<CastOutput> {
     let mut args = vec![
         OsString::from(command.action),
         OsString::from("--rpc-url"),
@@ -195,18 +246,62 @@ fn run_cast(cli: &Cli, rpc_url: &str, private_key: &str, command: CastCommand) -
 
     if cli.dry_run {
         println!("{}", printable_command(&cli.cast_bin, &args));
-        return Ok(());
+        return Ok(CastOutput {
+            tx_hash: String::new(),
+            persisted_status: None,
+        });
     }
 
-    let status = Command::new(&cli.cast_bin)
+    let output = Command::new(&cli.cast_bin)
         .args(&args)
         .stdin(Stdio::null())
-        .status()
+        .output()
         .with_context(|| format!("failed to run {}", cli.cast_bin))?;
 
-    if !status.success() {
-        bail!("cast exited with status {status}");
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+
+    if !output.status.success() {
+        bail!("cast exited with status {}", output.status);
     }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tx_hash = extract_tx_hash(&stdout)
+        .with_context(|| "cast succeeded but no transaction hash was found in stdout")?;
+    Ok(CastOutput {
+        tx_hash,
+        persisted_status: command.persisted_status,
+    })
+}
+
+async fn persist_settlement_status(
+    api_url: &str,
+    batch_number: u64,
+    status: &str,
+    tx_hash: &str,
+    contract_address: &str,
+    chain_id: Option<u64>,
+) -> Result<()> {
+    let api_url = api_url.trim_end_matches('/');
+    let url = format!("{api_url}/rollup/batches/{batch_number}/settlement");
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(&SettlementStatusUpdate {
+            status,
+            tx_hash,
+            contract_address,
+            chain_id,
+        })
+        .send()
+        .await
+        .with_context(|| format!("failed to persist settlement status to {url}"))?;
+    let response_status = response.status();
+    if !response_status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("settlement status persistence failed with {response_status}: {body}");
+    }
+
+    println!("persisted {status} settlement status for batch {batch_number}: {tx_hash}");
     Ok(())
 }
 
@@ -217,6 +312,18 @@ fn cast_arg(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         other => other.to_string(),
     }
+}
+
+fn extract_tx_hash(output: &str) -> Option<String> {
+    output
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, ':' | ',' | '"' | '\'')
+        })
+        .find_map(|part| {
+            let hex = part.strip_prefix("0x")?;
+            (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then(|| format!("0x{}", hex.to_ascii_lowercase()))
+        })
 }
 
 fn printable_command(bin: &str, args: &[OsString]) -> String {
@@ -312,5 +419,16 @@ mod tests {
             DRY_RUN_RPC_URL
         );
         assert!(required_or_dry_run_default(&None, false, "rpc URL", DRY_RUN_RPC_URL).is_err());
+    }
+
+    #[test]
+    fn extracts_transaction_hash_from_cast_output() {
+        let hash = format!("0x{}", "A".repeat(64));
+        let output = format!("transactionHash {hash}\nblockNumber 1\n");
+
+        assert_eq!(
+            extract_tx_hash(&output),
+            Some(format!("0x{}", "a".repeat(64)))
+        );
     }
 }

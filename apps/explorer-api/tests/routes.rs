@@ -90,6 +90,7 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
 
     let batch = get_json(app.clone(), "/rollup/batches/0").await;
     assert_eq!(batch["transactions"].as_array().unwrap().len(), 3);
+    assert_eq!(batch["l1_submit_tx_hash"], Value::Null);
 
     let settlement = get_json(app.clone(), "/rollup/batches/0/settlement-calldata").await;
     assert_eq!(settlement["contract_name"], json!("RollupSettlement"));
@@ -112,6 +113,47 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
         .as_str()
         .expect("state root should be a string")
         .starts_with("0x"));
+
+    let submit_hash = format!("0x{}", "a".repeat(64));
+    let contract_address = format!("0x{}", "b".repeat(40));
+    let settlement_update = post_json(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &json!({
+            "status": "submitted",
+            "tx_hash": submit_hash,
+            "contract_address": contract_address,
+            "chain_id": 31337
+        }),
+    )
+    .await;
+    assert_eq!(settlement_update.status(), StatusCode::OK);
+    let settlement_update = response_json(settlement_update).await;
+    assert_eq!(settlement_update["status"], json!("submitted"));
+    assert_eq!(
+        settlement_update["l1_submit_tx_hash"],
+        json!(format!("0x{}", "a".repeat(64)))
+    );
+    assert_eq!(settlement_update["l1_chain_id"], json!(31337));
+
+    let finalize_hash = format!("0x{}", "c".repeat(64));
+    let finalized_update = post_json(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &json!({
+            "status": "finalized",
+            "tx_hash": finalize_hash,
+            "contract_address": contract_address
+        }),
+    )
+    .await;
+    assert_eq!(finalized_update.status(), StatusCode::OK);
+    let finalized_update = response_json(finalized_update).await;
+    assert_eq!(finalized_update["status"], json!("finalized"));
+    assert_eq!(
+        finalized_update["l1_finalize_tx_hash"],
+        json!(format!("0x{}", "c".repeat(64)))
+    );
 
     let new_transfer = sign_transfer(
         &fixture.alice_secret_key,
@@ -230,6 +272,7 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0002_error_events/migration.sql"),
     include_str!("../../../prisma/migrations/0003_rollup_batches/migration.sql"),
     include_str!("../../../prisma/migrations/0004_transaction_pool/migration.sql"),
+    include_str!("../../../prisma/migrations/0005_l1_settlement_status/migration.sql"),
 ];
 
 fn optional_test_database_url() -> Option<String> {

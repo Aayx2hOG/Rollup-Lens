@@ -43,6 +43,8 @@ Thumbs.db
 # Codex/agent local workspace metadata
 .codex/
 .agents/
+next_project.txt
+docs/system-design.md
 
 # Frontend artifacts for future dashboard work
 node_modules/

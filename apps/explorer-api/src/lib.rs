@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use chain_core::{
@@ -80,6 +80,14 @@ struct PageQuery {
 #[derive(Debug, Deserialize)]
 struct SequenceBatchRequest {
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SettlementStatusUpdate {
+    status: String,
+    tx_hash: String,
+    contract_address: String,
+    chain_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -204,6 +212,12 @@ struct RollupBatchSummary {
     data_hash: String,
     transaction_count: usize,
     status: String,
+    l1_chain_id: Option<u64>,
+    l1_contract_address: Option<String>,
+    l1_submit_tx_hash: Option<String>,
+    l1_submitted_at: Option<String>,
+    l1_finalize_tx_hash: Option<String>,
+    l1_finalized_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -280,6 +294,10 @@ pub fn app_with_pool(pool: PgPool) -> Router {
             "/rollup/batches/:batch_number/settlement-calldata",
             get(rollup_batch_settlement_calldata),
         )
+        .route(
+            "/rollup/batches/:batch_number/settlement",
+            post(update_rollup_batch_settlement),
+        )
         .route("/search/:query", get(search))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -322,6 +340,7 @@ async fn index() -> Json<Value> {
             "POST /rollup/batches",
             "GET /rollup/batches/:batch_number",
             "GET /rollup/batches/:batch_number/settlement-calldata",
+            "POST /rollup/batches/:batch_number/settlement",
             "GET /search/:query"
         ]
     }))
@@ -524,6 +543,22 @@ async fn rollup_batch_settlement_calldata(
         },
     )
     .await
+}
+
+async fn update_rollup_batch_settlement(
+    State(state): State<Arc<AppState>>,
+    Path(batch_number): Path<u64>,
+    Json(update): Json<SettlementStatusUpdate>,
+) -> Result<Json<Value>, ApiError> {
+    let updated = DbSource {
+        pool: state.pool.clone(),
+    }
+    .update_rollup_batch_settlement(batch_number, update)
+    .await?;
+    state.cache_clear();
+    serde_json::to_value(updated)
+        .map(Json)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
 }
 
 async fn search(
@@ -1030,7 +1065,13 @@ impl DbSource {
                 block_hash_root,
                 data_hash,
                 transaction_count,
-                status
+                status,
+                l1_chain_id,
+                l1_contract_address,
+                l1_submit_tx_hash,
+                l1_submitted_at::text AS l1_submitted_at,
+                l1_finalize_tx_hash,
+                l1_finalized_at::text AS l1_finalized_at
             FROM rollup_batches
             ORDER BY batch_number DESC
             LIMIT $1 OFFSET $2
@@ -1069,7 +1110,13 @@ impl DbSource {
                 block_hash_root,
                 data_hash,
                 transaction_count,
-                status
+                status,
+                l1_chain_id,
+                l1_contract_address,
+                l1_submit_tx_hash,
+                l1_submitted_at::text AS l1_submitted_at,
+                l1_finalize_tx_hash,
+                l1_finalized_at::text AS l1_finalized_at
             FROM rollup_batches
             WHERE batch_number = $1
             "#,
@@ -1105,6 +1152,105 @@ impl DbSource {
             summary,
             transactions,
         }))
+    }
+
+    async fn update_rollup_batch_settlement(
+        &self,
+        batch_number: u64,
+        update: SettlementStatusUpdate,
+    ) -> Result<RollupBatchSummary, ApiError> {
+        validate_settlement_status(&update.status)?;
+        validate_prefixed_hex(&update.tx_hash, 64, "settlement transaction hash")?;
+        validate_prefixed_hex(&update.contract_address, 40, "settlement contract address")?;
+
+        let row = match update.status.as_str() {
+            "submitted" => sqlx::query(
+                r#"
+                    UPDATE rollup_batches
+                    SET
+                        status = 'submitted',
+                        l1_chain_id = $2,
+                        l1_contract_address = $3,
+                        l1_submit_tx_hash = $4,
+                        l1_submitted_at = COALESCE(l1_submitted_at, now())
+                    WHERE batch_number = $1
+                    RETURNING
+                        batch_number,
+                        start_block_height,
+                        end_block_height,
+                        prev_state_root,
+                        new_state_root,
+                        transaction_root,
+                        block_hash_root,
+                        data_hash,
+                        transaction_count,
+                        status,
+                        l1_chain_id,
+                        l1_contract_address,
+                        l1_submit_tx_hash,
+                        l1_submitted_at::text AS l1_submitted_at,
+                        l1_finalize_tx_hash,
+                        l1_finalized_at::text AS l1_finalized_at
+                    "#,
+            )
+            .bind(to_i64(batch_number, "rollup batch number")?)
+            .bind(
+                update
+                    .chain_id
+                    .map(|chain_id| to_i64(chain_id, "L1 chain id"))
+                    .transpose()?,
+            )
+            .bind(update.contract_address.to_ascii_lowercase())
+            .bind(update.tx_hash.to_ascii_lowercase())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(database_error)?,
+            "finalized" => sqlx::query(
+                r#"
+                    UPDATE rollup_batches
+                    SET
+                        status = 'finalized',
+                        l1_chain_id = COALESCE($2, l1_chain_id),
+                        l1_contract_address = COALESCE(l1_contract_address, $3),
+                        l1_finalize_tx_hash = $4,
+                        l1_finalized_at = COALESCE(l1_finalized_at, now())
+                    WHERE batch_number = $1
+                    RETURNING
+                        batch_number,
+                        start_block_height,
+                        end_block_height,
+                        prev_state_root,
+                        new_state_root,
+                        transaction_root,
+                        block_hash_root,
+                        data_hash,
+                        transaction_count,
+                        status,
+                        l1_chain_id,
+                        l1_contract_address,
+                        l1_submit_tx_hash,
+                        l1_submitted_at::text AS l1_submitted_at,
+                        l1_finalize_tx_hash,
+                        l1_finalized_at::text AS l1_finalized_at
+                    "#,
+            )
+            .bind(to_i64(batch_number, "rollup batch number")?)
+            .bind(
+                update
+                    .chain_id
+                    .map(|chain_id| to_i64(chain_id, "L1 chain id"))
+                    .transpose()?,
+            )
+            .bind(update.contract_address.to_ascii_lowercase())
+            .bind(update.tx_hash.to_ascii_lowercase())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(database_error)?,
+            _ => unreachable!("settlement status validated"),
+        }
+        .ok_or_else(|| ApiError::NotFound(format!("rollup batch {batch_number} not found")))?;
+
+        rollup_batch_summary_from_row(row)
     }
 }
 
@@ -1447,6 +1593,12 @@ async fn rebuild_rollup_batch_tx(
         data_hash: commitment.data_hash,
         transaction_count: commitment.transaction_count,
         status: "built".to_string(),
+        l1_chain_id: None,
+        l1_contract_address: None,
+        l1_submit_tx_hash: None,
+        l1_submitted_at: None,
+        l1_finalize_tx_hash: None,
+        l1_finalized_at: None,
     }))
 }
 
@@ -1635,6 +1787,15 @@ fn rollup_batch_summary_from_row(
         data_hash: row.get("data_hash"),
         transaction_count: usize_from_i32(row.get("transaction_count"), "transaction count")?,
         status: row.get("status"),
+        l1_chain_id: row
+            .get::<Option<i64>, _>("l1_chain_id")
+            .map(|chain_id| from_i64(chain_id, "L1 chain id"))
+            .transpose()?,
+        l1_contract_address: row.get("l1_contract_address"),
+        l1_submit_tx_hash: row.get("l1_submit_tx_hash"),
+        l1_submitted_at: row.get("l1_submitted_at"),
+        l1_finalize_tx_hash: row.get("l1_finalize_tx_hash"),
+        l1_finalized_at: row.get("l1_finalized_at"),
     })
 }
 
@@ -1675,6 +1836,28 @@ fn bytes32_hex(value: &str, label: &str) -> Result<String, ApiError> {
     }
 
     Ok(format!("0x{}", hex.to_ascii_lowercase()))
+}
+
+fn validate_prefixed_hex(value: &str, hex_len: usize, label: &str) -> Result<(), ApiError> {
+    let Some(hex) = value.strip_prefix("0x") else {
+        return Err(ApiError::BadRequest(format!("{label} must start with 0x")));
+    };
+    if hex.len() != hex_len || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(format!(
+            "{label} must be {hex_len} hex characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_settlement_status(status: &str) -> Result<(), ApiError> {
+    if matches!(status, "submitted" | "finalized") {
+        return Ok(());
+    }
+
+    Err(ApiError::BadRequest(
+        "settlement status must be submitted or finalized".to_string(),
+    ))
 }
 
 fn parse_json_value<T: serde::de::DeserializeOwned>(
@@ -1734,6 +1917,12 @@ mod tests {
             data_hash: "e".repeat(64),
             transaction_count: 4,
             status: "built".to_string(),
+            l1_chain_id: None,
+            l1_contract_address: None,
+            l1_submit_tx_hash: None,
+            l1_submitted_at: None,
+            l1_finalize_tx_hash: None,
+            l1_finalized_at: None,
         };
 
         let calldata = settlement_calldata_from_batch(&batch).expect("valid calldata");

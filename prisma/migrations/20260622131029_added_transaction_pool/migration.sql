@@ -1,0 +1,5 @@
+-- No-op migration.
+--
+-- The transaction_pool table is defined in ../0004_transaction_pool/migration.sql.
+-- This directory exists in the migration history, so Prisma requires a
+-- migration.sql file here even though there is no additional database change.

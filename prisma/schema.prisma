@@ -100,6 +100,12 @@ model RollupBatch {
   dataHash        String                    @unique @map("data_hash")
   transactionCount Int                      @map("transaction_count")
   status          String
+  l1ChainId       BigInt?                   @map("l1_chain_id")
+  l1ContractAddress String?                 @map("l1_contract_address")
+  l1SubmitTxHash  String?                   @map("l1_submit_tx_hash")
+  l1SubmittedAt   DateTime?                 @map("l1_submitted_at")
+  l1FinalizeTxHash String?                  @map("l1_finalize_tx_hash")
+  l1FinalizedAt   DateTime?                 @map("l1_finalized_at")
   rawCommitment   Json                      @map("raw_commitment")
   transactions    RollupBatchTransaction[]
 

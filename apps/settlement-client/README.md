@@ -40,11 +40,18 @@ Submit a built rollup batch:
 cargo run -p settlement-client -- submit-batch --batch-number 0
 ```
 
+After a successful broadcast, the client extracts the returned L1 transaction
+hash and persists it to the explorer API as the batch's `submitted` settlement
+status.
+
 Finalize the batch after the challenge window:
 
 ```bash
 cargo run -p settlement-client -- finalize-batch --batch-number 0
 ```
+
+After a successful finalize transaction, the client persists the finalize hash
+and marks the batch `finalized` in Postgres.
 
 Use `--dry-run` to print the `cast send` command without broadcasting:
 

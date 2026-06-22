@@ -86,6 +86,12 @@ export type RollupBatchSummary = {
   data_hash: string;
   transaction_count: number;
   status: string;
+  l1_chain_id: number | null;
+  l1_contract_address: string | null;
+  l1_submit_tx_hash: string | null;
+  l1_submitted_at: string | null;
+  l1_finalize_tx_hash: string | null;
+  l1_finalized_at: string | null;
 };
 
 export type RollupBatch = RollupBatchSummary & {
@@ -115,6 +121,13 @@ export type SequencedBatch = {
   rollup_batch: RollupBatchSummary | null;
   included_transactions: TransactionPoolEntry[];
   failed_transactions: TransactionPoolEntry[];
+};
+
+export type SettlementStatusUpdate = {
+  status: "submitted" | "finalized";
+  tx_hash: string;
+  contract_address: string;
+  chain_id?: number;
 };
 
 export type SearchResult =
@@ -162,5 +175,10 @@ export const api = {
   errors: () => request<ErrorEvent[]>("/errors"),
   rollupBatches: (limit = 50, offset = 0) => request<Page<RollupBatchSummary>>(`/rollup/batches?limit=${limit}&offset=${offset}`),
   rollupBatch: (batchNumber: number) => request<RollupBatch>(`/rollup/batches/${batchNumber}`),
+  updateSettlement: (batchNumber: number, update: SettlementStatusUpdate) => request<RollupBatchSummary>(`/rollup/batches/${batchNumber}/settlement`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(update),
+  }),
   search: (query: string) => request<SearchResult>(`/search/${encodeURIComponent(query)}`),
 };

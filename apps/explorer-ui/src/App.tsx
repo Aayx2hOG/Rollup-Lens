@@ -867,11 +867,14 @@ function RollupView({
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm font-semibold text-white">Batch {batch.batch_number}</div>
-                  <Badge tone={batch.status === "built" ? "good" : "neutral"}>{batch.status}</Badge>
+                  <Badge tone={settlementStatusTone(batch.status)}>{batch.status}</Badge>
                 </div>
                 <div className="mt-2 text-xs text-white/46">
                   blocks {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "tx", "txs")}
                 </div>
+                {batch.l1_submit_tx_hash && (
+                  <div className="mt-2 text-xs text-mint/72">L1 {shortHash(batch.l1_submit_tx_hash, 10, 8)}</div>
+                )}
                 <div className="hash mt-2 text-xs text-white/48">{shortHash(batch.data_hash, 10, 8)}</div>
               </button>
             ))
@@ -895,12 +898,23 @@ function RollupView({
               <MetricLine label="End block" value={selectedBatch.end_block_height} />
               <MetricLine label="Transactions" value={selectedBatch.transaction_count} />
             </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <StatusLine label="Settlement" ok={selectedBatch.status === "finalized"} value={<Badge tone={settlementStatusTone(selectedBatch.status)}>{selectedBatch.status}</Badge>} />
+              <MetricLine label="L1 chain" value={selectedBatch.l1_chain_id ?? "none"} />
+              <MetricLine label="Submitted" value={selectedBatch.l1_submitted_at ? "yes" : "no"} />
+            </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <HashLine label="Previous state root" value={selectedBatch.prev_state_root} />
               <HashLine label="New state root" value={selectedBatch.new_state_root} />
               <HashLine label="Transaction root" value={selectedBatch.transaction_root} />
               <HashLine label="Block hash root" value={selectedBatch.block_hash_root} />
               <HashLine label="Data hash" value={selectedBatch.data_hash} />
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <HashLine label="L1 contract" value={selectedBatch.l1_contract_address} />
+              <HashLine label="Submit tx" value={selectedBatch.l1_submit_tx_hash} />
+              <HashLine label="Finalize tx" value={selectedBatch.l1_finalize_tx_hash} />
+              <HashLine label="Finalized at" value={selectedBatch.l1_finalized_at} />
             </div>
             <div className="overflow-hidden rounded-lg border border-white/10">
               <div className="grid grid-cols-[auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
@@ -962,6 +976,13 @@ function HashLine({ label, value }: { label: string; value?: string | null }) {
       </div>
     </div>
   );
+}
+
+function settlementStatusTone(status: string): "neutral" | "good" | "warn" | "bad" {
+  if (status === "finalized") return "good";
+  if (status === "submitted") return "warn";
+  if (status === "rejected" || status === "challenged") return "bad";
+  return "neutral";
 }
 
 function MetricLine({ label, value }: { label: string; value: React.ReactNode }) {
