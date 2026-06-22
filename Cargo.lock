@@ -225,17 +225,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "chain-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chain-core",
- "clap",
- "serde_json",
- "wallet-core",
-]
-
-[[package]]
 name = "chain-core"
 version = "0.1.0"
 dependencies = [
@@ -245,19 +234,6 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "wallet-core",
-]
-
-[[package]]
-name = "chain-indexer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chain-core",
- "clap",
- "dotenvy",
- "serde_json",
- "sqlx",
- "tokio",
 ]
 
 [[package]]

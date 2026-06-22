@@ -257,7 +257,7 @@ pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
     ensure_genesis_finalized(chain)?;
     let mut next_accounts = chain.accounts.clone();
     for transaction in &chain.pending_transactions {
-        apply_transaction(&mut next_accounts, transaction)?;
+        apply_transaction_to_state(&mut next_accounts, transaction)?;
     }
 
     let state_root = state_root(&next_accounts);
@@ -281,6 +281,31 @@ pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
 
     chain.accounts = next_accounts;
     chain.blocks.push(block.clone());
+    Ok(block)
+}
+
+pub fn produce_block_from_indexed_state(
+    accounts: &mut BTreeMap<String, Account>,
+    parent_block: &Block,
+    transactions: Vec<Transfer>,
+) -> Result<Block, ChainError> {
+    let mut next_accounts = accounts.clone();
+    for transaction in &transactions {
+        apply_transaction_to_state(&mut next_accounts, transaction)?;
+    }
+
+    let state_root = state_root(&next_accounts);
+    let height = parent_block.height + 1;
+    let block_hash = block_hash(height, &parent_block.block_hash, &transactions, &state_root);
+    let block = Block {
+        height,
+        parent_hash: parent_block.block_hash.clone(),
+        transactions,
+        state_root,
+        block_hash,
+    };
+
+    *accounts = next_accounts;
     Ok(block)
 }
 
@@ -309,7 +334,7 @@ pub fn validate_chain(chain: &Chain) -> Result<(), ChainError> {
             }
         } else {
             for transaction in &block.transactions {
-                apply_transaction(&mut accounts, transaction)?;
+                apply_transaction_to_state(&mut accounts, transaction)?;
             }
         }
 
@@ -445,6 +470,112 @@ pub fn rollup_batch_commitment(
     })
 }
 
+pub fn rollup_batch_commitment_from_blocks(
+    batch_number: u64,
+    previous_block: &Block,
+    blocks: &[Block],
+) -> Result<RollupBatchCommitment, ChainError> {
+    if previous_block.height == 0 && blocks.first().is_none() {
+        return Err(ChainError::InvalidBatchRange { start: 1, end: 0 });
+    }
+
+    let first_block = blocks.first().ok_or(ChainError::InvalidBatchRange {
+        start: previous_block.height + 1,
+        end: previous_block.height,
+    })?;
+    if first_block.height == 0 {
+        return Err(ChainError::InvalidBatchStart);
+    }
+    if first_block.height != previous_block.height + 1 {
+        return Err(ChainError::InvalidHeight {
+            expected: previous_block.height + 1,
+            actual: first_block.height,
+        });
+    }
+
+    let mut expected_parent = previous_block.block_hash.clone();
+    for (index, block) in blocks.iter().enumerate() {
+        let expected_height = first_block.height + index as u64;
+        if block.height != expected_height {
+            return Err(ChainError::InvalidHeight {
+                expected: expected_height,
+                actual: block.height,
+            });
+        }
+        if block.parent_hash != expected_parent {
+            return Err(ChainError::InvalidParentHash {
+                height: block.height,
+            });
+        }
+        let expected_block_hash = block_hash(
+            block.height,
+            &block.parent_hash,
+            &block.transactions,
+            &block.state_root,
+        );
+        if block.block_hash != expected_block_hash {
+            return Err(ChainError::InvalidBlockHash {
+                height: block.height,
+            });
+        }
+        expected_parent = block.block_hash.clone();
+    }
+
+    let last_block = blocks
+        .last()
+        .expect("non-empty block slice checked before last block lookup");
+    let transaction_leaves =
+        blocks
+            .iter()
+            .flat_map(|block| {
+                block.transactions.iter().enumerate().map(
+                    move |(transaction_index, transaction)| {
+                        json!({
+                            "block_height": block.height,
+                            "transaction_index": transaction_index,
+                            "transaction_hash": transaction_hash(transaction),
+                            "transfer": transaction,
+                        })
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+    let block_hash_leaves = blocks
+        .iter()
+        .map(|block| {
+            json!({
+                "height": block.height,
+                "block_hash": block.block_hash,
+                "state_root": block.state_root,
+            })
+        })
+        .collect::<Vec<_>>();
+    let data = BatchDataCommitment {
+        domain: BATCH_DATA_HASH_DOMAIN,
+        chain_id: LOCAL_CHAIN_ID,
+        batch_number,
+        start_block_height: first_block.height,
+        end_block_height: last_block.height,
+        prev_state_root: &previous_block.state_root,
+        new_state_root: &last_block.state_root,
+        blocks,
+    };
+    let data_payload =
+        serde_json::to_vec(&data).expect("serializing a rollup batch should not fail");
+
+    Ok(RollupBatchCommitment {
+        batch_number,
+        start_block_height: first_block.height,
+        end_block_height: last_block.height,
+        prev_state_root: previous_block.state_root.clone(),
+        new_state_root: last_block.state_root.clone(),
+        transaction_root: root_hex(&transaction_leaves),
+        block_hash_root: root_hex(&block_hash_leaves),
+        data_hash: encode_hex(&Sha256::digest(data_payload)),
+        transaction_count: transaction_leaves.len(),
+    })
+}
+
 pub fn validate_transaction(
     accounts: &BTreeMap<String, Account>,
     transaction: &Transfer,
@@ -494,7 +625,7 @@ pub fn validate_transaction(
     Ok(())
 }
 
-fn apply_transaction(
+pub fn apply_transaction_to_state(
     accounts: &mut BTreeMap<String, Account>,
     transaction: &Transfer,
 ) -> Result<(), ChainError> {
@@ -524,7 +655,7 @@ fn apply_transaction(
 fn pending_state(chain: &Chain) -> Result<BTreeMap<String, Account>, ChainError> {
     let mut accounts = chain.accounts.clone();
     for pending in &chain.pending_transactions {
-        apply_transaction(&mut accounts, pending)?;
+        apply_transaction_to_state(&mut accounts, pending)?;
     }
     Ok(accounts)
 }

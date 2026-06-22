@@ -92,6 +92,31 @@ export type RollupBatch = RollupBatchSummary & {
   transactions: TransactionView[];
 };
 
+export type TransactionPoolEntry = {
+  id: number;
+  hash: string;
+  status: "pending" | "included" | "failed" | "expired" | string;
+  failure_reason: string | null;
+  included_block_height: number | null;
+  included_transaction_index: number | null;
+  created_at: string;
+  updated_at: string;
+  transfer: Transfer;
+};
+
+export type SubmittedTransaction = {
+  hash: string;
+  status: string;
+  transfer: Transfer;
+};
+
+export type SequencedBatch = {
+  block: Block;
+  rollup_batch: RollupBatchSummary | null;
+  included_transactions: TransactionPoolEntry[];
+  failed_transactions: TransactionPoolEntry[];
+};
+
 export type SearchResult =
   | { kind: "Block"; data: Block }
   | { kind: "Account"; data: Account }
@@ -101,8 +126,8 @@ type ApiError = {
   error?: string;
 };
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`);
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, init);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
@@ -123,6 +148,17 @@ export const api = {
   block: (height: number) => request<Block>(`/blocks/${height}`),
   account: (address: string) => request<Account>(`/accounts/${encodeURIComponent(address)}`),
   transaction: (hash: string) => request<TransactionView>(`/transactions/${encodeURIComponent(hash)}`),
+  transactionPool: (limit = 50, offset = 0) => request<Page<TransactionPoolEntry>>(`/rollup/transactions?limit=${limit}&offset=${offset}`),
+  submitTransaction: (transfer: Transfer) => request<SubmittedTransaction>("/rollup/transactions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(transfer),
+  }),
+  sequenceBatch: (limit = 100) => request<SequencedBatch>("/rollup/batches", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ limit }),
+  }),
   errors: () => request<ErrorEvent[]>("/errors"),
   rollupBatches: (limit = 50, offset = 0) => request<Page<RollupBatchSummary>>(`/rollup/batches?limit=${limit}&offset=${offset}`),
   rollupBatch: (batchNumber: number) => request<RollupBatch>(`/rollup/batches/${batchNumber}`),

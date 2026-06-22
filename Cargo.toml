@@ -6,8 +6,6 @@ members = [
     "crates/chain-core",
     "apps/wallet-cli",
     "apps/merkle-cli",
-    "apps/chain-cli",
-    "apps/chain-indexer",
     "apps/explorer-api",
 ]
 

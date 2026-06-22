@@ -1,8 +1,7 @@
 use std::{
-    collections::HashMap,
-    fmt, fs,
+    collections::{BTreeMap, HashMap},
+    fmt,
     future::Future,
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -15,7 +14,8 @@ use axum::{
     Json, Router,
 };
 use chain_core::{
-    rollup_batch_commitment, state_root, transaction_hash, validate_chain, Account, Block, Chain,
+    apply_transaction_to_state, produce_block_from_indexed_state,
+    rollup_batch_commitment_from_blocks, state_root, transaction_hash, Account, Block,
     RollupBatchCommitment, Transfer,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ const MAX_PAGE_LIMIT: usize = 100;
 
 #[derive(Debug, Clone)]
 struct AppState {
-    source: ChainSource,
+    pool: PgPool,
     cache: Arc<Mutex<ResponseCache>>,
 }
 
@@ -45,9 +45,8 @@ struct CacheEntry {
 }
 
 #[derive(Debug, Clone)]
-enum ChainSource {
-    Json { chain_file: PathBuf },
-    Postgres { pool: PgPool },
+struct DbSource {
+    pool: PgPool,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +75,11 @@ struct BlockSummary {
 struct PageQuery {
     limit: Option<usize>,
     offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SequenceBatchRequest {
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +144,34 @@ struct TransactionView {
 }
 
 #[derive(Debug, Serialize)]
+struct TransactionPoolEntryView {
+    id: u64,
+    hash: String,
+    status: String,
+    failure_reason: Option<String>,
+    included_block_height: Option<u64>,
+    included_transaction_index: Option<usize>,
+    created_at: String,
+    updated_at: String,
+    transfer: Transfer,
+}
+
+#[derive(Debug, Serialize)]
+struct SubmittedTransaction {
+    hash: String,
+    status: String,
+    transfer: Transfer,
+}
+
+#[derive(Debug, Serialize)]
+struct SequencedBatch {
+    block: BlockView,
+    rollup_batch: Option<RollupBatchSummary>,
+    included_transactions: Vec<TransactionPoolEntryView>,
+    failed_transactions: Vec<TransactionPoolEntryView>,
+}
+
+#[derive(Debug, Serialize)]
 struct BlockView {
     height: u64,
     parent_hash: String,
@@ -193,23 +225,14 @@ enum SearchResult {
 enum ApiError {
     BadRequest(String),
     NotFound(String),
-    ReadChain(String),
-    ParseChain(String),
     Database(String),
     InvalidIndexedData(String),
-}
-
-pub fn app(chain_file: PathBuf) -> Router {
-    app_with_source(ChainSource::Json { chain_file })
+    Conflict(String),
 }
 
 pub fn app_with_pool(pool: PgPool) -> Router {
-    app_with_source(ChainSource::Postgres { pool })
-}
-
-fn app_with_source(source: ChainSource) -> Router {
     let state = Arc::new(AppState {
-        source,
+        pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
     });
 
@@ -222,9 +245,16 @@ fn app_with_source(source: ChainSource) -> Router {
         .route("/blocks/hash/:hash", get(block_by_hash))
         .route("/accounts/:address", get(account_by_address))
         .route("/transactions/:hash", get(transaction_by_hash))
+        .route(
+            "/rollup/transactions",
+            get(transaction_pool).post(submit_transaction),
+        )
         .route("/errors", get(errors))
         .route("/errors/latest", get(latest_error))
-        .route("/rollup/batches", get(rollup_batches))
+        .route(
+            "/rollup/batches",
+            get(rollup_batches).post(sequence_rollup_batch),
+        )
         .route("/rollup/batches/:batch_number", get(rollup_batch_by_number))
         .route("/search/:query", get(search))
         .layer(CorsLayer::permissive())
@@ -232,7 +262,11 @@ fn app_with_source(source: ChainSource) -> Router {
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let latest_error = state.source.latest_error().await?;
+    let latest_error = DbSource {
+        pool: state.pool.clone(),
+    }
+    .latest_error()
+    .await?;
     let status = if latest_error.is_some() {
         "degraded"
     } else {
@@ -256,9 +290,12 @@ async fn index() -> Json<Value> {
             "GET /blocks/hash/:hash",
             "GET /accounts/:address",
             "GET /transactions/:hash",
+            "GET /rollup/transactions",
+            "POST /rollup/transactions",
             "GET /errors",
             "GET /errors/latest",
             "GET /rollup/batches",
+            "POST /rollup/batches",
             "GET /rollup/batches/:batch_number",
             "GET /search/:query"
         ]
@@ -339,6 +376,63 @@ async fn transaction_by_hash(
     .await
 }
 
+async fn transaction_pool(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = query.page_params()?;
+    cached_json(
+        state,
+        format!("rollup:transactions:{page}"),
+        |source| async move { source.transaction_pool(page).await },
+    )
+    .await
+}
+
+async fn submit_transaction(
+    State(state): State<Arc<AppState>>,
+    Json(transaction): Json<Transfer>,
+) -> Result<Json<Value>, ApiError> {
+    let submitted = DbSource {
+        pool: state.pool.clone(),
+    }
+    .submit_transaction(transaction)
+    .await?;
+    state.cache_clear();
+    serde_json::to_value(submitted)
+        .map(Json)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
+}
+
+async fn sequence_rollup_batch(
+    State(state): State<Arc<AppState>>,
+    payload: Option<Json<SequenceBatchRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = payload
+        .and_then(|Json(payload)| payload.limit)
+        .unwrap_or(100);
+    if limit == 0 {
+        return Err(ApiError::BadRequest(
+            "limit must be greater than zero".to_string(),
+        ));
+    }
+    if limit > MAX_PAGE_LIMIT {
+        return Err(ApiError::BadRequest(format!(
+            "limit must be less than or equal to {MAX_PAGE_LIMIT}"
+        )));
+    }
+
+    let sequenced = DbSource {
+        pool: state.pool.clone(),
+    }
+    .sequence_rollup_batch(limit)
+    .await?;
+    state.cache_clear();
+    serde_json::to_value(sequenced)
+        .map(Json)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
+}
+
 async fn errors(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     cached_json(state, "errors".to_string(), |source| async move {
         source.error_events().await
@@ -411,13 +505,6 @@ async fn search(
     .await
 }
 
-fn read_chain(path: &PathBuf) -> Result<Chain, ApiError> {
-    let data = fs::read_to_string(path)
-        .map_err(|error| ApiError::ReadChain(format!("{}: {error}", path.display())))?;
-    serde_json::from_str(&data)
-        .map_err(|error| ApiError::ParseChain(format!("{}: {error}", path.display())))
-}
-
 async fn cached_json<T, F, Fut>(
     state: Arc<AppState>,
     key: String,
@@ -425,25 +512,26 @@ async fn cached_json<T, F, Fut>(
 ) -> Result<Json<Value>, ApiError>
 where
     T: Serialize,
-    F: FnOnce(ChainSource) -> Fut,
+    F: FnOnce(DbSource) -> Fut,
     Fut: Future<Output = Result<T, ApiError>>,
 {
     if let Some(value) = state.cache_get(&key) {
         return Ok(Json(value));
     }
 
-    let value = serde_json::to_value(load(state.source.clone()).await?)
-        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
+    let value = serde_json::to_value(
+        load(DbSource {
+            pool: state.pool.clone(),
+        })
+        .await?,
+    )
+    .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
     state.cache_set(key, value.clone());
     Ok(Json(value))
 }
 
 impl AppState {
     fn cache_get(&self, key: &str) -> Option<Value> {
-        if !self.source.cache_enabled() {
-            return None;
-        }
-
         let now = Instant::now();
         let mut cache = self.cache.lock().ok()?;
         match cache.entries.get(key) {
@@ -457,10 +545,6 @@ impl AppState {
     }
 
     fn cache_set(&self, key: String, value: Value) {
-        if !self.source.cache_enabled() {
-            return;
-        }
-
         if let Ok(mut cache) = self.cache.lock() {
             cache.entries.insert(
                 key,
@@ -471,355 +555,510 @@ impl AppState {
             );
         }
     }
+
+    fn cache_clear(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.entries.clear();
+        }
+    }
 }
 
-impl ChainSource {
-    fn cache_enabled(&self) -> bool {
-        matches!(self, ChainSource::Postgres { .. })
-    }
-
+impl DbSource {
     async fn chain_summary(&self) -> Result<ChainSummary, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                Ok(json_chain_summary(&chain))
-            }
-            ChainSource::Postgres { pool } => postgres_chain_summary(pool).await,
-        }
+        postgres_chain_summary(&self.pool).await
     }
 
     async fn blocks(&self, page: PageParams) -> Result<Page<BlockSummary>, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                let mut blocks = chain.blocks.iter().map(block_summary).collect::<Vec<_>>();
-                blocks.reverse();
-                let total = blocks.len();
-                let items = blocks
-                    .into_iter()
-                    .skip(page.offset)
-                    .take(page.limit)
-                    .collect();
-                Ok(page_from_items(items, total, page))
-            }
-            ChainSource::Postgres { pool } => {
-                let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blocks")
-                    .fetch_one(pool)
-                    .await
-                    .map_err(database_error)?;
-                let rows = sqlx::query(
-                    r#"
-                    SELECT height, parent_hash, state_root, block_hash, transaction_count
-                    FROM blocks
-                    ORDER BY height DESC
-                    LIMIT $1 OFFSET $2
-                    "#,
-                )
-                .bind(to_i64_from_usize(page.limit, "page limit")?)
-                .bind(to_i64_from_usize(page.offset, "page offset")?)
-                .fetch_all(pool)
-                .await
-                .map_err(database_error)?;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blocks")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT height, parent_hash, state_root, block_hash, transaction_count
+            FROM blocks
+            ORDER BY height DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(to_i64_from_usize(page.limit, "page limit")?)
+        .bind(to_i64_from_usize(page.offset, "page offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
 
-                let items = rows
-                    .into_iter()
-                    .map(block_summary_from_row)
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(page_from_items(
-                    items,
-                    usize_from_i64(total, "block count")?,
-                    page,
-                ))
-            }
-        }
+        let items = rows
+            .into_iter()
+            .map(block_summary_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(page_from_items(
+            items,
+            usize_from_i64(total, "block count")?,
+            page,
+        ))
     }
 
     async fn block_by_height(&self, height: u64) -> Result<Option<BlockView>, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                Ok(find_block_by_height(&chain, height).map(block_view))
-            }
-            ChainSource::Postgres { pool } => {
-                let row = sqlx::query("SELECT raw_block FROM blocks WHERE height = $1")
-                    .bind(to_i64(height, "block height")?)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(database_error)?;
+        let row = sqlx::query("SELECT raw_block FROM blocks WHERE height = $1")
+            .bind(to_i64(height, "block height")?)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(database_error)?;
 
-                row.map(|row| {
-                    parse_json_value::<Block>(row.get("raw_block"), "block")
-                        .map(|block| block_view(&block))
-                })
-                .transpose()
-            }
-        }
+        row.map(|row| {
+            parse_json_value::<Block>(row.get("raw_block"), "block").map(|block| block_view(&block))
+        })
+        .transpose()
     }
 
     async fn block_by_hash(&self, hash: &str) -> Result<Option<BlockView>, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                Ok(find_block_by_hash(&chain, hash).map(block_view))
-            }
-            ChainSource::Postgres { pool } => {
-                let row = sqlx::query("SELECT raw_block FROM blocks WHERE block_hash = $1")
-                    .bind(hash)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(database_error)?;
+        let row = sqlx::query("SELECT raw_block FROM blocks WHERE block_hash = $1")
+            .bind(hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(database_error)?;
 
-                row.map(|row| {
-                    parse_json_value::<Block>(row.get("raw_block"), "block")
-                        .map(|block| block_view(&block))
-                })
-                .transpose()
-            }
-        }
+        row.map(|row| {
+            parse_json_value::<Block>(row.get("raw_block"), "block").map(|block| block_view(&block))
+        })
+        .transpose()
     }
 
     async fn account_by_address(&self, address: &str) -> Result<Option<Account>, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                Ok(chain.accounts.get(address).cloned())
-            }
-            ChainSource::Postgres { pool } => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT address, balance, nonce
-                    FROM accounts
-                    WHERE address = $1
-                    "#,
-                )
-                .bind(address)
-                .fetch_optional(pool)
-                .await
-                .map_err(database_error)?;
+        let row = sqlx::query(
+            r#"
+            SELECT address, balance, nonce
+            FROM accounts
+            WHERE address = $1
+            "#,
+        )
+        .bind(address)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database_error)?;
 
-                row.map(account_from_row).transpose()
-            }
-        }
+        row.map(account_from_row).transpose()
     }
 
     async fn transaction_by_hash(&self, hash: &str) -> Result<Option<TransactionView>, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                Ok(find_transaction_by_hash(&chain, hash))
-            }
-            ChainSource::Postgres { pool } => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT hash, block_height, transaction_index, raw_transfer
-                    FROM transactions
-                    WHERE hash = $1
-                    "#,
-                )
-                .bind(hash)
-                .fetch_optional(pool)
+        let row = sqlx::query(
+            r#"
+            SELECT hash, block_height, transaction_index, raw_transfer
+            FROM transactions
+            WHERE hash = $1
+            "#,
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database_error)?;
+
+        row.map(transaction_from_row).transpose()
+    }
+
+    async fn transaction_pool(
+        &self,
+        page: PageParams,
+    ) -> Result<Page<TransactionPoolEntryView>, ApiError> {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transaction_pool")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hash,
+                status,
+                failure_reason,
+                included_block_height,
+                included_transaction_index,
+                raw_transfer,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM transaction_pool
+            ORDER BY id DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(to_i64_from_usize(page.limit, "page limit")?)
+        .bind(to_i64_from_usize(page.offset, "page offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
+
+        let items = rows
+            .into_iter()
+            .map(transaction_pool_entry_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(page_from_items(
+            items,
+            usize_from_i64(total, "transaction pool count")?,
+            page,
+        ))
+    }
+
+    async fn submit_transaction(
+        &self,
+        transaction: Transfer,
+    ) -> Result<SubmittedTransaction, ApiError> {
+        let hash = transaction_hash(&transaction);
+        let duplicate_indexed: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM transactions WHERE hash = $1")
+                .bind(&hash)
+                .fetch_optional(&self.pool)
                 .await
                 .map_err(database_error)?;
+        if duplicate_indexed.is_some() {
+            return Err(ApiError::Conflict(format!(
+                "transaction {hash} is already indexed"
+            )));
+        }
 
-                row.map(transaction_from_row).transpose()
+        let duplicate_pool: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM transaction_pool WHERE hash = $1")
+                .bind(&hash)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(database_error)?;
+        if duplicate_pool.is_some() {
+            return Err(ApiError::Conflict(format!(
+                "transaction {hash} is already in the pool"
+            )));
+        }
+
+        let mut accounts = load_accounts(&self.pool).await?;
+        for pending in load_pending_pool_transfers(&self.pool).await? {
+            apply_transaction_to_state(&mut accounts, &pending)
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        }
+        apply_transaction_to_state(&mut accounts, &transaction)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO transaction_pool (
+                hash,
+                from_address,
+                to_address,
+                amount,
+                nonce,
+                public_key_base64,
+                signature_base64,
+                status,
+                raw_transfer
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+            "#,
+        )
+        .bind(&hash)
+        .bind(&transaction.from)
+        .bind(&transaction.to)
+        .bind(to_i64(transaction.amount, "transaction amount")?)
+        .bind(to_i64(transaction.nonce, "transaction nonce")?)
+        .bind(&transaction.public_key_base64)
+        .bind(&transaction.signature_base64)
+        .bind(serde_json::to_value(&transaction).map_err(|error| {
+            ApiError::InvalidIndexedData(format!("invalid transaction json: {error}"))
+        })?)
+        .execute(&self.pool)
+        .await
+        .map_err(database_error)?;
+
+        Ok(SubmittedTransaction {
+            hash,
+            status: "pending".to_string(),
+            transfer: transaction,
+        })
+    }
+
+    async fn sequence_rollup_batch(&self, limit: usize) -> Result<SequencedBatch, ApiError> {
+        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        let pending_rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hash,
+                status,
+                failure_reason,
+                included_block_height,
+                included_transaction_index,
+                raw_transfer,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM transaction_pool
+            WHERE status = 'pending'
+            ORDER BY id ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(to_i64_from_usize(limit, "sequencer limit")?)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?;
+
+        if pending_rows.is_empty() {
+            return Err(ApiError::BadRequest(
+                "no pending transactions to sequence".to_string(),
+            ));
+        }
+
+        let mut accounts = load_accounts_for_update(&mut tx).await?;
+        let latest_block = latest_block_for_update(&mut tx).await?;
+        let mut next_accounts = accounts.clone();
+        let mut accepted = Vec::new();
+        let mut failed_ids = Vec::new();
+
+        for row in pending_rows {
+            let entry = transaction_pool_entry_from_row(row)?;
+            match apply_transaction_to_state(&mut next_accounts, &entry.transfer) {
+                Ok(()) => accepted.push(entry),
+                Err(error) => failed_ids.push((entry.id, error.to_string())),
             }
         }
+
+        for (id, reason) in &failed_ids {
+            sqlx::query(
+                r#"
+                UPDATE transaction_pool
+                SET status = 'failed', failure_reason = $2, updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(to_i64(*id, "transaction pool id")?)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+
+        if accepted.is_empty() {
+            tx.commit().await.map_err(database_error)?;
+            return Err(ApiError::BadRequest(
+                "all pending transactions failed validation".to_string(),
+            ));
+        }
+
+        let transactions = accepted
+            .iter()
+            .map(|entry| entry.transfer.clone())
+            .collect::<Vec<_>>();
+        let block = produce_block_from_indexed_state(&mut accounts, &latest_block, transactions)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+        insert_block_tx(&mut tx, &block).await?;
+        for (transaction_index, transaction) in block.transactions.iter().enumerate() {
+            insert_indexed_transaction_tx(
+                &mut tx,
+                &transaction_hash(transaction),
+                block.height,
+                transaction_index,
+                transaction,
+            )
+            .await?;
+        }
+        replace_accounts_tx(&mut tx, &accounts).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO indexer_checkpoints (id, last_indexed_height)
+            VALUES ('chain', $1)
+            ON CONFLICT (id) DO UPDATE
+            SET last_indexed_height = EXCLUDED.last_indexed_height
+            "#,
+        )
+        .bind(to_i64(block.height, "last indexed height")?)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+
+        for (transaction_index, entry) in accepted.iter().enumerate() {
+            sqlx::query(
+                r#"
+                UPDATE transaction_pool
+                SET
+                    status = 'included',
+                    failure_reason = NULL,
+                    included_block_height = $2,
+                    included_transaction_index = $3,
+                    updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(to_i64(entry.id, "transaction pool id")?)
+            .bind(to_i64(block.height, "included block height")?)
+            .bind(to_i32_from_usize(
+                transaction_index,
+                "included transaction index",
+            )?)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
+
+        let rollup_batch = rebuild_rollup_batch_tx(&mut tx).await?;
+        tx.commit().await.map_err(database_error)?;
+
+        let included_transactions = accepted
+            .into_iter()
+            .enumerate()
+            .map(|(transaction_index, mut entry)| {
+                entry.status = "included".to_string();
+                entry.failure_reason = None;
+                entry.included_block_height = Some(block.height);
+                entry.included_transaction_index = Some(transaction_index);
+                entry
+            })
+            .collect();
+        let failed_transactions = load_failed_pool_entries(&self.pool, failed_ids).await?;
+
+        Ok(SequencedBatch {
+            block: block_view(&block),
+            rollup_batch,
+            included_transactions,
+            failed_transactions,
+        })
     }
 
     async fn error_events(&self) -> Result<Vec<ErrorEventView>, ApiError> {
-        match self {
-            ChainSource::Json { .. } => Ok(Vec::new()),
-            ChainSource::Postgres { pool } => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        service,
-                        severity,
-                        message,
-                        context,
-                        created_at::text AS created_at,
-                        resolved_at::text AS resolved_at
-                    FROM error_events
-                    ORDER BY created_at DESC
-                    LIMIT 50
-                    "#,
-                )
-                .fetch_all(pool)
-                .await
-                .map_err(database_error)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                service,
+                severity,
+                message,
+                context,
+                created_at::text AS created_at,
+                resolved_at::text AS resolved_at
+            FROM error_events
+            ORDER BY created_at DESC
+            LIMIT 50
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
 
-                rows.into_iter().map(error_event_from_row).collect()
-            }
-        }
+        rows.into_iter().map(error_event_from_row).collect()
     }
 
     async fn latest_error(&self) -> Result<Option<ErrorEventView>, ApiError> {
-        match self {
-            ChainSource::Json { .. } => Ok(None),
-            ChainSource::Postgres { pool } => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        service,
-                        severity,
-                        message,
-                        context,
-                        created_at::text AS created_at,
-                        resolved_at::text AS resolved_at
-                    FROM error_events
-                    WHERE resolved_at IS NULL
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    "#,
-                )
-                .fetch_optional(pool)
-                .await
-                .map_err(database_error)?;
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                service,
+                severity,
+                message,
+                context,
+                created_at::text AS created_at,
+                resolved_at::text AS resolved_at
+            FROM error_events
+            WHERE resolved_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database_error)?;
 
-                row.map(error_event_from_row).transpose()
-            }
-        }
+        row.map(error_event_from_row).transpose()
     }
 
     async fn rollup_batches(&self, page: PageParams) -> Result<Page<RollupBatchSummary>, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                let batches = json_rollup_batch(&chain)
-                    .map(|batch| vec![batch.summary])
-                    .unwrap_or_default();
-                let total = batches.len();
-                let items = batches
-                    .into_iter()
-                    .skip(page.offset)
-                    .take(page.limit)
-                    .collect();
-                Ok(page_from_items(items, total, page))
-            }
-            ChainSource::Postgres { pool } => {
-                let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rollup_batches")
-                    .fetch_one(pool)
-                    .await
-                    .map_err(database_error)?;
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        batch_number,
-                        start_block_height,
-                        end_block_height,
-                        prev_state_root,
-                        new_state_root,
-                        transaction_root,
-                        block_hash_root,
-                        data_hash,
-                        transaction_count,
-                        status
-                    FROM rollup_batches
-                    ORDER BY batch_number DESC
-                    LIMIT $1 OFFSET $2
-                    "#,
-                )
-                .bind(to_i64_from_usize(page.limit, "page limit")?)
-                .bind(to_i64_from_usize(page.offset, "page offset")?)
-                .fetch_all(pool)
-                .await
-                .map_err(database_error)?;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rollup_batches")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                batch_number,
+                start_block_height,
+                end_block_height,
+                prev_state_root,
+                new_state_root,
+                transaction_root,
+                block_hash_root,
+                data_hash,
+                transaction_count,
+                status
+            FROM rollup_batches
+            ORDER BY batch_number DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(to_i64_from_usize(page.limit, "page limit")?)
+        .bind(to_i64_from_usize(page.offset, "page offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
 
-                let items = rows
-                    .into_iter()
-                    .map(rollup_batch_summary_from_row)
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(page_from_items(
-                    items,
-                    usize_from_i64(total, "rollup batch count")?,
-                    page,
-                ))
-            }
-        }
+        let items = rows
+            .into_iter()
+            .map(rollup_batch_summary_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(page_from_items(
+            items,
+            usize_from_i64(total, "rollup batch count")?,
+            page,
+        ))
     }
 
     async fn rollup_batch_by_number(
         &self,
         batch_number: u64,
     ) -> Result<Option<RollupBatchView>, ApiError> {
-        match self {
-            ChainSource::Json { chain_file } => {
-                let chain = read_chain(chain_file)?;
-                Ok(json_rollup_batch(&chain)
-                    .filter(|batch| batch.summary.batch_number == batch_number))
-            }
-            ChainSource::Postgres { pool } => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        batch_number,
-                        start_block_height,
-                        end_block_height,
-                        prev_state_root,
-                        new_state_root,
-                        transaction_root,
-                        block_hash_root,
-                        data_hash,
-                        transaction_count,
-                        status
-                    FROM rollup_batches
-                    WHERE batch_number = $1
-                    "#,
-                )
-                .bind(to_i64(batch_number, "rollup batch number")?)
-                .fetch_optional(pool)
-                .await
-                .map_err(database_error)?;
-                let Some(row) = row else {
-                    return Ok(None);
-                };
+        let row = sqlx::query(
+            r#"
+            SELECT
+                batch_number,
+                start_block_height,
+                end_block_height,
+                prev_state_root,
+                new_state_root,
+                transaction_root,
+                block_hash_root,
+                data_hash,
+                transaction_count,
+                status
+            FROM rollup_batches
+            WHERE batch_number = $1
+            "#,
+        )
+        .bind(to_i64(batch_number, "rollup batch number")?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
 
-                let summary = rollup_batch_summary_from_row(row)?;
-                let transaction_rows = sqlx::query(
-                    r#"
-                    SELECT t.hash, t.block_height, t.transaction_index, t.raw_transfer
-                    FROM rollup_batch_transactions rbt
-                    JOIN transactions t ON t.hash = rbt.transaction_hash
-                    WHERE rbt.batch_number = $1
-                    ORDER BY rbt.block_height ASC, rbt.transaction_index ASC
-                    "#,
-                )
-                .bind(to_i64(batch_number, "rollup batch number")?)
-                .fetch_all(pool)
-                .await
-                .map_err(database_error)?;
-                let transactions = transaction_rows
-                    .into_iter()
-                    .map(transaction_from_row)
-                    .collect::<Result<Vec<_>, _>>()?;
+        let summary = rollup_batch_summary_from_row(row)?;
+        let transaction_rows = sqlx::query(
+            r#"
+            SELECT t.hash, t.block_height, t.transaction_index, t.raw_transfer
+            FROM rollup_batch_transactions rbt
+            JOIN transactions t ON t.hash = rbt.transaction_hash
+            WHERE rbt.batch_number = $1
+            ORDER BY rbt.block_height ASC, rbt.transaction_index ASC
+            "#,
+        )
+        .bind(to_i64(batch_number, "rollup batch number")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
+        let transactions = transaction_rows
+            .into_iter()
+            .map(transaction_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
 
-                Ok(Some(RollupBatchView {
-                    summary,
-                    transactions,
-                }))
-            }
-        }
-    }
-}
-
-fn json_chain_summary(chain: &Chain) -> ChainSummary {
-    let latest = chain.blocks.last();
-    ChainSummary {
-        height: latest.map(|block| block.height),
-        block_count: chain.blocks.len(),
-        transaction_count: chain
-            .blocks
-            .iter()
-            .map(|block| block.transactions.len())
-            .sum(),
-        pending_transaction_count: chain.pending_transactions.len(),
-        account_count: chain.accounts.len(),
-        state_root: state_root(&chain.accounts),
-        latest_block_hash: latest.map(|block| block.block_hash.clone()),
-        genesis_finalized: !chain.blocks.is_empty(),
-        valid: validate_chain(chain).is_ok(),
+        Ok(Some(RollupBatchView {
+            summary,
+            transactions,
+        }))
     }
 }
 
@@ -834,7 +1073,7 @@ async fn postgres_chain_summary(pool: &PgPool) -> Result<ChainSummary, ApiError>
             .await
             .map_err(database_error)?;
     let pending_transaction_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE block_height IS NULL")
+        sqlx::query_scalar("SELECT COUNT(*) FROM transaction_pool WHERE status = 'pending'")
             .fetch_one(pool)
             .await
             .map_err(database_error)?;
@@ -911,14 +1150,341 @@ async fn state_root_from_accounts(pool: &PgPool) -> Result<String, ApiError> {
     Ok(state_root(&accounts))
 }
 
-fn block_summary(block: &Block) -> BlockSummary {
-    BlockSummary {
-        height: block.height,
-        parent_hash: block.parent_hash.clone(),
-        state_root: block.state_root.clone(),
-        block_hash: block.block_hash.clone(),
-        transaction_count: block.transactions.len(),
+async fn load_accounts(pool: &PgPool) -> Result<BTreeMap<String, Account>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT address, balance, nonce
+        FROM accounts
+        ORDER BY address ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(database_error)?;
+
+    rows.into_iter()
+        .map(account_from_row)
+        .map(|result| result.map(|account| (account.address.clone(), account)))
+        .collect()
+}
+
+async fn load_accounts_for_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<BTreeMap<String, Account>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT address, balance, nonce
+        FROM accounts
+        ORDER BY address ASC
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+
+    rows.into_iter()
+        .map(account_from_row)
+        .map(|result| result.map(|account| (account.address.clone(), account)))
+        .collect()
+}
+
+async fn load_pending_pool_transfers(pool: &PgPool) -> Result<Vec<Transfer>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT raw_transfer
+        FROM transaction_pool
+        WHERE status = 'pending'
+        ORDER BY id ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(database_error)?;
+
+    rows.into_iter()
+        .map(|row| parse_json_value(row.get("raw_transfer"), "transaction pool transfer"))
+        .collect()
+}
+
+async fn latest_block_for_update(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<Block, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT raw_block
+        FROM blocks
+        ORDER BY height DESC
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .ok_or_else(|| {
+        ApiError::BadRequest("cannot sequence before genesis block exists".to_string())
+    })?;
+
+    parse_json_value(row.get("raw_block"), "latest block")
+}
+
+async fn insert_block_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    block: &Block,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        INSERT INTO blocks (
+            height, parent_hash, state_root, block_hash, transaction_count, raw_block
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(to_i64(block.height, "block height")?)
+    .bind(&block.parent_hash)
+    .bind(&block.state_root)
+    .bind(&block.block_hash)
+    .bind(to_i32_from_usize(
+        block.transactions.len(),
+        "block transaction count",
+    )?)
+    .bind(
+        serde_json::to_value(block)
+            .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
+async fn insert_indexed_transaction_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hash: &str,
+    block_height: u64,
+    transaction_index: usize,
+    transaction: &Transfer,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        INSERT INTO transactions (
+            hash,
+            block_height,
+            transaction_index,
+            from_address,
+            to_address,
+            amount,
+            nonce,
+            public_key_base64,
+            signature_base64,
+            raw_transfer
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(hash)
+    .bind(to_i64(block_height, "transaction block height")?)
+    .bind(to_i32_from_usize(transaction_index, "transaction index")?)
+    .bind(&transaction.from)
+    .bind(&transaction.to)
+    .bind(to_i64(transaction.amount, "transaction amount")?)
+    .bind(to_i64(transaction.nonce, "transaction nonce")?)
+    .bind(&transaction.public_key_base64)
+    .bind(&transaction.signature_base64)
+    .bind(
+        serde_json::to_value(transaction)
+            .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
+async fn replace_accounts_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    accounts: &BTreeMap<String, Account>,
+) -> Result<(), ApiError> {
+    sqlx::query("DELETE FROM accounts")
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    for account in accounts.values() {
+        sqlx::query(
+            r#"
+            INSERT INTO accounts (address, balance, nonce)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(&account.address)
+        .bind(to_i64(account.balance, "account balance")?)
+        .bind(to_i64(account.nonce, "account nonce")?)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
     }
+    Ok(())
+}
+
+async fn rebuild_rollup_batch_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<Option<RollupBatchSummary>, ApiError> {
+    sqlx::query("DELETE FROM rollup_batch_transactions")
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    sqlx::query("DELETE FROM rollup_batches")
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT raw_block
+        FROM blocks
+        ORDER BY height ASC
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let blocks = rows
+        .into_iter()
+        .map(|row| parse_json_value::<Block>(row.get("raw_block"), "block"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if blocks.len() <= 1 {
+        return Ok(None);
+    }
+
+    let previous_block = &blocks[0];
+    let post_genesis_blocks = &blocks[1..];
+    let commitment = rollup_batch_commitment_from_blocks(0, previous_block, post_genesis_blocks)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
+
+    insert_rollup_batch_tx(tx, &commitment, "built").await?;
+    for block in post_genesis_blocks {
+        for (transaction_index, transaction) in block.transactions.iter().enumerate() {
+            let hash = transaction_hash(transaction);
+            sqlx::query(
+                r#"
+                INSERT INTO rollup_batch_transactions (
+                    batch_number, transaction_hash, block_height, transaction_index
+                )
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(to_i64(commitment.batch_number, "rollup batch number")?)
+            .bind(&hash)
+            .bind(to_i64(
+                block.height,
+                "rollup batch transaction block height",
+            )?)
+            .bind(to_i32_from_usize(
+                transaction_index,
+                "rollup batch transaction index",
+            )?)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+        }
+    }
+
+    Ok(Some(RollupBatchSummary {
+        batch_number: commitment.batch_number,
+        start_block_height: commitment.start_block_height,
+        end_block_height: commitment.end_block_height,
+        prev_state_root: commitment.prev_state_root,
+        new_state_root: commitment.new_state_root,
+        transaction_root: commitment.transaction_root,
+        block_hash_root: commitment.block_hash_root,
+        data_hash: commitment.data_hash,
+        transaction_count: commitment.transaction_count,
+        status: "built".to_string(),
+    }))
+}
+
+async fn insert_rollup_batch_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commitment: &RollupBatchCommitment,
+    status: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        INSERT INTO rollup_batches (
+            batch_number,
+            start_block_height,
+            end_block_height,
+            prev_state_root,
+            new_state_root,
+            transaction_root,
+            block_hash_root,
+            data_hash,
+            transaction_count,
+            status,
+            raw_commitment
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(to_i64(commitment.batch_number, "rollup batch number")?)
+    .bind(to_i64(
+        commitment.start_block_height,
+        "rollup batch start block height",
+    )?)
+    .bind(to_i64(
+        commitment.end_block_height,
+        "rollup batch end block height",
+    )?)
+    .bind(&commitment.prev_state_root)
+    .bind(&commitment.new_state_root)
+    .bind(&commitment.transaction_root)
+    .bind(&commitment.block_hash_root)
+    .bind(&commitment.data_hash)
+    .bind(to_i32_from_usize(
+        commitment.transaction_count,
+        "rollup batch transaction count",
+    )?)
+    .bind(status)
+    .bind(
+        serde_json::to_value(commitment)
+            .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
+async fn load_failed_pool_entries(
+    pool: &PgPool,
+    failed_ids: Vec<(u64, String)>,
+) -> Result<Vec<TransactionPoolEntryView>, ApiError> {
+    let mut entries = Vec::new();
+    for (id, _) in failed_ids {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hash,
+                status,
+                failure_reason,
+                included_block_height,
+                included_transaction_index,
+                raw_transfer,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM transaction_pool
+            WHERE id = $1
+            "#,
+        )
+        .bind(to_i64(id, "transaction pool id")?)
+        .fetch_one(pool)
+        .await
+        .map_err(database_error)?;
+        entries.push(transaction_pool_entry_from_row(row)?);
+    }
+    Ok(entries)
 }
 
 fn block_view(block: &Block) -> BlockView {
@@ -972,6 +1538,28 @@ fn transaction_from_row(row: sqlx::postgres::PgRow) -> Result<TransactionView, A
     })
 }
 
+fn transaction_pool_entry_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<TransactionPoolEntryView, ApiError> {
+    Ok(TransactionPoolEntryView {
+        id: from_i64(row.get("id"), "transaction pool id")?,
+        hash: row.get("hash"),
+        status: row.get("status"),
+        failure_reason: row.get("failure_reason"),
+        included_block_height: row
+            .get::<Option<i64>, _>("included_block_height")
+            .map(|height| from_i64(height, "included block height"))
+            .transpose()?,
+        included_transaction_index: row
+            .get::<Option<i32>, _>("included_transaction_index")
+            .map(|index| usize_from_i32(index, "included transaction index"))
+            .transpose()?,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        transfer: parse_json_value(row.get("raw_transfer"), "transaction pool transfer")?,
+    })
+}
+
 fn error_event_from_row(row: sqlx::postgres::PgRow) -> Result<ErrorEventView, ApiError> {
     Ok(ErrorEventView {
         id: row.get("id"),
@@ -1004,96 +1592,6 @@ fn rollup_batch_summary_from_row(
     })
 }
 
-fn json_rollup_batch(chain: &Chain) -> Option<RollupBatchView> {
-    let end_height = chain.blocks.last()?.height;
-    if end_height == 0 {
-        return None;
-    }
-
-    let commitment = rollup_batch_commitment(chain, 0, 1, end_height).ok()?;
-    Some(rollup_batch_view(chain, commitment, "built"))
-}
-
-fn rollup_batch_view(
-    chain: &Chain,
-    commitment: RollupBatchCommitment,
-    status: &str,
-) -> RollupBatchView {
-    let transactions =
-        chain
-            .blocks
-            .iter()
-            .filter(|block| {
-                block.height >= commitment.start_block_height
-                    && block.height <= commitment.end_block_height
-            })
-            .flat_map(|block| {
-                block.transactions.iter().enumerate().map(
-                    move |(transaction_index, transaction)| TransactionView {
-                        hash: transaction_hash(transaction),
-                        block_height: Some(block.height),
-                        transaction_index,
-                        transfer: transaction.clone(),
-                    },
-                )
-            })
-            .collect();
-
-    RollupBatchView {
-        summary: RollupBatchSummary {
-            batch_number: commitment.batch_number,
-            start_block_height: commitment.start_block_height,
-            end_block_height: commitment.end_block_height,
-            prev_state_root: commitment.prev_state_root,
-            new_state_root: commitment.new_state_root,
-            transaction_root: commitment.transaction_root,
-            block_hash_root: commitment.block_hash_root,
-            data_hash: commitment.data_hash,
-            transaction_count: commitment.transaction_count,
-            status: status.to_string(),
-        },
-        transactions,
-    }
-}
-
-fn find_block_by_height(chain: &Chain, height: u64) -> Option<&Block> {
-    chain.blocks.iter().find(|block| block.height == height)
-}
-
-fn find_block_by_hash<'a>(chain: &'a Chain, hash: &str) -> Option<&'a Block> {
-    chain.blocks.iter().find(|block| block.block_hash == hash)
-}
-
-fn find_transaction_by_hash(chain: &Chain, hash: &str) -> Option<TransactionView> {
-    for block in &chain.blocks {
-        for (transaction_index, transaction) in block.transactions.iter().enumerate() {
-            let candidate = transaction_hash(transaction);
-            if candidate == hash {
-                return Some(TransactionView {
-                    hash: candidate,
-                    block_height: Some(block.height),
-                    transaction_index,
-                    transfer: transaction.clone(),
-                });
-            }
-        }
-    }
-
-    for (transaction_index, transaction) in chain.pending_transactions.iter().enumerate() {
-        let candidate = transaction_hash(transaction);
-        if candidate == hash {
-            return Some(TransactionView {
-                hash: candidate,
-                block_height: None,
-                transaction_index,
-                transfer: transaction.clone(),
-            });
-        }
-    }
-
-    None
-}
-
 fn parse_json_value<T: serde::de::DeserializeOwned>(
     value: serde_json::Value,
     label: &str,
@@ -1116,6 +1614,11 @@ fn to_i64_from_usize(value: usize, label: &str) -> Result<i64, ApiError> {
         .map_err(|_| ApiError::InvalidIndexedData(format!("{label} exceeds BIGINT range")))
 }
 
+fn to_i32_from_usize(value: usize, label: &str) -> Result<i32, ApiError> {
+    i32::try_from(value)
+        .map_err(|_| ApiError::InvalidIndexedData(format!("{label} exceeds INTEGER range")))
+}
+
 fn from_i64(value: i64, label: &str) -> Result<u64, ApiError> {
     u64::try_from(value).map_err(|_| ApiError::InvalidIndexedData(format!("{label} is negative")))
 }
@@ -1134,10 +1637,9 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::NotFound(message) => (StatusCode::NOT_FOUND, message),
-            ApiError::ReadChain(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
-            ApiError::ParseChain(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
             ApiError::Database(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
             ApiError::InvalidIndexedData(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
+            ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
         };
 
         (status, Json(json!({ "error": message }))).into_response()

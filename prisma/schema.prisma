@@ -38,6 +38,29 @@ model ChainTransaction {
   @@map("transactions")
 }
 
+model TransactionPoolEntry {
+  id                       BigInt   @id @default(autoincrement())
+  hash                     String   @unique
+  fromAddress              String   @map("from_address")
+  toAddress                String   @map("to_address")
+  amount                   BigInt
+  nonce                    BigInt
+  publicKeyBase64          String   @map("public_key_base64")
+  signatureBase64          String   @map("signature_base64")
+  status                   String
+  failureReason            String?  @map("failure_reason")
+  includedBlockHeight      BigInt?  @map("included_block_height")
+  includedTransactionIndex Int?     @map("included_transaction_index")
+  rawTransfer              Json     @map("raw_transfer")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @default(now()) @map("updated_at")
+
+  @@index([status, id])
+  @@index([fromAddress, nonce])
+  @@index([createdAt])
+  @@map("transaction_pool")
+}
+
 model Account {
   address String @id
   balance BigInt

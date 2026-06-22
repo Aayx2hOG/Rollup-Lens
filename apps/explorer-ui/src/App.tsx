@@ -12,8 +12,10 @@ import {
   Hash,
   Layers3,
   PackageCheck,
+  Play,
   RefreshCcw,
   Search,
+  Send,
   ShieldAlert,
   Wallet,
   XCircle,
@@ -29,11 +31,12 @@ import {
   type RollupBatchSummary,
   type SearchResult,
   type Transfer,
+  type TransactionPoolEntry,
 } from "./lib/api";
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
 import { Badge, IconButton, Panel, Shell, Skeleton, Stat } from "./components/ui";
 
-const tabs = ["Overview", "Blocks", "Accounts", "Rollup", "Indexer"] as const;
+const tabs = ["Overview", "Blocks", "Accounts", "Rollup", "Sequencer", "Health"] as const;
 type Tab = (typeof tabs)[number];
 
 export function App() {
@@ -51,6 +54,7 @@ export function App() {
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const errors = useQuery({ queryKey: ["errors"], queryFn: api.errors });
   const rollupBatches = useQuery({ queryKey: ["rollup-batches"], queryFn: () => api.rollupBatches() });
+  const transactionPool = useQuery({ queryKey: ["transaction-pool"], queryFn: () => api.transactionPool() });
   const block = useQuery({
     queryKey: ["block", selectedHeight],
     queryFn: () => api.block(selectedHeight!),
@@ -282,8 +286,24 @@ export function App() {
         />
       )}
 
-      {activeTab === "Indexer" && (
-        <IndexerView health={health.data} errors={errors.data ?? []} summary={summary.data} />
+      {activeTab === "Sequencer" && (
+        <SequencerView
+          pool={transactionPool.data?.items ?? []}
+          poolTotal={transactionPool.data?.total ?? 0}
+          onSubmitted={async (hash) => {
+            setSelectedTx(hash);
+            await refreshAll();
+          }}
+          onSequenced={async (height) => {
+            setSelectedHeight(height);
+            setActiveTab("Blocks");
+            await refreshAll();
+          }}
+        />
+      )}
+
+      {activeTab === "Health" && (
+        <HealthView health={health.data} errors={errors.data ?? []} summary={summary.data} />
       )}
     </Shell>
   );
@@ -634,7 +654,142 @@ function AccountsView({
   );
 }
 
-function IndexerView({
+function SequencerView({
+  pool,
+  poolTotal,
+  onSubmitted,
+  onSequenced,
+}: {
+  pool: TransactionPoolEntry[];
+  poolTotal: number;
+  onSubmitted: (hash: string) => Promise<void>;
+  onSequenced: (height: number) => Promise<void>;
+}) {
+  const [transferJson, setTransferJson] = useState("");
+  const [limit, setLimit] = useState(100);
+  const [submitting, setSubmitting] = useState(false);
+  const [sequencing, setSequencing] = useState(false);
+  const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
+
+  async function submitTransfer() {
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const parsed = JSON.parse(transferJson) as Transfer;
+      const submitted = await api.submitTransaction(parsed);
+      setTransferJson("");
+      setNotice({ tone: "good", message: `Accepted ${shortHash(submitted.hash, 10, 8)} into the pool.` });
+      await onSubmitted(submitted.hash);
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Transaction submission failed" });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function sequenceBatch() {
+    setSequencing(true);
+    setNotice(null);
+    try {
+      const result = await api.sequenceBatch(limit);
+      setNotice({
+        tone: "good",
+        message: `Built block ${result.block.height} with ${pluralize(result.included_transactions.length, "transaction")}.`,
+      });
+      await onSequenced(result.block.height);
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Batch sequencing failed" });
+    } finally {
+      setSequencing(false);
+    }
+  }
+
+  return (
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
+      <div className="grid gap-4">
+        <Panel className="p-4">
+          <SectionTitle icon={<Send className="h-4 w-4" />} title="Submit transaction" action="Signed transfer JSON" flush />
+          <textarea
+            value={transferJson}
+            onChange={(event) => setTransferJson(event.target.value)}
+            placeholder='{"from":"...","to":"...","amount":5,"nonce":0,"public_key_base64":"...","signature_base64":"..."}'
+            className="mt-4 min-h-44 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
+          />
+          <button
+            onClick={submitTransfer}
+            disabled={submitting || transferJson.trim().length === 0}
+            className="mt-3 inline-flex items-center gap-2 rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Send className="h-4 w-4" />
+            Submit
+          </button>
+        </Panel>
+
+        <Panel className="p-4">
+          <SectionTitle icon={<Play className="h-4 w-4" />} title="Build batch" action="Postgres sequencer" flush />
+          <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
+            <label className="grid gap-2 text-sm text-white/62">
+              Limit
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={limit}
+                onChange={(event) => setLimit(Number(event.target.value))}
+                className="h-10 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-white outline-none focus:border-mint/40"
+              />
+            </label>
+            <button
+              onClick={sequenceBatch}
+              disabled={sequencing}
+              className="self-end inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan px-3 text-sm font-semibold text-ink transition hover:bg-cyan/90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Play className="h-4 w-4" />
+              Sequence
+            </button>
+          </div>
+        </Panel>
+
+        {notice && (
+          <Panel className={cn("p-3", notice.tone === "bad" ? "border-rose/25 bg-rose/10" : "border-mint/25 bg-mint/10")}>
+            <div className={cn("text-sm font-medium", notice.tone === "bad" ? "text-rose" : "text-mint")}>{notice.message}</div>
+          </Panel>
+        )}
+      </div>
+
+      <Panel className="overflow-hidden">
+        <SectionTitle icon={<Activity className="h-4 w-4" />} title="Transaction pool" action={`${pool.length}/${poolTotal} loaded`} />
+        <div className="max-h-[42rem] overflow-auto">
+          {pool.length === 0 ? (
+            <div className="px-4 py-10 text-sm text-white/48">No submitted transactions are in the pool.</div>
+          ) : (
+            pool.map((entry) => (
+              <div key={entry.id} className="grid gap-3 border-b border-white/8 px-4 py-3 last:border-b-0">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="hash min-w-0 text-sm text-white">{entry.hash}</div>
+                  <Badge tone={entry.status === "included" ? "good" : entry.status === "failed" ? "bad" : "warn"}>{entry.status}</Badge>
+                </div>
+                <div className="grid gap-2 text-xs text-white/48 sm:grid-cols-3">
+                  <span className="hash">from {shortHash(entry.transfer.from, 8, 6)}</span>
+                  <span className="hash">to {shortHash(entry.transfer.to, 8, 6)}</span>
+                  <span>amount {entry.transfer.amount} / nonce {entry.transfer.nonce}</span>
+                </div>
+                {entry.included_block_height !== null && (
+                  <div className="text-xs text-mint">
+                    included in block {entry.included_block_height} at index {entry.included_transaction_index}
+                  </div>
+                )}
+                {entry.failure_reason && <div className="text-xs text-rose">{entry.failure_reason}</div>}
+              </div>
+            ))
+          )}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function HealthView({
   health,
   errors,
   summary,
@@ -657,7 +812,7 @@ function IndexerView({
       <Panel className="overflow-hidden">
         <SectionTitle icon={<Activity className="h-4 w-4" />} title="Error events" action={`${errors.length} recent`} />
         {errors.length === 0 ? (
-          <div className="px-4 py-10 text-sm text-white/48">No persistent indexer errors are currently exposed.</div>
+          <div className="px-4 py-10 text-sm text-white/48">No persistent error events are currently exposed.</div>
         ) : (
           <div className="divide-y divide-white/8">
             {errors.map((error) => (

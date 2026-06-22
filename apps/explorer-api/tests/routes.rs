@@ -1,6 +1,5 @@
 use std::{
     env,
-    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,11 +12,10 @@ use chain_core::{
     rollup_batch_commitment, sign_transfer, transaction_hash, Account, Chain,
     RollupBatchCommitment,
 };
-use explorer_api::{app, app_with_pool};
+use explorer_api::app_with_pool;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
-use tempfile::TempDir;
 use tower::ServiceExt;
 use wallet_core::{address_from_public_key, create_keypair};
 
@@ -30,260 +28,6 @@ async fn postgres_router_exposes_index_without_database_queries() {
 
     let index = get_json(app, "/").await;
     assert_eq!(index["name"], json!("zk-rollup explorer api"));
-}
-
-#[tokio::test]
-async fn returns_api_index() {
-    let fixture = ChainFixture::new();
-    let app = app(fixture.chain_file.clone());
-
-    let index = get_json(app, "/").await;
-    assert_eq!(index["name"], json!("zk-rollup explorer api"));
-    assert!(index["endpoints"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("GET /health")));
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
-}
-
-#[tokio::test]
-async fn returns_chain_summary_and_latest_blocks() {
-    let fixture = ChainFixture::new();
-    let app = app(fixture.chain_file.clone());
-
-    let summary = get_json(app.clone(), "/chain/summary").await;
-    assert_eq!(summary["height"], json!(1));
-    assert_eq!(summary["block_count"], json!(2));
-    assert_eq!(summary["transaction_count"], json!(1));
-    assert_eq!(summary["account_count"], json!(2));
-    assert_eq!(summary["genesis_finalized"], json!(true));
-    assert_eq!(summary["valid"], json!(true));
-
-    let blocks = get_json(app.clone(), "/blocks").await;
-    assert_eq!(blocks["total"], json!(2));
-    assert_eq!(blocks["limit"], json!(50));
-    assert_eq!(blocks["offset"], json!(0));
-    assert_eq!(blocks["next_offset"], json!(null));
-    assert_eq!(blocks["items"].as_array().unwrap().len(), 2);
-    assert_eq!(blocks["items"][0]["height"], json!(1));
-    assert_eq!(blocks["items"][0]["transaction_count"], json!(1));
-    assert_eq!(blocks["items"][1]["height"], json!(0));
-
-    let first_page = get_json(app.clone(), "/blocks?limit=1").await;
-    assert_eq!(first_page["total"], json!(2));
-    assert_eq!(first_page["limit"], json!(1));
-    assert_eq!(first_page["offset"], json!(0));
-    assert_eq!(first_page["next_offset"], json!(1));
-    assert_eq!(first_page["items"].as_array().unwrap().len(), 1);
-    assert_eq!(first_page["items"][0]["height"], json!(1));
-
-    let second_page = get_json(app, "/blocks?limit=1&offset=1").await;
-    assert_eq!(second_page["total"], json!(2));
-    assert_eq!(second_page["limit"], json!(1));
-    assert_eq!(second_page["offset"], json!(1));
-    assert_eq!(second_page["next_offset"], json!(null));
-    assert_eq!(second_page["items"].as_array().unwrap().len(), 1);
-    assert_eq!(second_page["items"][0]["height"], json!(0));
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
-}
-
-#[tokio::test]
-async fn paginates_json_blocks_across_multiple_pages() {
-    let fixture = ChainFixture::with_transaction_blocks(3);
-    let app = app(fixture.chain_file.clone());
-
-    let first_page = get_json(app.clone(), "/blocks?limit=2").await;
-    assert_eq!(first_page["total"], json!(4));
-    assert_eq!(first_page["limit"], json!(2));
-    assert_eq!(first_page["offset"], json!(0));
-    assert_eq!(first_page["next_offset"], json!(2));
-    assert_eq!(first_page["items"].as_array().unwrap().len(), 2);
-    assert_eq!(first_page["items"][0]["height"], json!(3));
-    assert_eq!(first_page["items"][1]["height"], json!(2));
-
-    let second_page = get_json(app.clone(), "/blocks?limit=2&offset=2").await;
-    assert_eq!(second_page["total"], json!(4));
-    assert_eq!(second_page["next_offset"], json!(null));
-    assert_eq!(second_page["items"].as_array().unwrap().len(), 2);
-    assert_eq!(second_page["items"][0]["height"], json!(1));
-    assert_eq!(second_page["items"][1]["height"], json!(0));
-
-    let empty_page = get_json(app, "/blocks?limit=2&offset=10").await;
-    assert_eq!(empty_page["total"], json!(4));
-    assert_eq!(empty_page["next_offset"], json!(null));
-    assert_eq!(empty_page["items"].as_array().unwrap().len(), 0);
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
-}
-
-#[tokio::test]
-async fn rejects_invalid_pagination_limits() {
-    let fixture = ChainFixture::new();
-    let app = app(fixture.chain_file.clone());
-
-    let zero = get_response(app.clone(), "/blocks?limit=0").await;
-    assert_eq!(zero.status(), StatusCode::BAD_REQUEST);
-
-    let too_large = get_response(app.clone(), "/blocks?limit=101").await;
-    assert_eq!(too_large.status(), StatusCode::BAD_REQUEST);
-
-    let rollup_zero = get_response(app, "/rollup/batches?limit=0").await;
-    assert_eq!(rollup_zero.status(), StatusCode::BAD_REQUEST);
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
-}
-
-#[tokio::test]
-async fn fetches_blocks_accounts_and_transactions() {
-    let fixture = ChainFixture::new();
-    let app = app(fixture.chain_file.clone());
-
-    let block = get_json(
-        app.clone(),
-        &format!("/blocks/hash/{}", fixture.latest_block_hash),
-    )
-    .await;
-    assert_eq!(block["height"], json!(1));
-    assert_eq!(block["block_hash"], json!(fixture.latest_block_hash));
-
-    let account = get_json(
-        app.clone(),
-        &format!("/accounts/{}", path_segment(&fixture.alice_address)),
-    )
-    .await;
-    assert_eq!(account["address"], json!(fixture.alice_address));
-    assert_eq!(account["balance"], json!(60));
-    assert_eq!(account["nonce"], json!(1));
-
-    let transaction = get_json(
-        app.clone(),
-        &format!("/transactions/{}", fixture.transaction_hash),
-    )
-    .await;
-    assert_eq!(transaction["hash"], json!(fixture.transaction_hash));
-    assert_eq!(transaction["block_height"], json!(1));
-    assert_eq!(transaction["transaction_index"], json!(0));
-    assert_eq!(transaction["transfer"]["amount"], json!(40));
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
-}
-
-#[tokio::test]
-async fn returns_not_found_for_missing_resources() {
-    let fixture = ChainFixture::new();
-    let app = app(fixture.chain_file.clone());
-
-    assert_eq!(
-        get_response(app.clone(), "/blocks/999").await.status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        get_response(app.clone(), "/blocks/hash/not-a-block")
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        get_response(app.clone(), "/accounts/not-an-account")
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        get_response(app.clone(), "/transactions/not-a-tx")
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        get_response(app, "/rollup/batches/999").await.status(),
-        StatusCode::NOT_FOUND
-    );
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
-}
-
-#[tokio::test]
-async fn searches_by_height_hash_address_and_transaction() {
-    let fixture = ChainFixture::new();
-    let app = app(fixture.chain_file.clone());
-
-    let by_height = get_json(app.clone(), "/search/1").await;
-    assert_eq!(by_height["kind"], json!("Block"));
-    assert_eq!(by_height["data"]["height"], json!(1));
-
-    let by_hash = get_json(
-        app.clone(),
-        &format!("/search/{}", fixture.latest_block_hash),
-    )
-    .await;
-    assert_eq!(by_hash["kind"], json!("Block"));
-    assert_eq!(
-        by_hash["data"]["block_hash"],
-        json!(fixture.latest_block_hash)
-    );
-
-    let by_address = get_json(
-        app.clone(),
-        &format!("/search/{}", path_segment(&fixture.bob_address)),
-    )
-    .await;
-    assert_eq!(by_address["kind"], json!("Account"));
-    assert_eq!(by_address["data"]["balance"], json!(40));
-
-    let by_transaction = get_json(
-        app.clone(),
-        &format!("/search/{}", fixture.transaction_hash),
-    )
-    .await;
-    assert_eq!(by_transaction["kind"], json!("Transaction"));
-    assert_eq!(by_transaction["data"]["block_height"], json!(1));
-
-    let missing = app
-        .oneshot(
-            Request::builder()
-                .uri("/search/not-found")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
-}
-
-#[tokio::test]
-async fn returns_rollup_batches_from_chain_blocks() {
-    let fixture = ChainFixture::new();
-    let app = app(fixture.chain_file.clone());
-
-    let batches = get_json(app.clone(), "/rollup/batches").await;
-    assert_eq!(batches["total"], json!(1));
-    assert_eq!(batches["items"].as_array().unwrap().len(), 1);
-    assert_eq!(batches["items"][0]["batch_number"], json!(0));
-    assert_eq!(batches["items"][0]["start_block_height"], json!(1));
-    assert_eq!(batches["items"][0]["end_block_height"], json!(1));
-    assert_eq!(batches["items"][0]["transaction_count"], json!(1));
-    assert_eq!(batches["items"][0]["status"], json!("built"));
-
-    let empty_page = get_json(app.clone(), "/rollup/batches?limit=1&offset=1").await;
-    assert_eq!(empty_page["total"], json!(1));
-    assert_eq!(empty_page["items"].as_array().unwrap().len(), 0);
-    assert_eq!(empty_page["next_offset"], json!(null));
-
-    let batch = get_json(app, "/rollup/batches/0").await;
-    assert_eq!(batch["batch_number"], json!(0));
-    assert_eq!(batch["transactions"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        batch["transactions"][0]["hash"],
-        json!(fixture.transaction_hash)
-    );
-    assert_eq!(batch["transactions"][0]["block_height"], json!(1));
-
-    let _temp_dir_kept_alive = fixture.temp_dir;
 }
 
 #[tokio::test]
@@ -347,41 +91,65 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
     let batch = get_json(app.clone(), "/rollup/batches/0").await;
     assert_eq!(batch["transactions"].as_array().unwrap().len(), 3);
 
+    let new_transfer = sign_transfer(
+        &fixture.alice_secret_key,
+        fixture.bob_address.clone(),
+        5,
+        fixture.alice_nonce,
+    )
+    .unwrap();
+    let submit = post_json(app.clone(), "/rollup/transactions", &new_transfer).await;
+    assert_eq!(submit.status(), StatusCode::OK);
+    let submitted = response_json(submit).await;
+    assert_eq!(submitted["status"], json!("pending"));
+    assert_eq!(submitted["hash"], json!(transaction_hash(&new_transfer)));
+
+    let pool_page = get_json(app.clone(), "/rollup/transactions").await;
+    assert_eq!(pool_page["total"], json!(1));
+    assert_eq!(pool_page["items"][0]["status"], json!("pending"));
+
+    let pending_summary = get_json(app.clone(), "/chain/summary").await;
+    assert_eq!(pending_summary["pending_transaction_count"], json!(1));
+
+    let sequenced = post_json(app.clone(), "/rollup/batches", &json!({ "limit": 10 })).await;
+    assert_eq!(sequenced.status(), StatusCode::OK);
+    let sequenced = response_json(sequenced).await;
+    assert_eq!(sequenced["block"]["height"], json!(4));
+    assert_eq!(
+        sequenced["included_transactions"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(sequenced["rollup_batch"]["end_block_height"], json!(4));
+    assert_eq!(sequenced["rollup_batch"]["transaction_count"], json!(4));
+
+    let sequenced_summary = get_json(app.clone(), "/chain/summary").await;
+    assert_eq!(sequenced_summary["height"], json!(4));
+    assert_eq!(sequenced_summary["transaction_count"], json!(4));
+    assert_eq!(sequenced_summary["pending_transaction_count"], json!(0));
+
     insert_error_event(&pool).await;
     let health = get_json(app.clone(), "/health").await;
     assert_eq!(health["status"], json!("degraded"));
-    assert_eq!(
-        health["latest_error"]["message"],
-        json!("test indexer failure")
-    );
+    assert_eq!(health["latest_error"]["message"], json!("test API failure"));
 
     let errors = get_json(app, "/errors").await;
     assert_eq!(errors.as_array().unwrap().len(), 1);
     assert_eq!(errors[0]["severity"], json!("error"));
-
     teardown_postgres_test_database(&pool, &schema).await;
-    let _temp_dir_kept_alive = fixture.temp_dir;
 }
 
 struct ChainFixture {
-    temp_dir: TempDir,
-    chain_file: PathBuf,
     chain: Chain,
     alice_address: String,
+    alice_secret_key: String,
+    alice_nonce: u64,
     bob_address: String,
     latest_block_hash: String,
     transaction_hash: String,
 }
 
 impl ChainFixture {
-    fn new() -> Self {
-        Self::with_transaction_blocks(1)
-    }
-
     fn with_transaction_blocks(count: usize) -> Self {
-        let temp_dir = TempDir::new().unwrap();
-        let chain_file = temp_dir.path().join("chain.json");
-
         let alice = create_keypair();
         let bob = create_keypair();
         let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
@@ -421,14 +189,13 @@ impl ChainFixture {
             let block = produce_block(&mut chain).unwrap();
             latest_block_hash = block.block_hash;
         }
-
-        std::fs::write(&chain_file, serde_json::to_string_pretty(&chain).unwrap()).unwrap();
+        let alice_nonce = chain.accounts.get(&alice_address).unwrap().nonce;
 
         Self {
-            temp_dir,
-            chain_file,
             chain,
             alice_address,
+            alice_secret_key: alice.secret_key_base64,
+            alice_nonce,
             bob_address,
             latest_block_hash,
             transaction_hash: first_hash.unwrap_or_default(),
@@ -440,6 +207,7 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0001_init/migration.sql"),
     include_str!("../../../prisma/migrations/0002_error_events/migration.sql"),
     include_str!("../../../prisma/migrations/0003_rollup_batches/migration.sql"),
+    include_str!("../../../prisma/migrations/0004_transaction_pool/migration.sql"),
 ];
 
 fn optional_test_database_url() -> Option<String> {
@@ -648,7 +416,7 @@ async fn insert_error_event(pool: &PgPool) {
     sqlx::query(
         r#"
         INSERT INTO error_events (service, severity, message, context)
-        VALUES ('chain-indexer', 'error', 'test indexer failure', '{"test": true}'::jsonb)
+        VALUES ('explorer-api', 'error', 'test API failure', '{"test": true}'::jsonb)
         "#,
     )
     .execute(pool)
@@ -660,14 +428,35 @@ async fn get_json(app: axum::Router, uri: &str) -> Value {
     let response = get_response(app, uri).await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes).unwrap()
+    response_json(response).await
 }
 
 async fn get_response(app: axum::Router, uri: &str) -> Response<Body> {
     app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap()
+}
+
+async fn post_json<T: serde::Serialize>(
+    app: axum::Router,
+    uri: &str,
+    payload: &T,
+) -> Response<Body> {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(payload).unwrap()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn response_json(response: Response<Body>) -> Value {
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 fn path_segment(value: &str) -> String {

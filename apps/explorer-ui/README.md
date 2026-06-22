@@ -4,10 +4,10 @@ React/Vite explorer dashboard for the local zk-rollup chain.
 
 ## Run
 
-Start the API in JSON mode:
+Start the Postgres-backed API:
 
 ```bash
-cargo run -p explorer-api -- --json-mode --chain-file chain.json --bind 127.0.0.1:3000
+cargo run -p explorer-api -- --bind 127.0.0.1:3000
 ```
 
 Start the UI:
