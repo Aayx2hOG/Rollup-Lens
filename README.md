@@ -30,12 +30,7 @@ in Postgres, not in local JSON files.
 Start Postgres:
 
 ```bash
-docker run --name zk-rollup-postgres \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=zk_rollup \
-  -p 5432:5432 \
-  -d postgres:16
+bun run db:up
 ```
 
 Create `prisma/.env`:
@@ -53,7 +48,7 @@ DATABASE_URL="postgresql://postgres:postgres@localhost:5432/zk_rollup"
 Apply migrations:
 
 ```bash
-bunx prisma migrate dev
+bun run db:migrate
 ```
 
 ## Explorer API
@@ -61,7 +56,7 @@ bunx prisma migrate dev
 Run the Postgres-backed API:
 
 ```bash
-cargo run -p explorer-api -- --bind 0.0.0.0:3000
+bun run api:dev
 ```
 
 You can also pass the database URL explicitly:
@@ -114,6 +109,19 @@ Run the UI:
 ```bash
 cd apps/explorer-ui
 bun install
+bun run dev
+```
+
+From the repository root, the same UI command is also available as:
+
+```bash
+bun run ui:dev
+```
+
+For day-to-day development after Postgres is running and migrations are applied,
+start both the API and UI together:
+
+```bash
 bun run dev
 ```
 

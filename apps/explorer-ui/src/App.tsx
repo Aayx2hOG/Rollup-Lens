@@ -3,20 +3,25 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   ArrowRight,
+  ArrowUpRight,
+  BarChart3,
   Blocks,
   CheckCircle2,
   Copy,
+  Cpu,
   Database,
   ExternalLink,
   Gauge,
-  Hash,
+  Landmark,
   Layers3,
+  Network,
   PackageCheck,
   Play,
   RefreshCcw,
   Search,
   Send,
   ShieldAlert,
+  Users,
   Wallet,
   XCircle,
 } from "lucide-react";
@@ -38,6 +43,15 @@ import { Badge, IconButton, Panel, Shell, Skeleton, Stat } from "./components/ui
 
 const tabs = ["Overview", "Blocks", "Accounts", "Rollup", "Sequencer", "Health"] as const;
 type Tab = (typeof tabs)[number];
+
+const tabMeta: Record<Tab, { label: string; icon: React.ReactNode }> = {
+  Overview: { label: "Dashboard", icon: <Gauge className="h-4 w-4" /> },
+  Blocks: { label: "Activity", icon: <Blocks className="h-4 w-4" /> },
+  Accounts: { label: "People", icon: <Users className="h-4 w-4" /> },
+  Rollup: { label: "Settlement", icon: <PackageCheck className="h-4 w-4" /> },
+  Sequencer: { label: "Send", icon: <Send className="h-4 w-4" /> },
+  Health: { label: "System", icon: <ShieldAlert className="h-4 w-4" /> },
+};
 
 export function App() {
   const queryClient = useQueryClient();
@@ -148,28 +162,35 @@ export function App() {
 
   return (
     <Shell>
-      <header className="flex flex-col gap-4 border-b border-white/10 pb-4 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg border border-mint/25 bg-mint/10 text-mint shadow-glow">
-            <Layers3 className="h-5 w-5" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-semibold leading-tight text-white sm:text-3xl">RollupLens Explorer</h1>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-white/56">
-              <Badge tone={readStatus === "ok" ? "good" : "warn"}>
-                {readStatus}
-              </Badge>
-              <span>Live chain read path</span>
-              <span className="hidden text-white/24 sm:inline">/</span>
-              <span className="hash max-w-[15rem]">{shortHash(summary.data?.latest_block_hash)}</span>
+      <header className="sticky top-0 z-30 -mx-4 border-b border-white/10 bg-ink/82 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+        <div className="mx-auto grid max-w-[88rem] gap-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-mint/25 bg-mint/10 text-mint shadow-glow">
+                <Layers3 className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <h1 className="truncate text-xl font-semibold leading-tight text-white sm:text-2xl">RollupLens Explorer</h1>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-white/56 sm:text-sm">
+                  <Badge tone={readStatus === "ok" ? "good" : "warn"}>
+                    {readStatusLabel(readStatus)}
+                  </Badge>
+                  <span>Transfers, accounts, and settlement</span>
+                  <span className="hidden text-white/24 sm:inline">/</span>
+                  <span className="hash max-w-[12rem]">{shortHash(summary.data?.latest_block_hash)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <SearchBox onSearch={onSearch} pending={false} />
+              <IconButton onClick={refreshAll} title="Refresh data" aria-label="Refresh data">
+                <RefreshCcw className="h-4 w-4" />
+              </IconButton>
             </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <SearchBox onSearch={onSearch} pending={false} />
-          <IconButton onClick={refreshAll} title="Refresh data" aria-label="Refresh data">
-            <RefreshCcw className="h-4 w-4" />
-          </IconButton>
+
+          <HeaderNav activeTab={activeTab} onSelectTab={setActiveTab} />
         </div>
       </header>
 
@@ -188,122 +209,133 @@ export function App() {
         )}
       </AnimatePresence>
 
-      <nav className="flex gap-2 overflow-x-auto pb-1">
-        {tabs.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={cn(
-              "relative rounded-lg px-4 py-2 text-sm font-medium text-white/58 transition hover:text-white",
-              activeTab === tab && "text-white",
-            )}
-          >
-            {activeTab === tab && (
-              <motion.span
-                layoutId="active-tab"
-                className="absolute inset-0 rounded-lg border border-mint/25 bg-mint/10"
-                transition={{ type: "spring", bounce: 0.2, duration: 0.5 }}
-              />
-            )}
-            <span className="relative">{tab}</span>
-          </button>
-        ))}
-      </nav>
-
-      <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {summary.isLoading ? (
-          <>
-            <Skeleton className="h-32" />
-            <Skeleton className="h-32" />
-            <Skeleton className="h-32" />
-            <Skeleton className="h-32" />
-          </>
-        ) : (
-          <>
-            <Stat label="Height" value={summary.data?.height ?? 0} detail="Latest finalized local block" accent="mint" />
-            <Stat label="Transactions" value={formatNumber(summary.data?.transaction_count)} detail={`${formatNumber(summary.data?.pending_transaction_count)} pending in mempool`} accent="cyan" />
-            <Stat label="Accounts" value={formatNumber(summary.data?.account_count)} detail="Current account snapshots" accent="amber" />
-            <Stat label="Validity" value={summary.data?.valid ? "Valid" : "Invalid"} detail={summary.data?.genesis_finalized ? "Genesis finalized" : "Genesis not finalized"} accent={summary.data?.valid ? "mint" : "rose"} />
-          </>
-        )}
-      </section>
-
       {activeTab === "Overview" && (
-        <Overview
-          summary={summary.data}
-          blocks={blockItems}
-          blockTotal={blockTotal}
-          selectedBlock={block.data}
-          onSelectBlock={setSelectedHeight}
-          onSelectAccount={(address) => {
-            setSelectedAccount(address);
-            setActiveTab("Accounts");
-          }}
-        />
+        <div className="grid gap-5">
+          <HomeHero
+            readStatus={readStatus}
+            summary={summary.data}
+            latestBlock={blockItems[0]}
+            pendingTransfers={summary.data?.pending_transaction_count ?? 0}
+            onOpenActivity={() => setActiveTab("Blocks")}
+            onOpenSettlement={() => setActiveTab("Rollup")}
+          />
+          <SummaryStats summary={summary.data} loading={summary.isLoading} />
+          <Overview
+            summary={summary.data}
+            blocks={blockItems}
+            blockTotal={blockTotal}
+            selectedBlock={block.data}
+            onSelectBlock={setSelectedHeight}
+            onSelectAccount={(address) => {
+              setSelectedAccount(address);
+              setActiveTab("Accounts");
+            }}
+          />
+        </div>
       )}
 
       {activeTab === "Blocks" && (
-        <BlocksView
-          blocks={blockItems}
-          blockTotal={blockTotal}
-          selectedHeight={selectedHeight}
-          selectedBlock={block.data}
-          blockLoading={block.isLoading}
-          selectedTx={selectedTx}
-          transaction={transaction.data}
-          transactionError={transaction.error instanceof Error ? transaction.error.message : null}
-          onSelectBlock={setSelectedHeight}
-          onSelectAccount={(address) => {
-            setSelectedAccount(address);
-            setActiveTab("Accounts");
-          }}
-          onSelectTx={setSelectedTx}
-        />
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<Blocks className="h-5 w-5" />}
+            title="Activity"
+            description="Inspect grouped transfers, block fingerprints, sender and receiver flow, and individual transfer details."
+            meta={`${blockItems.length}/${blockTotal} groups loaded`}
+          />
+          <BlocksView
+            blocks={blockItems}
+            blockTotal={blockTotal}
+            selectedHeight={selectedHeight}
+            selectedBlock={block.data}
+            blockLoading={block.isLoading}
+            selectedTx={selectedTx}
+            transaction={transaction.data}
+            transactionError={transaction.error instanceof Error ? transaction.error.message : null}
+            onSelectBlock={setSelectedHeight}
+            onSelectAccount={(address) => {
+              setSelectedAccount(address);
+              setActiveTab("Accounts");
+            }}
+            onSelectTx={setSelectedTx}
+          />
+        </div>
       )}
 
       {activeTab === "Accounts" && (
-        <AccountsView
-          candidates={accountsFromBlocks}
-          selectedAccount={selectedAccount}
-          account={account.data}
-          accountError={account.error instanceof Error ? account.error.message : null}
-          onSelectAccount={setSelectedAccount}
-        />
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<Users className="h-5 w-5" />}
+            title="People"
+            description="Look up wallet balances, open senders and receivers from current activity, and keep account state separate from block browsing."
+            meta={selectedAccount ? shortHash(selectedAccount) : "no wallet selected"}
+          />
+          <AccountsView
+            candidates={accountsFromBlocks}
+            selectedAccount={selectedAccount}
+            account={account.data}
+            accountError={account.error instanceof Error ? account.error.message : null}
+            onSelectAccount={setSelectedAccount}
+          />
+        </div>
       )}
 
       {activeTab === "Rollup" && (
-        <RollupView
-          batches={batchItems}
-          batchTotal={batchTotal}
-          selectedBatchNumber={selectedBatch}
-          selectedBatch={rollupBatch.data}
-          batchLoading={rollupBatch.isLoading}
-          onSelectBatch={setSelectedBatch}
-          onSelectTx={(hash) => {
-            setSelectedTx(hash);
-            setActiveTab("Blocks");
-          }}
-        />
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<PackageCheck className="h-5 w-5" />}
+            title="Settlement"
+            description="Review settlement packages, L1 receipt metadata, state commitments, and the transfers included in each package."
+            meta={`${batchItems.length}/${batchTotal} packages`}
+          />
+          <RollupView
+            batches={batchItems}
+            batchTotal={batchTotal}
+            selectedBatchNumber={selectedBatch}
+            selectedBatch={rollupBatch.data}
+            batchLoading={rollupBatch.isLoading}
+            onSelectBatch={setSelectedBatch}
+            onSelectTx={(hash) => {
+              setSelectedTx(hash);
+              setActiveTab("Blocks");
+            }}
+          />
+        </div>
       )}
 
       {activeTab === "Sequencer" && (
-        <SequencerView
-          pool={transactionPool.data?.items ?? []}
-          poolTotal={transactionPool.data?.total ?? 0}
-          onSubmitted={async (hash) => {
-            setSelectedTx(hash);
-            await refreshAll();
-          }}
-          onSequenced={async (height) => {
-            setSelectedHeight(height);
-            setActiveTab("Blocks");
-            await refreshAll();
-          }}
-        />
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<Send className="h-5 w-5" />}
+            title="Send"
+            description="Submit signed transfer JSON and group waiting transfers into the next local activity block."
+            meta={`${transactionPool.data?.total ?? 0} waiting or processed`}
+          />
+          <SequencerView
+            pool={transactionPool.data?.items ?? []}
+            poolTotal={transactionPool.data?.total ?? 0}
+            onSubmitted={async (hash) => {
+              setSelectedTx(hash);
+              await refreshAll();
+            }}
+            onSequenced={async (height) => {
+              setSelectedHeight(height);
+              setActiveTab("Blocks");
+              await refreshAll();
+            }}
+          />
+        </div>
       )}
 
       {activeTab === "Health" && (
-        <HealthView health={health.data} errors={errors.data ?? []} summary={summary.data} />
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<ShieldAlert className="h-5 w-5" />}
+            title="System"
+            description="Monitor API status, indexed data consistency, and recent service events without mixing them into explorer workflows."
+            meta={health.data?.status ?? "checking"}
+          />
+          <HealthView health={health.data} errors={errors.data ?? []} summary={summary.data} />
+        </div>
       )}
     </Shell>
   );
@@ -314,6 +346,104 @@ function firstError(...errors: Array<unknown>) {
     if (error instanceof Error) return error.message;
   }
   return null;
+}
+
+function readStatusLabel(status: string) {
+  if (status === "ok") return "Live";
+  if (status === "stale") return "Last good data";
+  if (status === "offline") return "Offline";
+  return "Connecting";
+}
+
+function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (tab: Tab) => void }) {
+  return (
+    <nav className="flex min-w-0 flex-wrap gap-1 rounded-xl border border-white/10 bg-white/[0.035] p-1">
+      {tabs.map((tab) => (
+        <button
+          key={tab}
+          onClick={() => onSelectTab(tab)}
+          className={cn(
+            "relative inline-flex h-10 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-medium text-white/58 transition hover:text-white",
+            activeTab === tab && "text-white",
+          )}
+        >
+          {activeTab === tab && (
+            <motion.span
+              layoutId="active-header-tab"
+              className="absolute inset-0 rounded-lg border border-mint/25 bg-mint/10"
+              transition={{ type: "spring", bounce: 0.18, duration: 0.45 }}
+            />
+          )}
+          <span className="relative text-mint/80">{tabMeta[tab].icon}</span>
+          <span className="relative">{tabMeta[tab].label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function SummaryStats({
+  summary,
+  loading,
+}: {
+  summary?: {
+    height: number | null;
+    transaction_count: number;
+    pending_transaction_count: number;
+    account_count: number;
+    valid: boolean;
+    genesis_finalized: boolean;
+  };
+  loading: boolean;
+}) {
+  return (
+    <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+      {loading ? (
+        <>
+          <Skeleton className="h-32" />
+          <Skeleton className="h-32" />
+          <Skeleton className="h-32" />
+          <Skeleton className="h-32" />
+        </>
+      ) : (
+        <>
+          <Stat label="Latest block" value={summary?.height ?? 0} detail="Newest confirmed activity group" accent="mint" />
+          <Stat label="Transfers" value={formatNumber(summary?.transaction_count)} detail={`${formatNumber(summary?.pending_transaction_count)} waiting to be grouped`} accent="cyan" />
+          <Stat label="Accounts" value={formatNumber(summary?.account_count)} detail="Wallets with current balances" accent="amber" />
+          <Stat label="System check" value={summary?.valid ? "Healthy" : "Needs review"} detail={summary?.genesis_finalized ? "Starting point is locked" : "Starting point is not locked"} accent={summary?.valid ? "mint" : "rose"} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function PageIntro({
+  icon,
+  title,
+  description,
+  meta,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  meta?: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-mint/20 bg-mint/10 text-mint">
+            {icon}
+          </div>
+          <div>
+            <h2 className="text-2xl font-semibold text-white">{title}</h2>
+            <p className="mt-1 max-w-3xl text-sm leading-6 text-white/58">{description}</p>
+          </div>
+        </div>
+        {meta && <div className="shrink-0 text-sm text-white/48">{meta}</div>}
+      </div>
+    </section>
+  );
 }
 
 function ConnectionError({ message }: { message: string }) {
@@ -406,6 +536,137 @@ function summarizeResult(result: SearchResult | null) {
   return `${result.data.hash} / block ${result.data.block_height ?? "pending"}`;
 }
 
+function HomeHero({
+  readStatus,
+  summary,
+  latestBlock,
+  pendingTransfers,
+  onOpenActivity,
+  onOpenSettlement,
+}: {
+  readStatus: string;
+  summary?: { height: number | null; transaction_count: number; account_count: number; valid: boolean };
+  latestBlock?: BlockSummary;
+  pendingTransfers: number;
+  onOpenActivity: () => void;
+  onOpenSettlement: () => void;
+}) {
+  const live = readStatus === "ok";
+  return (
+    <section className="relative overflow-hidden rounded-[1.4rem] border border-white/10 bg-white/[0.025] px-4 py-6 shadow-2xl shadow-black/20 sm:px-6 lg:px-8">
+      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent" />
+      <div className="grid min-h-[30rem] grid-cols-1 items-center gap-8 lg:grid-cols-[0.92fr_1.08fr]">
+        <div className="max-w-3xl">
+          <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 py-1.5 text-xs font-medium text-white/68">
+            <span className={cn("h-2 w-2 rounded-full", live ? "bg-mint shadow-[0_0_18px_rgba(88,244,183,0.8)]" : "bg-amber")} />
+            {live ? "Live rollup monitor" : "Waiting for local services"}
+          </div>
+          <h2 className="max-w-4xl text-4xl font-semibold leading-[1.02] text-white sm:text-5xl lg:text-6xl">
+            A settlement-aware explorer for local rollup operations.
+          </h2>
+          <p className="mt-5 max-w-2xl text-base leading-7 text-white/62 sm:text-lg">
+            Track transfers from intake to grouped blocks, settlement packages, and L1 receipts without digging through logs or raw database rows.
+          </p>
+          <div className="mt-7 flex flex-col gap-3 sm:flex-row">
+            <button
+              onClick={onOpenActivity}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-mint px-4 text-sm font-semibold text-ink shadow-lg shadow-mint/10 transition hover:bg-mint/90"
+            >
+              Open activity
+              <ArrowUpRight className="h-4 w-4" />
+            </button>
+            <button
+              onClick={onOpenSettlement}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.045] px-4 text-sm font-semibold text-white/82 transition hover:border-amber/30 hover:bg-amber/10 hover:text-amber"
+            >
+              View settlement
+              <Landmark className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <HeroMetric label="Latest block" value={summary?.height ?? "none"} />
+            <HeroMetric label="Transfers" value={formatNumber(summary?.transaction_count)} />
+            <HeroMetric label="Wallets" value={formatNumber(summary?.account_count)} />
+            <HeroMetric label="Waiting" value={formatNumber(pendingTransfers)} />
+          </div>
+        </div>
+
+        <div className="hero-visual relative min-h-[26rem] overflow-hidden rounded-[1.25rem] border border-white/10 p-4">
+          <div className="scan-line absolute left-0 top-24 h-px w-full" />
+          <div className="absolute inset-4 rounded-2xl border border-white/8" />
+          <div className="absolute left-8 top-8 right-8 flex items-center justify-between text-xs text-white/42">
+            <span>rollup path</span>
+            <span className="hash">{shortHash(latestBlock?.block_hash, 8, 6)}</span>
+          </div>
+          <TopologyNode className="left-[8%] top-[34%]" icon={<Send className="h-4 w-4" />} label="Intake" value={`${pendingTransfers} waiting`} tone="mint" />
+          <TopologyNode className="left-[35%] top-[18%]" icon={<Cpu className="h-4 w-4" />} label="Executor" value={summary?.valid ? "consistent" : "review"} tone="cyan" />
+          <TopologyNode className="left-[57%] top-[48%]" icon={<PackageCheck className="h-4 w-4" />} label="Package" value={latestBlock ? `block ${latestBlock.height}` : "idle"} tone="amber" />
+          <TopologyNode className="right-[7%] top-[28%]" icon={<Landmark className="h-4 w-4" />} label="L1 receipt" value="indexed" tone="rose" />
+          <div className="absolute left-[18%] top-[43%] h-px w-[22%] rotate-[-18deg] bg-gradient-to-r from-mint/70 to-cyan/60" />
+          <div className="absolute left-[45%] top-[34%] h-px w-[20%] rotate-[28deg] bg-gradient-to-r from-cyan/60 to-amber/70" />
+          <div className="absolute left-[67%] top-[45%] h-px w-[22%] rotate-[-16deg] bg-gradient-to-r from-amber/70 to-rose/70" />
+          <div className="absolute bottom-5 left-5 right-5 grid grid-cols-3 gap-3">
+            <SignalTile icon={<Network className="h-4 w-4" />} label="Blocks" value={latestBlock ? String(latestBlock.height) : "0"} />
+            <SignalTile icon={<BarChart3 className="h-4 w-4" />} label="Throughput" value={pluralize(latestBlock?.transaction_count ?? 0, "transfer")} />
+            <SignalTile icon={<ShieldAlert className="h-4 w-4" />} label="Status" value={readStatusLabel(readStatus)} />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function HeroMetric({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
+      <div className="text-xs text-white/42">{label}</div>
+      <div className="mt-2 text-xl font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function TopologyNode({
+  className,
+  icon,
+  label,
+  value,
+  tone,
+}: {
+  className: string;
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  tone: "mint" | "cyan" | "amber" | "rose";
+}) {
+  const tones = {
+    mint: "border-mint/25 bg-mint/10 text-mint",
+    cyan: "border-cyan/25 bg-cyan/10 text-cyan",
+    amber: "border-amber/25 bg-amber/10 text-amber",
+    rose: "border-rose/25 bg-rose/10 text-rose",
+  };
+  return (
+    <div className={cn("absolute min-w-32 rounded-xl border p-3 shadow-xl shadow-black/20 backdrop-blur", tones[tone], className)}>
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-2 text-xs text-white/58">{value}</div>
+    </div>
+  );
+}
+
+function SignalTile({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-xl border border-white/10 bg-black/20 p-3">
+      <div className="flex items-center gap-2 text-xs text-white/46">
+        <span className="text-mint">{icon}</span>
+        {label}
+      </div>
+      <div className="mt-2 truncate text-sm font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
 function Overview({
   summary,
   blocks,
@@ -421,10 +682,18 @@ function Overview({
   onSelectBlock: (height: number) => void;
   onSelectAccount: (address: string) => void;
 }) {
+  const transferCount = selectedBlock?.transactions.length ?? 0;
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+      <div className="xl:col-span-2">
+        <WorkflowStrip
+          latestBlock={summary?.block_count ? summary.block_count - 1 : null}
+          transferCount={transferCount}
+          hasSettlement={false}
+        />
+      </div>
       <Panel className="overflow-hidden">
-        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Latest blocks" action={`${blocks.length}/${blockTotal} loaded`} />
+        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Recent activity groups" action={`${blocks.length}/${blockTotal} loaded`} />
         <div className="divide-y divide-white/8">
           {blocks.map((block) => (
             <button
@@ -437,7 +706,7 @@ function Overview({
               </div>
               <div className="min-w-0">
                 <div className="hash text-sm text-white">{block.block_hash}</div>
-                <div className="mt-1 text-xs text-white/45">{pluralize(block.transaction_count, "transaction")}</div>
+                <div className="mt-1 text-xs text-white/45">{pluralize(block.transaction_count, "transfer")}</div>
               </div>
               <ArrowRight className="h-4 w-4 text-white/34" />
             </button>
@@ -446,12 +715,12 @@ function Overview({
       </Panel>
 
       <Panel className="p-4">
-        <SectionTitle icon={<Gauge className="h-4 w-4" />} title="State" action="Current root" flush />
+        <SectionTitle icon={<Gauge className="h-4 w-4" />} title="Current snapshot" action="Latest fingerprint" flush />
         <div className="mt-4 space-y-4">
-          <HashLine label="State root" value={summary?.state_root} />
-          <HashLine label="Latest block" value={summary?.latest_block_hash} />
+          <HashLine label="Balance fingerprint" value={summary?.state_root} />
+          <HashLine label="Latest activity fingerprint" value={summary?.latest_block_hash} />
           <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
-            <div className="text-xs uppercase tracking-[0.18em] text-white/38">Selected block flow</div>
+            <div className="text-xs uppercase tracking-[0.18em] text-white/38">Selected activity flow</div>
             <div className="mt-3 flex items-center gap-2 text-sm">
               <span className="hash min-w-0 flex-1 text-white/60">{shortHash(selectedBlock?.parent_hash, 8, 8)}</span>
               <ArrowRight className="h-4 w-4 shrink-0 text-amber" />
@@ -464,6 +733,65 @@ function Overview({
         </div>
       </Panel>
     </div>
+  );
+}
+
+function WorkflowStrip({
+  latestBlock,
+  transferCount,
+  hasSettlement,
+}: {
+  latestBlock: number | null;
+  transferCount: number;
+  hasSettlement: boolean;
+}) {
+  const steps = [
+    {
+      icon: <Send className="h-4 w-4" />,
+      label: "Transfers arrive",
+      value: transferCount > 0 ? pluralize(transferCount, "transfer") : "none selected",
+      tone: transferCount > 0 ? "good" : "neutral",
+    },
+    {
+      icon: <Blocks className="h-4 w-4" />,
+      label: "Grouped into blocks",
+      value: latestBlock === null ? "waiting" : `latest ${latestBlock}`,
+      tone: latestBlock === null ? "neutral" : "good",
+    },
+    {
+      icon: <PackageCheck className="h-4 w-4" />,
+      label: "Packed for settlement",
+      value: hasSettlement ? "ready" : "see Settlement",
+      tone: hasSettlement ? "good" : "warn",
+    },
+    {
+      icon: <ShieldAlert className="h-4 w-4" />,
+      label: "Anchored on L1",
+      value: "tracked per batch",
+      tone: "neutral",
+    },
+  ] as const;
+
+  return (
+    <Panel className="p-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+        {steps.map((step, index) => (
+          <div key={step.label} className="flex min-w-0 items-center gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3">
+            <div className={cn(
+              "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
+              step.tone === "good" ? "bg-mint/10 text-mint" : step.tone === "warn" ? "bg-amber/10 text-amber" : "bg-white/[0.06] text-white/58",
+            )}>
+              {step.icon}
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs text-white/42">Step {index + 1}</div>
+              <div className="text-sm font-semibold text-white">{step.label}</div>
+              <div className="mt-0.5 text-xs text-white/50">{step.value}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }
 
@@ -495,7 +823,7 @@ function BlocksView({
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[23rem_1fr]">
       <Panel className="overflow-hidden">
-        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Block stream" action={`${blocks.length}/${blockTotal} indexed`} />
+        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Activity groups" action={`${blocks.length}/${blockTotal} indexed`} />
         <div className="max-h-[36rem] overflow-auto">
           {blocks.map((block) => (
             <button
@@ -511,7 +839,7 @@ function BlocksView({
               </div>
               <div className="min-w-0 flex-1">
                 <div className="hash text-sm text-white/82">{block.block_hash}</div>
-                <div className="mt-1 text-xs text-white/42">{pluralize(block.transaction_count, "tx", "txs")}</div>
+                <div className="mt-1 text-xs text-white/42">{pluralize(block.transaction_count, "transfer")}</div>
               </div>
             </button>
           ))}
@@ -520,26 +848,26 @@ function BlocksView({
 
       <div className="grid gap-4">
         <Panel className="p-4">
-          <SectionTitle icon={<Database className="h-4 w-4" />} title="Block detail" action={selectedBlock ? `height ${selectedBlock.height}` : "none"} flush />
+          <SectionTitle icon={<Database className="h-4 w-4" />} title="Activity group detail" action={selectedBlock ? `block ${selectedBlock.height}` : "none"} flush />
           {blockLoading ? (
             <Skeleton className="mt-4 h-56" />
           ) : selectedBlock ? (
             <div className="mt-4 grid gap-3">
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <HashLine label="Block hash" value={selectedBlock.block_hash} />
-                <HashLine label="Parent hash" value={selectedBlock.parent_hash} />
-                <HashLine label="State root" value={selectedBlock.state_root} />
-                <MetricLine label="Transactions" value={selectedBlock.transactions.length} />
+                <HashLine label="Group fingerprint" value={selectedBlock.block_hash} />
+                <HashLine label="Previous group fingerprint" value={selectedBlock.parent_hash} />
+                <HashLine label="Balance fingerprint" value={selectedBlock.state_root} />
+                <MetricLine label="Transfers" value={selectedBlock.transactions.length} />
               </div>
               <div className="overflow-hidden rounded-lg border border-white/10">
                 <div className="grid grid-cols-[1fr_auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
-                  <span>From</span>
+                  <span>Sender</span>
                   <span>Amount</span>
-                  <span>To</span>
-                  <span>Hash</span>
+                  <span>Receiver</span>
+                  <span>Open</span>
                 </div>
                 {selectedBlock.transactions.length === 0 ? (
-                  <div className="px-3 py-6 text-sm text-white/48">Genesis block has no transactions.</div>
+                  <div className="px-3 py-6 text-sm text-white/48">The first block only starts the system, so it has no transfers.</div>
                 ) : (
                   selectedBlock.transactions.map((tx, index) => (
                     <TransactionRow
@@ -554,22 +882,22 @@ function BlocksView({
               </div>
             </div>
           ) : (
-            <div className="mt-4 text-sm text-white/50">Select a block from the stream.</div>
+            <div className="mt-4 text-sm text-white/50">Select an activity group from the list.</div>
           )}
         </Panel>
 
         <Panel className="p-4">
-          <SectionTitle icon={<Activity className="h-4 w-4" />} title="Transaction lookup" action={selectedTx ? shortHash(selectedTx) : "paste hash"} flush />
+          <SectionTitle icon={<Activity className="h-4 w-4" />} title="Transfer lookup" action={selectedTx ? shortHash(selectedTx) : "paste fingerprint"} flush />
           {transaction ? (
             <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <HashLine label="Transaction hash" value={transaction.hash} />
-              <MetricLine label="Block height" value={transaction.block_height ?? "pending"} />
+              <HashLine label="Transfer fingerprint" value={transaction.hash} />
+              <MetricLine label="Activity group" value={transaction.block_height ?? "waiting"} />
               <TransferDetail tx={transaction.transfer} onSelectAccount={onSelectAccount} />
             </div>
           ) : transactionError ? (
             <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{transactionError}</div>
           ) : (
-            <div className="mt-4 text-sm text-white/50">Search a transaction hash or use a computed hash from a block row.</div>
+            <div className="mt-4 text-sm text-white/50">Search a transfer fingerprint or open one from an activity row.</div>
           )}
         </Panel>
       </div>
@@ -595,7 +923,7 @@ function AccountsView({
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[25rem_1fr]">
       <Panel className="p-4">
-        <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Account lookup" action="Current state" flush />
+        <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Find a wallet" action="Current balance" flush />
         <form
           className="mt-4 flex gap-2"
           onSubmit={(event) => {
@@ -606,7 +934,7 @@ function AccountsView({
           <input
             value={manual}
             onChange={(event) => setManual(event.target.value)}
-            placeholder="Paste account address"
+            placeholder="Paste wallet address"
             className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none placeholder:text-white/34 focus:border-mint/40"
           />
           <button className="rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90">
@@ -627,7 +955,7 @@ function AccountsView({
             >
               <div className="hash text-sm text-white">{candidate.address}</div>
               <div className="mt-2 flex gap-2 text-xs text-white/48">
-                <span>{pluralize(candidate.touches, "touch", "touches")}</span>
+                <span>{pluralize(candidate.touches, "transfer")}</span>
                 <span>sent {candidate.sent}</span>
                 <span>received {candidate.received}</span>
               </div>
@@ -637,17 +965,17 @@ function AccountsView({
       </Panel>
 
       <Panel className="p-4">
-        <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Account detail" action={selectedAccount ? shortHash(selectedAccount) : "none"} flush />
+        <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Wallet detail" action={selectedAccount ? shortHash(selectedAccount) : "none"} flush />
         {account ? (
           <div className="mt-4 grid gap-3 md:grid-cols-3">
-            <HashLine label="Address" value={account.address} />
+            <HashLine label="Wallet address" value={account.address} />
             <MetricLine label="Balance" value={account.balance} />
-            <MetricLine label="Nonce" value={account.nonce} />
+            <MetricLine label="Next transfer #" value={account.nonce} />
           </div>
         ) : accountError ? (
           <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{accountError}</div>
         ) : (
-          <div className="mt-4 text-sm text-white/50">Select an account touched by the current block or paste an address.</div>
+          <div className="mt-4 text-sm text-white/50">Select a wallet from the current activity group or paste an address.</div>
         )}
       </Panel>
     </div>
@@ -678,7 +1006,7 @@ function SequencerView({
       const parsed = JSON.parse(transferJson) as Transfer;
       const submitted = await api.submitTransaction(parsed);
       setTransferJson("");
-      setNotice({ tone: "good", message: `Accepted ${shortHash(submitted.hash, 10, 8)} into the pool.` });
+      setNotice({ tone: "good", message: `Transfer ${shortHash(submitted.hash, 10, 8)} is waiting to be grouped.` });
       await onSubmitted(submitted.hash);
     } catch (error) {
       setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Transaction submission failed" });
@@ -694,7 +1022,7 @@ function SequencerView({
       const result = await api.sequenceBatch(limit);
       setNotice({
         tone: "good",
-        message: `Built block ${result.block.height} with ${pluralize(result.included_transactions.length, "transaction")}.`,
+        message: `Built activity group ${result.block.height} with ${pluralize(result.included_transactions.length, "transfer")}.`,
       });
       await onSequenced(result.block.height);
     } catch (error) {
@@ -708,7 +1036,7 @@ function SequencerView({
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
       <div className="grid gap-4">
         <Panel className="p-4">
-          <SectionTitle icon={<Send className="h-4 w-4" />} title="Submit transaction" action="Signed transfer JSON" flush />
+          <SectionTitle icon={<Send className="h-4 w-4" />} title="Add a signed transfer" action="JSON from wallet CLI" flush />
           <textarea
             value={transferJson}
             onChange={(event) => setTransferJson(event.target.value)}
@@ -721,15 +1049,15 @@ function SequencerView({
             className="mt-3 inline-flex items-center gap-2 rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Send className="h-4 w-4" />
-            Submit
+            Add transfer
           </button>
         </Panel>
 
         <Panel className="p-4">
-          <SectionTitle icon={<Play className="h-4 w-4" />} title="Build batch" action="Postgres sequencer" flush />
+          <SectionTitle icon={<Play className="h-4 w-4" />} title="Group waiting transfers" action="Local builder" flush />
           <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
             <label className="grid gap-2 text-sm text-white/62">
-              Limit
+              Max transfers
               <input
                 type="number"
                 min={1}
@@ -745,7 +1073,7 @@ function SequencerView({
               className="self-end inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan px-3 text-sm font-semibold text-ink transition hover:bg-cyan/90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Play className="h-4 w-4" />
-              Sequence
+              Build group
             </button>
           </div>
         </Panel>
@@ -758,10 +1086,10 @@ function SequencerView({
       </div>
 
       <Panel className="overflow-hidden">
-        <SectionTitle icon={<Activity className="h-4 w-4" />} title="Transaction pool" action={`${pool.length}/${poolTotal} loaded`} />
+        <SectionTitle icon={<Activity className="h-4 w-4" />} title="Waiting transfers" action={`${pool.length}/${poolTotal} loaded`} />
         <div className="max-h-[42rem] overflow-auto">
           {pool.length === 0 ? (
-            <div className="px-4 py-10 text-sm text-white/48">No submitted transactions are in the pool.</div>
+            <div className="px-4 py-10 text-sm text-white/48">No transfers are waiting to be grouped.</div>
           ) : (
             pool.map((entry) => (
               <div key={entry.id} className="grid gap-3 border-b border-white/8 px-4 py-3 last:border-b-0">
@@ -770,13 +1098,13 @@ function SequencerView({
                   <Badge tone={entry.status === "included" ? "good" : entry.status === "failed" ? "bad" : "warn"}>{entry.status}</Badge>
                 </div>
                 <div className="grid gap-2 text-xs text-white/48 sm:grid-cols-3">
-                  <span className="hash">from {shortHash(entry.transfer.from, 8, 6)}</span>
-                  <span className="hash">to {shortHash(entry.transfer.to, 8, 6)}</span>
-                  <span>amount {entry.transfer.amount} / nonce {entry.transfer.nonce}</span>
+                  <span className="hash">sender {shortHash(entry.transfer.from, 8, 6)}</span>
+                  <span className="hash">receiver {shortHash(entry.transfer.to, 8, 6)}</span>
+                  <span>amount {entry.transfer.amount} / transfer #{entry.transfer.nonce}</span>
                 </div>
                 {entry.included_block_height !== null && (
                   <div className="text-xs text-mint">
-                    included in block {entry.included_block_height} at index {entry.included_transaction_index}
+                    grouped in block {entry.included_block_height} at position {entry.included_transaction_index}
                   </div>
                 )}
                 {entry.failure_reason && <div className="text-xs text-rose">{entry.failure_reason}</div>}
@@ -801,18 +1129,18 @@ function HealthView({
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
       <Panel className="p-4">
-        <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="Read path health" action={health?.status ?? "optional"} flush />
+        <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="System status" action={health?.status ?? "optional"} flush />
         <div className="mt-4 grid gap-3">
-          <StatusLine label="Health endpoint" ok={health?.status === "ok"} value={health?.status ?? "unavailable"} />
-          <StatusLine label="Chain validation" ok={Boolean(summary?.valid)} value={summary?.valid ? "valid" : "invalid"} />
-          <StatusLine label="Indexed height" ok value={summary?.height ?? "none"} />
-          <StatusLine label="Block rows" ok value={summary?.block_count ?? 0} />
+          <StatusLine label="API connection" ok={health?.status === "ok"} value={health?.status ?? "unavailable"} />
+          <StatusLine label="Data consistency" ok={Boolean(summary?.valid)} value={summary?.valid ? "healthy" : "needs review"} />
+          <StatusLine label="Latest activity group" ok value={summary?.height ?? "none"} />
+          <StatusLine label="Stored groups" ok value={summary?.block_count ?? 0} />
         </div>
       </Panel>
       <Panel className="overflow-hidden">
-        <SectionTitle icon={<Activity className="h-4 w-4" />} title="Error events" action={`${errors.length} recent`} />
+        <SectionTitle icon={<Activity className="h-4 w-4" />} title="System events" action={`${errors.length} recent`} />
         {errors.length === 0 ? (
-          <div className="px-4 py-10 text-sm text-white/48">No persistent error events are currently exposed.</div>
+          <div className="px-4 py-10 text-sm text-white/48">No system issues are currently exposed.</div>
         ) : (
           <div className="divide-y divide-white/8">
             {errors.map((error) => (
@@ -851,10 +1179,10 @@ function RollupView({
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[24rem_1fr]">
       <Panel className="overflow-hidden">
-        <SectionTitle icon={<PackageCheck className="h-4 w-4" />} title="Rollup batches" action={`${batches.length}/${batchTotal} built`} />
+        <SectionTitle icon={<PackageCheck className="h-4 w-4" />} title="Settlement packages" action={`${batches.length}/${batchTotal} built`} />
         <div className="max-h-[36rem] overflow-auto">
           {batches.length === 0 ? (
-            <div className="px-4 py-10 text-sm text-white/48">No post-genesis blocks are available for batching.</div>
+            <div className="px-4 py-10 text-sm text-white/48">No activity groups are ready for settlement yet.</div>
           ) : (
             batches.map((batch) => (
               <button
@@ -866,11 +1194,11 @@ function RollupView({
                 )}
               >
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm font-semibold text-white">Batch {batch.batch_number}</div>
+                  <div className="text-sm font-semibold text-white">Package {batch.batch_number}</div>
                   <Badge tone={settlementStatusTone(batch.status)}>{batch.status}</Badge>
                 </div>
                 <div className="mt-2 text-xs text-white/46">
-                  blocks {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "tx", "txs")}
+                  groups {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "transfer")}
                 </div>
                 {batch.l1_submit_tx_hash && (
                   <div className="mt-2 text-xs text-mint/72">L1 {shortHash(batch.l1_submit_tx_hash, 10, 8)}</div>
@@ -885,8 +1213,8 @@ function RollupView({
       <Panel className="p-4">
         <SectionTitle
           icon={<Layers3 className="h-4 w-4" />}
-          title="Batch detail"
-          action={selectedBatch ? `batch ${selectedBatch.batch_number}` : "none"}
+          title="Settlement package detail"
+          action={selectedBatch ? `package ${selectedBatch.batch_number}` : "none"}
           flush
         />
         {batchLoading ? (
@@ -894,42 +1222,42 @@ function RollupView({
         ) : selectedBatch ? (
           <div className="mt-4 grid gap-4">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <MetricLine label="Start block" value={selectedBatch.start_block_height} />
-              <MetricLine label="End block" value={selectedBatch.end_block_height} />
-              <MetricLine label="Transactions" value={selectedBatch.transaction_count} />
+              <MetricLine label="First group" value={selectedBatch.start_block_height} />
+              <MetricLine label="Last group" value={selectedBatch.end_block_height} />
+              <MetricLine label="Transfers" value={selectedBatch.transaction_count} />
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <StatusLine label="Settlement" ok={selectedBatch.status === "finalized"} value={<Badge tone={settlementStatusTone(selectedBatch.status)}>{selectedBatch.status}</Badge>} />
-              <MetricLine label="L1 chain" value={selectedBatch.l1_chain_id ?? "none"} />
-              <MetricLine label="Submitted" value={selectedBatch.l1_submitted_at ? "yes" : "no"} />
+              <StatusLine label="Settlement state" ok={selectedBatch.status === "finalized"} value={<Badge tone={settlementStatusTone(selectedBatch.status)}>{settlementStatusLabel(selectedBatch.status)}</Badge>} />
+              <MetricLine label="Settlement chain" value={selectedBatch.l1_chain_id ?? "none"} />
+              <MetricLine label="Sent to settlement" value={selectedBatch.l1_submitted_at ? "yes" : "no"} />
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-              <MetricLine label="Submit block" value={selectedBatch.l1_submit_block_number ?? "none"} />
-              <MetricLine label="Submit gas" value={selectedBatch.l1_submit_gas_used ?? "none"} />
-              <MetricLine label="Finalize block" value={selectedBatch.l1_finalize_block_number ?? "none"} />
-              <MetricLine label="Finalize gas" value={selectedBatch.l1_finalize_gas_used ?? "none"} />
+              <MetricLine label="Send block" value={selectedBatch.l1_submit_block_number ?? "none"} />
+              <MetricLine label="Send gas" value={selectedBatch.l1_submit_gas_used ?? "none"} />
+              <MetricLine label="Final block" value={selectedBatch.l1_finalize_block_number ?? "none"} />
+              <MetricLine label="Final gas" value={selectedBatch.l1_finalize_gas_used ?? "none"} />
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <HashLine label="Previous state root" value={selectedBatch.prev_state_root} />
-              <HashLine label="New state root" value={selectedBatch.new_state_root} />
-              <HashLine label="Transaction root" value={selectedBatch.transaction_root} />
-              <HashLine label="Block hash root" value={selectedBatch.block_hash_root} />
-              <HashLine label="Data hash" value={selectedBatch.data_hash} />
+              <HashLine label="Previous balance fingerprint" value={selectedBatch.prev_state_root} />
+              <HashLine label="New balance fingerprint" value={selectedBatch.new_state_root} />
+              <HashLine label="Transfer fingerprint" value={selectedBatch.transaction_root} />
+              <HashLine label="Group fingerprint" value={selectedBatch.block_hash_root} />
+              <HashLine label="Package fingerprint" value={selectedBatch.data_hash} />
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <HashLine label="L1 contract" value={selectedBatch.l1_contract_address} />
-              <HashLine label="Submit tx" value={selectedBatch.l1_submit_tx_hash} />
-              <HashLine label="Finalize tx" value={selectedBatch.l1_finalize_tx_hash} />
+              <HashLine label="Settlement contract" value={selectedBatch.l1_contract_address} />
+              <HashLine label="Send receipt" value={selectedBatch.l1_submit_tx_hash} />
+              <HashLine label="Final receipt" value={selectedBatch.l1_finalize_tx_hash} />
               <HashLine label="Finalized at" value={selectedBatch.l1_finalized_at} />
             </div>
             <div className="overflow-hidden rounded-lg border border-white/10">
               <div className="grid grid-cols-[auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
-                <span>Block</span>
-                <span>Transaction</span>
+                <span>Group</span>
+                <span>Transfer</span>
                 <span>Open</span>
               </div>
               {selectedBatch.transactions.length === 0 ? (
-                <div className="px-3 py-6 text-sm text-white/48">This batch has no transactions.</div>
+                <div className="px-3 py-6 text-sm text-white/48">This package has no transfers.</div>
               ) : (
                 selectedBatch.transactions.map((transaction) => (
                   <div
@@ -953,7 +1281,7 @@ function RollupView({
             </div>
           </div>
         ) : (
-          <div className="mt-4 text-sm text-white/50">Select a built batch from the list.</div>
+          <div className="mt-4 text-sm text-white/50">Select a settlement package from the list.</div>
         )}
       </Panel>
     </div>
@@ -991,11 +1319,20 @@ function settlementStatusTone(status: string): "neutral" | "good" | "warn" | "ba
   return "neutral";
 }
 
+function settlementStatusLabel(status: string) {
+  if (status === "built") return "Ready";
+  if (status === "submitted") return "Sent";
+  if (status === "finalized") return "Final";
+  if (status === "challenged") return "Under review";
+  if (status === "rejected") return "Rejected";
+  return status;
+}
+
 function MetricLine({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
       <div className="mb-2 text-xs uppercase tracking-[0.16em] text-white/36">{label}</div>
-      <div className="text-2xl font-semibold text-white">{value}</div>
+      <div className="break-words text-xl font-semibold leading-tight text-white sm:text-2xl">{value}</div>
     </div>
   );
 }
@@ -1081,10 +1418,10 @@ function TransactionRow({
 function TransferDetail({ tx, onSelectAccount }: { tx: Transfer; onSelectAccount: (address: string) => void }) {
   return (
     <div className="grid gap-3 md:col-span-2 md:grid-cols-2">
-      <HashLine label="From" value={tx.from} />
-      <HashLine label="To" value={tx.to} />
+      <HashLine label="Sender wallet" value={tx.from} />
+      <HashLine label="Receiver wallet" value={tx.to} />
       <MetricLine label="Amount" value={tx.amount} />
-      <MetricLine label="Nonce" value={tx.nonce} />
+      <MetricLine label="Transfer #" value={tx.nonce} />
       <button onClick={() => onSelectAccount(tx.from)} className="rounded-lg border border-cyan/20 bg-cyan/10 p-3 text-left text-sm font-medium text-cyan">
         Open sender
       </button>

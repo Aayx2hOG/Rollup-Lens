@@ -4,13 +4,13 @@ React/Vite explorer dashboard for the local zk-rollup chain.
 
 ## Run
 
-Start the Postgres-backed API:
+Start the Postgres-backed API from the repository root:
 
 ```bash
-cargo run -p explorer-api -- --bind 127.0.0.1:3000
+bun run api:dev
 ```
 
-Start the UI:
+In a second terminal, start the UI from `apps/explorer-ui`:
 
 ```bash
 bun install

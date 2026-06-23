@@ -149,18 +149,33 @@ type ApiError = {
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, init);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, init);
+  } catch (error) {
+    throw new Error(apiConnectionMessage(error));
+  }
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
+    let parsed = false;
     try {
       const payload = (await response.json()) as ApiError;
+      parsed = true;
       if (payload.error) message = payload.error;
     } catch {
       // Keep the HTTP status when the body is not JSON.
     }
+    if (!parsed && API_BASE === "/api" && response.status >= 500) {
+      message = "Explorer API is not reachable. Start Postgres, run migrations, and run explorer-api on 127.0.0.1:3000.";
+    }
     throw new Error(message);
   }
   return response.json() as Promise<T>;
+}
+
+function apiConnectionMessage(error: unknown) {
+  const detail = error instanceof Error ? error.message : "request failed";
+  return `Explorer API is not reachable through ${API_BASE}. Start Postgres and explorer-api, then refresh. ${detail}`;
 }
 
 export const api = {
