@@ -104,8 +104,14 @@ model RollupBatch {
   l1ContractAddress String?                 @map("l1_contract_address")
   l1SubmitTxHash  String?                   @map("l1_submit_tx_hash")
   l1SubmittedAt   DateTime?                 @map("l1_submitted_at")
+  l1SubmitBlockNumber BigInt?               @map("l1_submit_block_number")
+  l1SubmitGasUsed BigInt?                   @map("l1_submit_gas_used")
+  l1SubmitReceipt Json?                     @map("l1_submit_receipt")
   l1FinalizeTxHash String?                  @map("l1_finalize_tx_hash")
   l1FinalizedAt   DateTime?                 @map("l1_finalized_at")
+  l1FinalizeBlockNumber BigInt?             @map("l1_finalize_block_number")
+  l1FinalizeGasUsed BigInt?                 @map("l1_finalize_gas_used")
+  l1FinalizeReceipt Json?                   @map("l1_finalize_receipt")
   rawCommitment   Json                      @map("raw_commitment")
   transactions    RollupBatchTransaction[]
 

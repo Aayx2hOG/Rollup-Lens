@@ -90,8 +90,14 @@ export type RollupBatchSummary = {
   l1_contract_address: string | null;
   l1_submit_tx_hash: string | null;
   l1_submitted_at: string | null;
+  l1_submit_block_number: number | null;
+  l1_submit_gas_used: number | null;
+  l1_submit_receipt: unknown | null;
   l1_finalize_tx_hash: string | null;
   l1_finalized_at: string | null;
+  l1_finalize_block_number: number | null;
+  l1_finalize_gas_used: number | null;
+  l1_finalize_receipt: unknown | null;
 };
 
 export type RollupBatch = RollupBatchSummary & {
@@ -127,7 +133,10 @@ export type SettlementStatusUpdate = {
   status: "submitted" | "finalized";
   tx_hash: string;
   contract_address: string;
-  chain_id?: number;
+  chain_id: number;
+  block_number: number;
+  gas_used: number;
+  receipt: unknown;
 };
 
 export type SearchResult =

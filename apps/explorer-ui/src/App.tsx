@@ -903,6 +903,12 @@ function RollupView({
               <MetricLine label="L1 chain" value={selectedBatch.l1_chain_id ?? "none"} />
               <MetricLine label="Submitted" value={selectedBatch.l1_submitted_at ? "yes" : "no"} />
             </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+              <MetricLine label="Submit block" value={selectedBatch.l1_submit_block_number ?? "none"} />
+              <MetricLine label="Submit gas" value={selectedBatch.l1_submit_gas_used ?? "none"} />
+              <MetricLine label="Finalize block" value={selectedBatch.l1_finalize_block_number ?? "none"} />
+              <MetricLine label="Finalize gas" value={selectedBatch.l1_finalize_gas_used ?? "none"} />
+            </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <HashLine label="Previous state root" value={selectedBatch.prev_state_root} />
               <HashLine label="New state root" value={selectedBatch.new_state_root} />

@@ -116,6 +116,13 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
 
     let submit_hash = format!("0x{}", "a".repeat(64));
     let contract_address = format!("0x{}", "b".repeat(40));
+    let submit_receipt = json!({
+        "transactionHash": submit_hash,
+        "to": contract_address,
+        "status": "0x1",
+        "blockNumber": "0x7",
+        "gasUsed": "0xc350"
+    });
     let settlement_update = post_json(
         app.clone(),
         "/rollup/batches/0/settlement",
@@ -123,7 +130,10 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
             "status": "submitted",
             "tx_hash": submit_hash,
             "contract_address": contract_address,
-            "chain_id": 31337
+            "chain_id": 31337,
+            "block_number": 7,
+            "gas_used": 50000,
+            "receipt": submit_receipt
         }),
     )
     .await;
@@ -135,15 +145,32 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
         json!(format!("0x{}", "a".repeat(64)))
     );
     assert_eq!(settlement_update["l1_chain_id"], json!(31337));
+    assert_eq!(settlement_update["l1_submit_block_number"], json!(7));
+    assert_eq!(settlement_update["l1_submit_gas_used"], json!(50000));
+    assert_eq!(
+        settlement_update["l1_submit_receipt"]["transactionHash"],
+        json!(format!("0x{}", "a".repeat(64)))
+    );
 
     let finalize_hash = format!("0x{}", "c".repeat(64));
+    let finalize_receipt = json!({
+        "transactionHash": finalize_hash,
+        "to": contract_address,
+        "status": "0x1",
+        "blockNumber": "0x8",
+        "gasUsed": "0x7530"
+    });
     let finalized_update = post_json(
         app.clone(),
         "/rollup/batches/0/settlement",
         &json!({
             "status": "finalized",
             "tx_hash": finalize_hash,
-            "contract_address": contract_address
+            "contract_address": contract_address,
+            "chain_id": 31337,
+            "block_number": 8,
+            "gas_used": 30000,
+            "receipt": finalize_receipt
         }),
     )
     .await;
@@ -154,6 +181,8 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
         finalized_update["l1_finalize_tx_hash"],
         json!(format!("0x{}", "c".repeat(64)))
     );
+    assert_eq!(finalized_update["l1_finalize_block_number"], json!(8));
+    assert_eq!(finalized_update["l1_finalize_gas_used"], json!(30000));
 
     let new_transfer = sign_transfer(
         &fixture.alice_secret_key,
@@ -273,6 +302,7 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0003_rollup_batches/migration.sql"),
     include_str!("../../../prisma/migrations/0004_transaction_pool/migration.sql"),
     include_str!("../../../prisma/migrations/0005_l1_settlement_status/migration.sql"),
+    include_str!("../../../prisma/migrations/0006_l1_receipt_metadata/migration.sql"),
 ];
 
 fn optional_test_database_url() -> Option<String> {

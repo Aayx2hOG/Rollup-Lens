@@ -1,12 +1,13 @@
 use std::{
     ffi::OsString,
     process::{Command, Stdio},
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const DEFAULT_API_URL: &str = "http://127.0.0.1:3000";
 const SUBMIT_BATCH_SIGNATURE: &str = "submitBatch(uint256,bytes32,bytes32,bytes32,bytes32,bytes32)";
@@ -36,9 +37,6 @@ struct Cli {
 
     #[arg(long, env = "CAST_BIN", default_value = "cast")]
     cast_bin: String,
-
-    #[arg(long, env = "EVM_CHAIN_ID")]
-    chain_id: Option<u64>,
 
     #[arg(long, global = true)]
     dry_run: bool,
@@ -85,7 +83,40 @@ struct SettlementStatusUpdate<'a> {
     status: &'a str,
     tx_hash: &'a str,
     contract_address: &'a str,
-    chain_id: Option<u64>,
+    chain_id: u64,
+    block_number: u64,
+    gas_used: u64,
+    receipt: &'a Value,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcRequest<'a> {
+    jsonrpc: &'static str,
+    id: u64,
+    method: &'a str,
+    params: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcResponse {
+    result: Option<Value>,
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcError {
+    code: i64,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransactionReceipt {
+    transaction_hash: String,
+    block_number: String,
+    gas_used: String,
+    status: String,
+    to: Option<String>,
 }
 
 #[tokio::main]
@@ -172,13 +203,22 @@ async fn main() -> Result<()> {
 
     let output = run_cast(&cli, &rpc_url, &private_key, command)?;
     if let Some(persisted) = output.persisted_status {
+        let chain_id = fetch_chain_id(&rpc_url).await?;
+        let (receipt, receipt_value) =
+            fetch_verified_receipt(&rpc_url, &output.tx_hash, &contract).await?;
+        let block_number = parse_hex_u64(&receipt.block_number, "receipt block number")?;
+        let gas_used = parse_hex_u64(&receipt.gas_used, "receipt gas used")?;
+
         persist_settlement_status(
             &cli.api_url,
             persisted.batch_number,
             persisted.status,
             &output.tx_hash,
             &contract,
-            cli.chain_id,
+            chain_id,
+            block_number,
+            gas_used,
+            &receipt_value,
         )
         .await?;
     }
@@ -201,6 +241,108 @@ async fn fetch_settlement_calldata(api_url: &str, batch_number: u64) -> Result<S
         .json::<SettlementCalldata>()
         .await
         .with_context(|| format!("failed to parse settlement calldata from {url}"))
+}
+
+async fn fetch_chain_id(rpc_url: &str) -> Result<u64> {
+    let chain_id: String = json_rpc_required(rpc_url, "eth_chainId", json!([]))
+        .await
+        .context("failed to fetch EVM chain id")?;
+    parse_hex_u64(&chain_id, "EVM chain id")
+}
+
+async fn fetch_verified_receipt(
+    rpc_url: &str,
+    tx_hash: &str,
+    contract_address: &str,
+) -> Result<(TransactionReceipt, Value)> {
+    let expected_hash = tx_hash.to_ascii_lowercase();
+    let expected_contract = contract_address.to_ascii_lowercase();
+
+    for attempt in 1..=30 {
+        let receipt_value = json_rpc_value(rpc_url, "eth_getTransactionReceipt", json!([tx_hash]))
+            .await
+            .with_context(|| format!("failed to fetch receipt for {tx_hash}"))?;
+
+        if let Some(receipt_value) = receipt_value {
+            let receipt: TransactionReceipt = serde_json::from_value(receipt_value.clone())
+                .with_context(|| format!("failed to parse receipt for {tx_hash}"))?;
+            if receipt.transaction_hash.to_ascii_lowercase() != expected_hash {
+                bail!(
+                    "receipt transaction hash {} did not match expected {}",
+                    receipt.transaction_hash,
+                    expected_hash
+                );
+            }
+            if receipt.status != "0x1" {
+                bail!(
+                    "settlement transaction {tx_hash} failed with status {}",
+                    receipt.status
+                );
+            }
+            let Some(to) = &receipt.to else {
+                bail!("receipt for {tx_hash} does not include a target contract address");
+            };
+            if to.to_ascii_lowercase() != expected_contract {
+                bail!(
+                    "receipt target {} did not match settlement contract {}",
+                    to,
+                    expected_contract
+                );
+            }
+
+            return Ok((receipt, receipt_value));
+        }
+
+        if attempt < 30 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    bail!("timed out waiting for receipt for {tx_hash}")
+}
+
+async fn json_rpc_required<T: serde::de::DeserializeOwned>(
+    rpc_url: &str,
+    method: &str,
+    params: Value,
+) -> Result<T> {
+    let value = json_rpc_value(rpc_url, method, params)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("JSON-RPC method {method} returned no result"))?;
+    serde_json::from_value(value)
+        .with_context(|| format!("failed to decode JSON-RPC result for {method}"))
+}
+
+async fn json_rpc_value(rpc_url: &str, method: &str, params: Value) -> Result<Option<Value>> {
+    let response = reqwest::Client::new()
+        .post(rpc_url)
+        .json(&JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method,
+            params,
+        })
+        .send()
+        .await
+        .with_context(|| format!("failed to call JSON-RPC method {method} at {rpc_url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("JSON-RPC method {method} failed with HTTP {status}: {body}");
+    }
+
+    let body = response
+        .json::<JsonRpcResponse>()
+        .await
+        .with_context(|| format!("failed to parse JSON-RPC response for {method}"))?;
+    if let Some(error) = body.error {
+        bail!(
+            "JSON-RPC method {method} returned error {}: {}",
+            error.code,
+            error.message
+        );
+    }
+    Ok(body.result)
 }
 
 #[derive(Debug)]
@@ -280,7 +422,10 @@ async fn persist_settlement_status(
     status: &str,
     tx_hash: &str,
     contract_address: &str,
-    chain_id: Option<u64>,
+    chain_id: u64,
+    block_number: u64,
+    gas_used: u64,
+    receipt: &Value,
 ) -> Result<()> {
     let api_url = api_url.trim_end_matches('/');
     let url = format!("{api_url}/rollup/batches/{batch_number}/settlement");
@@ -291,6 +436,9 @@ async fn persist_settlement_status(
             tx_hash,
             contract_address,
             chain_id,
+            block_number,
+            gas_used,
+            receipt,
         })
         .send()
         .await
@@ -357,6 +505,13 @@ fn validate_private_key(private_key: &str) -> Result<()> {
         bail!("private key must be a 32-byte hex string");
     }
     Ok(())
+}
+
+fn parse_hex_u64(value: &str, label: &str) -> Result<u64> {
+    let Some(hex) = value.strip_prefix("0x") else {
+        bail!("{label} must start with 0x");
+    };
+    u64::from_str_radix(hex, 16).with_context(|| format!("failed to parse {label}: {value}"))
 }
 
 fn required_or_dry_run_default(

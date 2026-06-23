@@ -87,7 +87,10 @@ struct SettlementStatusUpdate {
     status: String,
     tx_hash: String,
     contract_address: String,
-    chain_id: Option<u64>,
+    chain_id: u64,
+    block_number: u64,
+    gas_used: u64,
+    receipt: Value,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -216,8 +219,14 @@ struct RollupBatchSummary {
     l1_contract_address: Option<String>,
     l1_submit_tx_hash: Option<String>,
     l1_submitted_at: Option<String>,
+    l1_submit_block_number: Option<u64>,
+    l1_submit_gas_used: Option<u64>,
+    l1_submit_receipt: Option<Value>,
     l1_finalize_tx_hash: Option<String>,
     l1_finalized_at: Option<String>,
+    l1_finalize_block_number: Option<u64>,
+    l1_finalize_gas_used: Option<u64>,
+    l1_finalize_receipt: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1070,8 +1079,14 @@ impl DbSource {
                 l1_contract_address,
                 l1_submit_tx_hash,
                 l1_submitted_at::text AS l1_submitted_at,
+                l1_submit_block_number,
+                l1_submit_gas_used,
+                l1_submit_receipt,
                 l1_finalize_tx_hash,
-                l1_finalized_at::text AS l1_finalized_at
+                l1_finalized_at::text AS l1_finalized_at,
+                l1_finalize_block_number,
+                l1_finalize_gas_used,
+                l1_finalize_receipt
             FROM rollup_batches
             ORDER BY batch_number DESC
             LIMIT $1 OFFSET $2
@@ -1115,8 +1130,14 @@ impl DbSource {
                 l1_contract_address,
                 l1_submit_tx_hash,
                 l1_submitted_at::text AS l1_submitted_at,
+                l1_submit_block_number,
+                l1_submit_gas_used,
+                l1_submit_receipt,
                 l1_finalize_tx_hash,
-                l1_finalized_at::text AS l1_finalized_at
+                l1_finalized_at::text AS l1_finalized_at,
+                l1_finalize_block_number,
+                l1_finalize_gas_used,
+                l1_finalize_receipt
             FROM rollup_batches
             WHERE batch_number = $1
             "#,
@@ -1162,6 +1183,7 @@ impl DbSource {
         validate_settlement_status(&update.status)?;
         validate_prefixed_hex(&update.tx_hash, 64, "settlement transaction hash")?;
         validate_prefixed_hex(&update.contract_address, 40, "settlement contract address")?;
+        validate_receipt(&update.receipt)?;
 
         let row = match update.status.as_str() {
             "submitted" => sqlx::query(
@@ -1172,7 +1194,10 @@ impl DbSource {
                         l1_chain_id = $2,
                         l1_contract_address = $3,
                         l1_submit_tx_hash = $4,
-                        l1_submitted_at = COALESCE(l1_submitted_at, now())
+                        l1_submitted_at = COALESCE(l1_submitted_at, now()),
+                        l1_submit_block_number = $5,
+                        l1_submit_gas_used = $6,
+                        l1_submit_receipt = $7
                     WHERE batch_number = $1
                     RETURNING
                         batch_number,
@@ -1189,19 +1214,23 @@ impl DbSource {
                         l1_contract_address,
                         l1_submit_tx_hash,
                         l1_submitted_at::text AS l1_submitted_at,
+                        l1_submit_block_number,
+                        l1_submit_gas_used,
+                        l1_submit_receipt,
                         l1_finalize_tx_hash,
-                        l1_finalized_at::text AS l1_finalized_at
+                        l1_finalized_at::text AS l1_finalized_at,
+                        l1_finalize_block_number,
+                        l1_finalize_gas_used,
+                        l1_finalize_receipt
                     "#,
             )
             .bind(to_i64(batch_number, "rollup batch number")?)
-            .bind(
-                update
-                    .chain_id
-                    .map(|chain_id| to_i64(chain_id, "L1 chain id"))
-                    .transpose()?,
-            )
+            .bind(to_i64(update.chain_id, "L1 chain id")?)
             .bind(update.contract_address.to_ascii_lowercase())
             .bind(update.tx_hash.to_ascii_lowercase())
+            .bind(to_i64(update.block_number, "L1 submit block number")?)
+            .bind(to_i64(update.gas_used, "L1 submit gas used")?)
+            .bind(update.receipt.clone())
             .fetch_optional(&self.pool)
             .await
             .map_err(database_error)?,
@@ -1213,8 +1242,18 @@ impl DbSource {
                         l1_chain_id = COALESCE($2, l1_chain_id),
                         l1_contract_address = COALESCE(l1_contract_address, $3),
                         l1_finalize_tx_hash = $4,
-                        l1_finalized_at = COALESCE(l1_finalized_at, now())
-                    WHERE batch_number = $1
+                        l1_finalized_at = COALESCE(l1_finalized_at, now()),
+                        l1_finalize_block_number = $5,
+                        l1_finalize_gas_used = $6,
+                        l1_finalize_receipt = $7
+                    WHERE
+                        batch_number = $1
+                        AND l1_submit_tx_hash IS NOT NULL
+                        AND (l1_chain_id IS NULL OR l1_chain_id = $2)
+                        AND (
+                            l1_contract_address IS NULL
+                            OR l1_contract_address = lower($3)
+                        )
                     RETURNING
                         batch_number,
                         start_block_height,
@@ -1230,19 +1269,23 @@ impl DbSource {
                         l1_contract_address,
                         l1_submit_tx_hash,
                         l1_submitted_at::text AS l1_submitted_at,
+                        l1_submit_block_number,
+                        l1_submit_gas_used,
+                        l1_submit_receipt,
                         l1_finalize_tx_hash,
-                        l1_finalized_at::text AS l1_finalized_at
+                        l1_finalized_at::text AS l1_finalized_at,
+                        l1_finalize_block_number,
+                        l1_finalize_gas_used,
+                        l1_finalize_receipt
                     "#,
             )
             .bind(to_i64(batch_number, "rollup batch number")?)
-            .bind(
-                update
-                    .chain_id
-                    .map(|chain_id| to_i64(chain_id, "L1 chain id"))
-                    .transpose()?,
-            )
+            .bind(to_i64(update.chain_id, "L1 chain id")?)
             .bind(update.contract_address.to_ascii_lowercase())
             .bind(update.tx_hash.to_ascii_lowercase())
+            .bind(to_i64(update.block_number, "L1 finalize block number")?)
+            .bind(to_i64(update.gas_used, "L1 finalize gas used")?)
+            .bind(update.receipt)
             .fetch_optional(&self.pool)
             .await
             .map_err(database_error)?,
@@ -1597,8 +1640,14 @@ async fn rebuild_rollup_batch_tx(
         l1_contract_address: None,
         l1_submit_tx_hash: None,
         l1_submitted_at: None,
+        l1_submit_block_number: None,
+        l1_submit_gas_used: None,
+        l1_submit_receipt: None,
         l1_finalize_tx_hash: None,
         l1_finalized_at: None,
+        l1_finalize_block_number: None,
+        l1_finalize_gas_used: None,
+        l1_finalize_receipt: None,
     }))
 }
 
@@ -1794,8 +1843,26 @@ fn rollup_batch_summary_from_row(
         l1_contract_address: row.get("l1_contract_address"),
         l1_submit_tx_hash: row.get("l1_submit_tx_hash"),
         l1_submitted_at: row.get("l1_submitted_at"),
+        l1_submit_block_number: row
+            .get::<Option<i64>, _>("l1_submit_block_number")
+            .map(|block_number| from_i64(block_number, "L1 submit block number"))
+            .transpose()?,
+        l1_submit_gas_used: row
+            .get::<Option<i64>, _>("l1_submit_gas_used")
+            .map(|gas_used| from_i64(gas_used, "L1 submit gas used"))
+            .transpose()?,
+        l1_submit_receipt: row.get("l1_submit_receipt"),
         l1_finalize_tx_hash: row.get("l1_finalize_tx_hash"),
         l1_finalized_at: row.get("l1_finalized_at"),
+        l1_finalize_block_number: row
+            .get::<Option<i64>, _>("l1_finalize_block_number")
+            .map(|block_number| from_i64(block_number, "L1 finalize block number"))
+            .transpose()?,
+        l1_finalize_gas_used: row
+            .get::<Option<i64>, _>("l1_finalize_gas_used")
+            .map(|gas_used| from_i64(gas_used, "L1 finalize gas used"))
+            .transpose()?,
+        l1_finalize_receipt: row.get("l1_finalize_receipt"),
     })
 }
 
@@ -1860,6 +1927,16 @@ fn validate_settlement_status(status: &str) -> Result<(), ApiError> {
     ))
 }
 
+fn validate_receipt(receipt: &Value) -> Result<(), ApiError> {
+    if receipt.as_object().is_some() {
+        return Ok(());
+    }
+
+    Err(ApiError::BadRequest(
+        "settlement receipt must be a JSON object".to_string(),
+    ))
+}
+
 fn parse_json_value<T: serde::de::DeserializeOwned>(
     value: serde_json::Value,
     label: &str,
@@ -1921,8 +1998,14 @@ mod tests {
             l1_contract_address: None,
             l1_submit_tx_hash: None,
             l1_submitted_at: None,
+            l1_submit_block_number: None,
+            l1_submit_gas_used: None,
+            l1_submit_receipt: None,
             l1_finalize_tx_hash: None,
             l1_finalized_at: None,
+            l1_finalize_block_number: None,
+            l1_finalize_gas_used: None,
+            l1_finalize_receipt: None,
         };
 
         let calldata = settlement_calldata_from_batch(&batch).expect("valid calldata");
