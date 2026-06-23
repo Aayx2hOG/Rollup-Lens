@@ -7,6 +7,7 @@ import {
   BarChart3,
   Blocks,
   CheckCircle2,
+  Clock3,
   Copy,
   Cpu,
   Database,
@@ -18,6 +19,7 @@ import {
   PackageCheck,
   Play,
   RefreshCcw,
+  ReceiptText,
   Search,
   Send,
   ShieldAlert,
@@ -1195,14 +1197,22 @@ function RollupView({
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm font-semibold text-white">Package {batch.batch_number}</div>
-                  <Badge tone={settlementStatusTone(batch.status)}>{batch.status}</Badge>
+                  <Badge tone={settlementStatusTone(batch.status)}>{settlementStatusLabel(batch.status)}</Badge>
                 </div>
                 <div className="mt-2 text-xs text-white/46">
                   groups {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "transfer")}
                 </div>
-                {batch.l1_submit_tx_hash && (
-                  <div className="mt-2 text-xs text-mint/72">L1 {shortHash(batch.l1_submit_tx_hash, 10, 8)}</div>
-                )}
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-white/48">
+                  <span>chain {batch.l1_chain_id ?? "none"}</span>
+                  <span>{settlementMilestoneText(batch)}</span>
+                </div>
+                <div className="mt-2 text-xs text-mint/72">
+                  {batch.l1_finalize_tx_hash
+                    ? `final ${shortHash(batch.l1_finalize_tx_hash, 10, 8)}`
+                    : batch.l1_submit_tx_hash
+                      ? `sent ${shortHash(batch.l1_submit_tx_hash, 10, 8)}`
+                      : "not sent to L1"}
+                </div>
                 <div className="hash mt-2 text-xs text-white/48">{shortHash(batch.data_hash, 10, 8)}</div>
               </button>
             ))
@@ -1229,7 +1239,7 @@ function RollupView({
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               <StatusLine label="Settlement state" ok={selectedBatch.status === "finalized"} value={<Badge tone={settlementStatusTone(selectedBatch.status)}>{settlementStatusLabel(selectedBatch.status)}</Badge>} />
               <MetricLine label="Settlement chain" value={selectedBatch.l1_chain_id ?? "none"} />
-              <MetricLine label="Sent to settlement" value={selectedBatch.l1_submitted_at ? "yes" : "no"} />
+              <MetricLine label="L1 progress" value={settlementMilestoneText(selectedBatch)} />
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
               <MetricLine label="Send block" value={selectedBatch.l1_submit_block_number ?? "none"} />
@@ -1246,9 +1256,27 @@ function RollupView({
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <HashLine label="Settlement contract" value={selectedBatch.l1_contract_address} />
-              <HashLine label="Send receipt" value={selectedBatch.l1_submit_tx_hash} />
-              <HashLine label="Final receipt" value={selectedBatch.l1_finalize_tx_hash} />
+              <HashLine label="Submit transaction" value={selectedBatch.l1_submit_tx_hash} />
+              <HashLine label="Finalize transaction" value={selectedBatch.l1_finalize_tx_hash} />
               <HashLine label="Finalized at" value={selectedBatch.l1_finalized_at} />
+            </div>
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+              <SettlementReceiptPanel
+                title="Submit receipt"
+                timestamp={selectedBatch.l1_submitted_at}
+                txHash={selectedBatch.l1_submit_tx_hash}
+                blockNumber={selectedBatch.l1_submit_block_number}
+                gasUsed={selectedBatch.l1_submit_gas_used}
+                receipt={selectedBatch.l1_submit_receipt}
+              />
+              <SettlementReceiptPanel
+                title="Finalize receipt"
+                timestamp={selectedBatch.l1_finalized_at}
+                txHash={selectedBatch.l1_finalize_tx_hash}
+                blockNumber={selectedBatch.l1_finalize_block_number}
+                gasUsed={selectedBatch.l1_finalize_gas_used}
+                receipt={selectedBatch.l1_finalize_receipt}
+              />
             </div>
             <div className="overflow-hidden rounded-lg border border-white/10">
               <div className="grid grid-cols-[auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
@@ -1284,6 +1312,58 @@ function RollupView({
           <div className="mt-4 text-sm text-white/50">Select a settlement package from the list.</div>
         )}
       </Panel>
+    </div>
+  );
+}
+
+function SettlementReceiptPanel({
+  title,
+  timestamp,
+  txHash,
+  blockNumber,
+  gasUsed,
+  receipt,
+}: {
+  title: string;
+  timestamp?: string | null;
+  txHash?: string | null;
+  blockNumber?: number | null;
+  gasUsed?: number | null;
+  receipt?: unknown | null;
+}) {
+  const hasReceipt = Boolean(receipt);
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-white">
+          <ReceiptText className="h-4 w-4 text-mint" />
+          {title}
+        </div>
+        <Badge tone={hasReceipt ? "good" : "neutral"}>{hasReceipt ? "Indexed" : "Missing"}</Badge>
+      </div>
+      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <ReceiptMetric icon={<Clock3 className="h-3.5 w-3.5" />} label="Time" value={timestamp ?? "none"} />
+        <ReceiptMetric icon={<Blocks className="h-3.5 w-3.5" />} label="Block" value={blockNumber ?? "none"} />
+        <ReceiptMetric icon={<Gauge className="h-3.5 w-3.5" />} label="Gas" value={gasUsed ?? "none"} />
+      </div>
+      <div className="mt-3 flex min-w-0 items-center gap-2 rounded-md border border-white/8 bg-black/15 px-2.5 py-2">
+        <span className="text-xs uppercase tracking-[0.14em] text-white/36">Tx</span>
+        <span className="hash min-w-0 flex-1 text-sm text-white/72">{txHash ?? "none"}</span>
+        {txHash && <CopyButton value={txHash} />}
+      </div>
+    </div>
+  );
+}
+
+function ReceiptMetric({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
+  return (
+    <div className="min-w-0 rounded-md border border-white/8 bg-black/15 px-2.5 py-2">
+      <div className="flex items-center gap-1.5 text-xs uppercase tracking-[0.14em] text-white/36">
+        <span className="text-white/42">{icon}</span>
+        {label}
+      </div>
+      <div className="mt-1 truncate text-sm font-medium text-white/78">{value}</div>
     </div>
   );
 }
@@ -1326,6 +1406,12 @@ function settlementStatusLabel(status: string) {
   if (status === "challenged") return "Under review";
   if (status === "rejected") return "Rejected";
   return status;
+}
+
+function settlementMilestoneText(batch: RollupBatchSummary) {
+  if (batch.l1_finalized_at) return "finalized";
+  if (batch.l1_submitted_at) return "submitted";
+  return "ready";
 }
 
 function MetricLine({ label, value }: { label: string; value: React.ReactNode }) {

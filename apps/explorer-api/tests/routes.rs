@@ -116,6 +116,46 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
 
     let submit_hash = format!("0x{}", "a".repeat(64));
     let contract_address = format!("0x{}", "b".repeat(40));
+    let finalize_before_submit = post_json(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &json!({
+            "status": "finalized",
+            "tx_hash": format!("0x{}", "c".repeat(64)),
+            "contract_address": contract_address,
+            "chain_id": 31337,
+            "block_number": 8,
+            "gas_used": 30000,
+            "receipt": {
+                "transactionHash": format!("0x{}", "c".repeat(64)),
+                "to": contract_address,
+                "status": "0x1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(finalize_before_submit.status(), StatusCode::CONFLICT);
+
+    let receipt_mismatch = post_json(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &json!({
+            "status": "submitted",
+            "tx_hash": submit_hash,
+            "contract_address": contract_address,
+            "chain_id": 31337,
+            "block_number": 7,
+            "gas_used": 50000,
+            "receipt": {
+                "transactionHash": format!("0x{}", "d".repeat(64)),
+                "to": contract_address,
+                "status": "0x1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(receipt_mismatch.status(), StatusCode::BAD_REQUEST);
+
     let submit_receipt = json!({
         "transactionHash": submit_hash,
         "to": contract_address,
@@ -153,6 +193,47 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
     );
 
     let finalize_hash = format!("0x{}", "c".repeat(64));
+    let wrong_chain_finalize = post_json(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &json!({
+            "status": "finalized",
+            "tx_hash": finalize_hash,
+            "contract_address": contract_address,
+            "chain_id": 1,
+            "block_number": 8,
+            "gas_used": 30000,
+            "receipt": {
+                "transactionHash": finalize_hash,
+                "to": contract_address,
+                "status": "0x1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(wrong_chain_finalize.status(), StatusCode::CONFLICT);
+
+    let wrong_contract = format!("0x{}", "e".repeat(40));
+    let wrong_contract_finalize = post_json(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &json!({
+            "status": "finalized",
+            "tx_hash": finalize_hash,
+            "contract_address": wrong_contract,
+            "chain_id": 31337,
+            "block_number": 8,
+            "gas_used": 30000,
+            "receipt": {
+                "transactionHash": finalize_hash,
+                "to": wrong_contract,
+                "status": "0x1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(wrong_contract_finalize.status(), StatusCode::CONFLICT);
+
     let finalize_receipt = json!({
         "transactionHash": finalize_hash,
         "to": contract_address,

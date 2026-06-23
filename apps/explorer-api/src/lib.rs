@@ -1183,7 +1183,7 @@ impl DbSource {
         validate_settlement_status(&update.status)?;
         validate_prefixed_hex(&update.tx_hash, 64, "settlement transaction hash")?;
         validate_prefixed_hex(&update.contract_address, 40, "settlement contract address")?;
-        validate_receipt(&update.receipt)?;
+        validate_receipt(&update.receipt, &update.tx_hash, &update.contract_address)?;
 
         let row = match update.status.as_str() {
             "submitted" => sqlx::query(
@@ -1234,61 +1234,95 @@ impl DbSource {
             .fetch_optional(&self.pool)
             .await
             .map_err(database_error)?,
-            "finalized" => sqlx::query(
-                r#"
-                    UPDATE rollup_batches
-                    SET
-                        status = 'finalized',
-                        l1_chain_id = COALESCE($2, l1_chain_id),
-                        l1_contract_address = COALESCE(l1_contract_address, $3),
-                        l1_finalize_tx_hash = $4,
-                        l1_finalized_at = COALESCE(l1_finalized_at, now()),
-                        l1_finalize_block_number = $5,
-                        l1_finalize_gas_used = $6,
-                        l1_finalize_receipt = $7
-                    WHERE
-                        batch_number = $1
-                        AND l1_submit_tx_hash IS NOT NULL
-                        AND (l1_chain_id IS NULL OR l1_chain_id = $2)
-                        AND (
-                            l1_contract_address IS NULL
-                            OR l1_contract_address = lower($3)
-                        )
-                    RETURNING
-                        batch_number,
-                        start_block_height,
-                        end_block_height,
-                        prev_state_root,
-                        new_state_root,
-                        transaction_root,
-                        block_hash_root,
-                        data_hash,
-                        transaction_count,
-                        status,
-                        l1_chain_id,
-                        l1_contract_address,
-                        l1_submit_tx_hash,
-                        l1_submitted_at::text AS l1_submitted_at,
-                        l1_submit_block_number,
-                        l1_submit_gas_used,
-                        l1_submit_receipt,
-                        l1_finalize_tx_hash,
-                        l1_finalized_at::text AS l1_finalized_at,
-                        l1_finalize_block_number,
-                        l1_finalize_gas_used,
-                        l1_finalize_receipt
+            "finalized" => {
+                let existing = sqlx::query(
+                    r#"
+                    SELECT l1_chain_id, l1_contract_address, l1_submit_tx_hash
+                    FROM rollup_batches
+                    WHERE batch_number = $1
                     "#,
-            )
-            .bind(to_i64(batch_number, "rollup batch number")?)
-            .bind(to_i64(update.chain_id, "L1 chain id")?)
-            .bind(update.contract_address.to_ascii_lowercase())
-            .bind(update.tx_hash.to_ascii_lowercase())
-            .bind(to_i64(update.block_number, "L1 finalize block number")?)
-            .bind(to_i64(update.gas_used, "L1 finalize gas used")?)
-            .bind(update.receipt)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(database_error)?,
+                )
+                .bind(to_i64(batch_number, "rollup batch number")?)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(database_error)?
+                .ok_or_else(|| ApiError::NotFound(format!("rollup batch {batch_number} not found")))?;
+
+                let submitted_tx_hash: Option<String> = existing.get("l1_submit_tx_hash");
+                if submitted_tx_hash.is_none() {
+                    return Err(ApiError::Conflict(format!(
+                        "rollup batch {batch_number} must be submitted before it can be finalized"
+                    )));
+                }
+
+                let update_chain_id = to_i64(update.chain_id, "L1 chain id")?;
+                let existing_chain_id: Option<i64> = existing.get("l1_chain_id");
+                if existing_chain_id.is_some_and(|chain_id| chain_id != update_chain_id) {
+                    return Err(ApiError::Conflict(format!(
+                        "rollup batch {batch_number} was submitted on a different L1 chain"
+                    )));
+                }
+
+                let update_contract_address = update.contract_address.to_ascii_lowercase();
+                let existing_contract_address: Option<String> = existing.get("l1_contract_address");
+                if existing_contract_address
+                    .as_deref()
+                    .is_some_and(|address| address != update_contract_address)
+                {
+                    return Err(ApiError::Conflict(format!(
+                        "rollup batch {batch_number} was submitted to a different settlement contract"
+                    )));
+                }
+
+                sqlx::query(
+                    r#"
+                        UPDATE rollup_batches
+                        SET
+                            status = 'finalized',
+                            l1_chain_id = COALESCE($2, l1_chain_id),
+                            l1_contract_address = COALESCE(l1_contract_address, $3),
+                            l1_finalize_tx_hash = $4,
+                            l1_finalized_at = COALESCE(l1_finalized_at, now()),
+                            l1_finalize_block_number = $5,
+                            l1_finalize_gas_used = $6,
+                            l1_finalize_receipt = $7
+                        WHERE batch_number = $1
+                        RETURNING
+                            batch_number,
+                            start_block_height,
+                            end_block_height,
+                            prev_state_root,
+                            new_state_root,
+                            transaction_root,
+                            block_hash_root,
+                            data_hash,
+                            transaction_count,
+                            status,
+                            l1_chain_id,
+                            l1_contract_address,
+                            l1_submit_tx_hash,
+                            l1_submitted_at::text AS l1_submitted_at,
+                            l1_submit_block_number,
+                            l1_submit_gas_used,
+                            l1_submit_receipt,
+                            l1_finalize_tx_hash,
+                            l1_finalized_at::text AS l1_finalized_at,
+                            l1_finalize_block_number,
+                            l1_finalize_gas_used,
+                            l1_finalize_receipt
+                        "#,
+                )
+                .bind(to_i64(batch_number, "rollup batch number")?)
+                .bind(update_chain_id)
+                .bind(update_contract_address)
+                .bind(update.tx_hash.to_ascii_lowercase())
+                .bind(to_i64(update.block_number, "L1 finalize block number")?)
+                .bind(to_i64(update.gas_used, "L1 finalize gas used")?)
+                .bind(update.receipt)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(database_error)?
+            },
             _ => unreachable!("settlement status validated"),
         }
         .ok_or_else(|| ApiError::NotFound(format!("rollup batch {batch_number} not found")))?;
@@ -1927,14 +1961,34 @@ fn validate_settlement_status(status: &str) -> Result<(), ApiError> {
     ))
 }
 
-fn validate_receipt(receipt: &Value) -> Result<(), ApiError> {
-    if receipt.as_object().is_some() {
-        return Ok(());
+fn validate_receipt(
+    receipt: &Value,
+    tx_hash: &str,
+    contract_address: &str,
+) -> Result<(), ApiError> {
+    let Some(receipt) = receipt.as_object() else {
+        return Err(ApiError::BadRequest(
+            "settlement receipt must be a JSON object".to_string(),
+        ));
+    };
+
+    if let Some(receipt_tx_hash) = receipt.get("transactionHash").and_then(Value::as_str) {
+        if !receipt_tx_hash.eq_ignore_ascii_case(tx_hash) {
+            return Err(ApiError::BadRequest(
+                "settlement receipt transactionHash must match tx_hash".to_string(),
+            ));
+        }
     }
 
-    Err(ApiError::BadRequest(
-        "settlement receipt must be a JSON object".to_string(),
-    ))
+    if let Some(receipt_contract_address) = receipt.get("to").and_then(Value::as_str) {
+        if !receipt_contract_address.eq_ignore_ascii_case(contract_address) {
+            return Err(ApiError::BadRequest(
+                "settlement receipt to address must match contract_address".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_json_value<T: serde::de::DeserializeOwned>(
