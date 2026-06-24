@@ -273,6 +273,18 @@ enum ApiError {
     Conflict(String),
 }
 
+impl fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApiError::BadRequest(message)
+            | ApiError::NotFound(message)
+            | ApiError::Database(message)
+            | ApiError::InvalidIndexedData(message)
+            | ApiError::Conflict(message) => formatter.write_str(message),
+        }
+    }
+}
+
 pub fn app_with_pool(pool: PgPool) -> Router {
     let state = Arc::new(AppState {
         pool,
@@ -310,6 +322,21 @@ pub fn app_with_pool(pool: PgPool) -> Router {
         .route("/search/:query", get(search))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+pub async fn sequence_pending_transactions(pool: PgPool, limit: usize) -> Result<bool, String> {
+    let summary = postgres_chain_summary(&pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    if summary.pending_transaction_count == 0 {
+        return Ok(false);
+    }
+
+    DbSource { pool }
+        .sequence_rollup_batch(limit)
+        .await
+        .map(|_| true)
+        .map_err(|error| error.to_string())
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
