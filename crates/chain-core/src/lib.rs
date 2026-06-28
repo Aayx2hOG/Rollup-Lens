@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use merkle_core::{encode_hex, root_hex};
+use merkle_core::{encode_hex, root_hex, SparseMerkleProof, SparseMerkleTree};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ const TRANSACTION_HASH_DOMAIN: &str = "zk-rollup-transaction-v1";
 const BLOCK_HASH_DOMAIN: &str = "zk-rollup-block-v1";
 const BATCH_DATA_HASH_DOMAIN: &str = "zk-rollup-batch-data-v1";
 const LOCAL_CHAIN_ID: &str = "zk-rollup-local-v1";
+const ACCOUNT_STATE_VALUE_DOMAIN: &[u8] = b"zk-rollup-account-state-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -368,18 +369,31 @@ pub fn validate_chain(chain: &Chain) -> Result<(), ChainError> {
 }
 
 pub fn state_root(accounts: &BTreeMap<String, Account>) -> String {
-    let leaves = accounts
-        .values()
-        .map(|account| {
-            json!({
-                "address": account.address,
-                "balance": account.balance,
-                "nonce": account.nonce,
-            })
-        })
-        .collect::<Vec<_>>();
+    account_state_tree(accounts).root_hex()
+}
 
-    root_hex(&leaves)
+pub fn account_state_proof(
+    accounts: &BTreeMap<String, Account>,
+    address: &str,
+) -> SparseMerkleProof {
+    account_state_tree(accounts).prove(address.as_bytes())
+}
+
+pub fn account_state_value(account: &Account) -> Vec<u8> {
+    let mut value = Vec::with_capacity(ACCOUNT_STATE_VALUE_DOMAIN.len() + 16);
+    value.extend_from_slice(ACCOUNT_STATE_VALUE_DOMAIN);
+    value.extend_from_slice(&account.balance.to_be_bytes());
+    value.extend_from_slice(&account.nonce.to_be_bytes());
+    value
+}
+
+fn account_state_tree(accounts: &BTreeMap<String, Account>) -> SparseMerkleTree {
+    let entries = accounts
+        .iter()
+        .map(|(address, account)| (address.as_bytes(), account_state_value(account)))
+        .collect::<Vec<_>>();
+    SparseMerkleTree::new(entries)
+        .expect("account map keys must produce unique sparse Merkle paths")
 }
 
 pub fn transaction_hash(transaction: &Transfer) -> String {
@@ -985,6 +999,32 @@ mod tests {
             rollup_batch_commitment(&chain, 0, 0, 0),
             Err(ChainError::InvalidBatchStart)
         );
+    }
+
+    #[test]
+    fn account_state_supports_inclusion_and_non_membership_proofs() {
+        let account = Account {
+            address: "alice".to_owned(),
+            balance: 100,
+            nonce: 3,
+        };
+        let accounts = BTreeMap::from([("alice".to_owned(), account.clone())]);
+        let root = state_root(&accounts);
+
+        assert!(merkle_core::verify_sparse_proof(
+            b"alice",
+            Some(&account_state_value(&account)),
+            &account_state_proof(&accounts, "alice"),
+            &root,
+        )
+        .unwrap());
+        assert!(merkle_core::verify_sparse_proof(
+            b"bob",
+            None,
+            &account_state_proof(&accounts, "bob"),
+            &root,
+        )
+        .unwrap());
     }
 
     #[test]

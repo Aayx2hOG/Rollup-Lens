@@ -1,10 +1,18 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub const HASH_BYTES: usize = 32;
+pub const SPARSE_TREE_DEPTH: usize = HASH_BYTES * 8;
 
-type Hash = [u8; HASH_BYTES];
+pub type Hash = [u8; HASH_BYTES];
+
+const SMT_KEY_DOMAIN: &[u8] = b"zk-rollup-smt-key-v1";
+const SMT_EMPTY_LEAF_DOMAIN: &[u8] = b"zk-rollup-smt-empty-leaf-v1";
+const SMT_OCCUPIED_LEAF_DOMAIN: &[u8] = b"zk-rollup-smt-occupied-leaf-v1";
+const SMT_INTERNAL_DOMAIN: &[u8] = b"zk-rollup-smt-internal-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MerkleProof {
@@ -19,6 +27,22 @@ pub struct MerkleProof {
 pub struct ProofStep {
     pub sibling_hash: String,
     pub sibling_side: SiblingSide,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SparseMerkleProof {
+    pub key: String,
+    pub value: Option<String>,
+    pub siblings: Vec<String>,
+    pub root: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SparseMerkleTree {
+    leaves: BTreeMap<Hash, Vec<u8>>,
+    nodes: BTreeMap<(usize, Hash), Hash>,
+    empty_hashes: Vec<Hash>,
+    root: Hash,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +62,188 @@ pub enum MerkleError {
     InvalidHex,
     #[error("invalid proof: {0}")]
     InvalidProof(String),
+    #[error("duplicate sparse Merkle key")]
+    DuplicateSparseKey,
+}
+
+impl SparseMerkleTree {
+    pub fn new<I, K, V>(entries: I) -> Result<Self, MerkleError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let empty_hashes = sparse_empty_hashes();
+        let mut leaves = BTreeMap::new();
+        let mut nodes = BTreeMap::new();
+
+        for (key, value) in entries {
+            let path = sparse_key_hash(key.as_ref());
+            if leaves.insert(path, value.as_ref().to_vec()).is_some() {
+                return Err(MerkleError::DuplicateSparseKey);
+            }
+            nodes.insert(
+                (SPARSE_TREE_DEPTH, path),
+                sparse_leaf_hash(&path, value.as_ref()),
+            );
+        }
+
+        for depth in (0..SPARSE_TREE_DEPTH).rev() {
+            let child_depth = depth + 1;
+            let parents: BTreeSet<Hash> = nodes
+                .keys()
+                .filter(|(node_depth, _)| *node_depth == child_depth)
+                .map(|(_, path)| prefix(*path, depth))
+                .collect();
+
+            for parent in parents {
+                let left_path = child_path(parent, depth, false);
+                let right_path = child_path(parent, depth, true);
+                let left = nodes
+                    .get(&(child_depth, left_path))
+                    .copied()
+                    .unwrap_or(empty_hashes[child_depth]);
+                let right = nodes
+                    .get(&(child_depth, right_path))
+                    .copied()
+                    .unwrap_or(empty_hashes[child_depth]);
+                nodes.insert((depth, parent), sparse_internal_hash(&left, &right));
+            }
+        }
+
+        let root = nodes
+            .get(&(0, [0; HASH_BYTES]))
+            .copied()
+            .unwrap_or(empty_hashes[0]);
+        Ok(Self {
+            leaves,
+            nodes,
+            empty_hashes,
+            root,
+        })
+    }
+
+    pub fn root_hash(&self) -> Hash {
+        self.root
+    }
+
+    pub fn root_hex(&self) -> String {
+        encode_hex(&self.root)
+    }
+
+    pub fn prove(&self, key: &[u8]) -> SparseMerkleProof {
+        let path = sparse_key_hash(key);
+        let mut siblings = Vec::with_capacity(SPARSE_TREE_DEPTH);
+        for child_depth in (1..=SPARSE_TREE_DEPTH).rev() {
+            let parent_depth = child_depth - 1;
+            let sibling = child_path(
+                prefix(path, parent_depth),
+                parent_depth,
+                !bit_at(&path, parent_depth),
+            );
+            siblings.push(encode_hex(
+                self.nodes
+                    .get(&(child_depth, sibling))
+                    .unwrap_or(&self.empty_hashes[child_depth]),
+            ));
+        }
+
+        SparseMerkleProof {
+            key: encode_hex(&path),
+            value: self.leaves.get(&path).map(|value| encode_hex(value)),
+            siblings,
+            root: self.root_hex(),
+        }
+    }
+
+    /// Inserts, replaces, or removes one value and recalculates only its
+    /// leaf-to-root path.
+    pub fn update(&mut self, key: &[u8], value: Option<&[u8]>) {
+        let path = sparse_key_hash(key);
+        match value {
+            Some(value) => {
+                self.leaves.insert(path, value.to_vec());
+                self.nodes
+                    .insert((SPARSE_TREE_DEPTH, path), sparse_leaf_hash(&path, value));
+            }
+            None => {
+                self.leaves.remove(&path);
+                self.nodes.remove(&(SPARSE_TREE_DEPTH, path));
+            }
+        }
+
+        for depth in (0..SPARSE_TREE_DEPTH).rev() {
+            let child_depth = depth + 1;
+            let parent = prefix(path, depth);
+            let left = self
+                .nodes
+                .get(&(child_depth, child_path(parent, depth, false)))
+                .copied()
+                .unwrap_or(self.empty_hashes[child_depth]);
+            let right = self
+                .nodes
+                .get(&(child_depth, child_path(parent, depth, true)))
+                .copied()
+                .unwrap_or(self.empty_hashes[child_depth]);
+            let hash = sparse_internal_hash(&left, &right);
+            if hash == self.empty_hashes[depth] {
+                self.nodes.remove(&(depth, parent));
+            } else {
+                self.nodes.insert((depth, parent), hash);
+            }
+        }
+        self.root = self
+            .nodes
+            .get(&(0, [0; HASH_BYTES]))
+            .copied()
+            .unwrap_or(self.empty_hashes[0]);
+    }
+}
+
+pub fn sparse_root_hex<I, K, V>(entries: I) -> Result<String, MerkleError>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<[u8]>,
+    V: AsRef<[u8]>,
+{
+    Ok(SparseMerkleTree::new(entries)?.root_hex())
+}
+
+pub fn verify_sparse_proof(
+    key: &[u8],
+    value: Option<&[u8]>,
+    proof: &SparseMerkleProof,
+    expected_root: &str,
+) -> Result<bool, MerkleError> {
+    if proof.siblings.len() != SPARSE_TREE_DEPTH {
+        return Err(MerkleError::InvalidProof(format!(
+            "sparse proof must contain {SPARSE_TREE_DEPTH} siblings"
+        )));
+    }
+
+    let path = sparse_key_hash(key);
+    if proof.key != encode_hex(&path)
+        || proof.value != value.map(encode_hex)
+        || proof.root != normalize_hex(expected_root)?
+    {
+        return Ok(false);
+    }
+
+    let mut hash = match value {
+        Some(value) => sparse_leaf_hash(&path, value),
+        None => sparse_empty_hashes()[SPARSE_TREE_DEPTH],
+    };
+    for (offset, sibling) in proof.siblings.iter().enumerate() {
+        let depth = SPARSE_TREE_DEPTH - 1 - offset;
+        let sibling = decode_hex_hash(sibling)?;
+        hash = if bit_at(&path, depth) {
+            sparse_internal_hash(&sibling, &hash)
+        } else {
+            sparse_internal_hash(&hash, &sibling)
+        };
+    }
+
+    Ok(encode_hex(&hash) == normalize_hex(expected_root)?)
 }
 
 pub fn root_hex(leaves: &[Value]) -> String {
@@ -187,6 +393,67 @@ fn hash_node(left: &Hash, right: &Hash) -> Hash {
     hasher.update(left);
     hasher.update(right);
     hasher.finalize().into()
+}
+
+fn sparse_key_hash(key: &[u8]) -> Hash {
+    let mut hasher = Sha256::new();
+    hasher.update(SMT_KEY_DOMAIN);
+    hasher.update((key.len() as u64).to_be_bytes());
+    hasher.update(key);
+    hasher.finalize().into()
+}
+
+fn sparse_leaf_hash(key: &Hash, value: &[u8]) -> Hash {
+    let mut hasher = Sha256::new();
+    hasher.update(SMT_OCCUPIED_LEAF_DOMAIN);
+    hasher.update(key);
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+    hasher.finalize().into()
+}
+
+fn sparse_internal_hash(left: &Hash, right: &Hash) -> Hash {
+    let mut hasher = Sha256::new();
+    hasher.update(SMT_INTERNAL_DOMAIN);
+    hasher.update(left);
+    hasher.update(right);
+    hasher.finalize().into()
+}
+
+fn sparse_empty_hashes() -> Vec<Hash> {
+    let mut hashes = vec![[0; HASH_BYTES]; SPARSE_TREE_DEPTH + 1];
+    hashes[SPARSE_TREE_DEPTH] = Sha256::digest(SMT_EMPTY_LEAF_DOMAIN).into();
+    for depth in (0..SPARSE_TREE_DEPTH).rev() {
+        hashes[depth] = sparse_internal_hash(&hashes[depth + 1], &hashes[depth + 1]);
+    }
+    hashes
+}
+
+fn bit_at(path: &Hash, depth: usize) -> bool {
+    path[depth / 8] & (1 << (7 - depth % 8)) != 0
+}
+
+fn prefix(mut path: Hash, depth: usize) -> Hash {
+    if depth == SPARSE_TREE_DEPTH {
+        return path;
+    }
+    let byte = depth / 8;
+    let bit = depth % 8;
+    if bit == 0 {
+        path[byte..].fill(0);
+    } else {
+        path[byte] &= 0xff << (8 - bit);
+        path[byte + 1..].fill(0);
+    }
+    path
+}
+
+fn child_path(parent: Hash, parent_depth: usize, right: bool) -> Hash {
+    let mut child = prefix(parent, parent_depth);
+    if right {
+        child[parent_depth / 8] |= 1 << (7 - parent_depth % 8);
+    }
+    prefix(child, parent_depth + 1)
 }
 
 fn decode_hex_hash(input: &str) -> Result<Hash, MerkleError> {
@@ -346,6 +613,57 @@ mod tests {
                 leaf_count: 2
             })
         );
+    }
+
+    #[test]
+    fn sparse_root_is_independent_of_insertion_order() {
+        let first = SparseMerkleTree::new([
+            (b"alice".as_slice(), b"100:0".as_slice()),
+            (b"bob".as_slice(), b"50:2".as_slice()),
+        ])
+        .unwrap();
+        let second = SparseMerkleTree::new([
+            (b"bob".as_slice(), b"50:2".as_slice()),
+            (b"alice".as_slice(), b"100:0".as_slice()),
+        ])
+        .unwrap();
+
+        assert_eq!(first.root_hash(), second.root_hash());
+    }
+
+    #[test]
+    fn sparse_inclusion_and_non_membership_proofs_verify() {
+        let tree = SparseMerkleTree::new([
+            (b"alice".as_slice(), b"100:0".as_slice()),
+            (b"bob".as_slice(), b"50:2".as_slice()),
+        ])
+        .unwrap();
+        let included = tree.prove(b"alice");
+        let absent = tree.prove(b"carol");
+
+        assert!(
+            verify_sparse_proof(b"alice", Some(b"100:0"), &included, &tree.root_hex()).unwrap()
+        );
+        assert!(verify_sparse_proof(b"carol", None, &absent, &tree.root_hex()).unwrap());
+        assert!(
+            !verify_sparse_proof(b"alice", Some(b"999:0"), &included, &tree.root_hex()).unwrap()
+        );
+    }
+
+    #[test]
+    fn sparse_incremental_updates_match_rebuilding() {
+        let mut tree = SparseMerkleTree::new([(b"alice".as_slice(), b"100:0".as_slice())]).unwrap();
+        tree.update(b"bob", Some(b"50:2"));
+        let rebuilt = SparseMerkleTree::new([
+            (b"alice".as_slice(), b"100:0".as_slice()),
+            (b"bob".as_slice(), b"50:2".as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(tree.root_hash(), rebuilt.root_hash());
+
+        tree.update(b"alice", None);
+        let rebuilt = SparseMerkleTree::new([(b"bob".as_slice(), b"50:2".as_slice())]).unwrap();
+        assert_eq!(tree.root_hash(), rebuilt.root_hash());
     }
 
     proptest! {

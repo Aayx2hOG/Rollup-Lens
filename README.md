@@ -8,7 +8,7 @@ indexing, explorer, and sequencing path.
 ```text
 crates/
   wallet-core/      Signing, verification, and address logic
-  merkle-core/      Deterministic Merkle roots and inclusion proofs
+  merkle-core/      Ordered and sparse Merkle roots and proofs
   chain-core/       Accounts, transfers, blocks, state roots, validation
 contracts/
   RollupSettlement.sol  Optimistic L1 settlement rules for rollup batches
