@@ -4,10 +4,13 @@ members = [
     "crates/wallet-core",
     "crates/merkle-core",
     "crates/chain-core",
+    "crates/validity-core",
     "apps/wallet-cli",
     "apps/merkle-cli",
     "apps/explorer-api",
     "apps/settlement-client",
+    "apps/validity-prover",
+    "zkvm/validity-guest",
 ]
 
 [workspace.package]

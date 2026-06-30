@@ -10,6 +10,7 @@ crates/
   wallet-core/      Signing, verification, and address logic
   merkle-core/      Ordered and sparse Merkle roots and proofs
   chain-core/       Accounts, transfers, blocks, state roots, validation
+  validity-core/    Shared batch validity statement and witness verification
 contracts/
   RollupSettlement.sol  Optimistic L1 settlement rules for rollup batches
 apps/
@@ -17,6 +18,7 @@ apps/
   merkle-cli/       Merkle proof utilities
   explorer-api/     Postgres-backed rollup API and sequencer
   explorer-ui/      React explorer and sequencer UI
+  validity-prover/  SP1 batch execution, proving, and local verification
 prisma/
   schema.prisma     Postgres schema for blocks, transactions, accounts,
                     rollup batches, transaction pool, and error events

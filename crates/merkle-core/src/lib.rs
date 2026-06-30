@@ -83,6 +83,7 @@ impl SparseMerkleTree {
         let empty_hashes = sparse_empty_hashes();
         let mut leaves = BTreeMap::new();
         let mut nodes = BTreeMap::new();
+        let mut current_paths = BTreeSet::new();
 
         for (key, value) in entries {
             let path = sparse_key_hash(key.as_ref());
@@ -93,17 +94,18 @@ impl SparseMerkleTree {
                 (SPARSE_TREE_DEPTH, path),
                 sparse_leaf_hash(&path, value.as_ref()),
             );
+            current_paths.insert(path);
         }
 
         for depth in (0..SPARSE_TREE_DEPTH).rev() {
             let child_depth = depth + 1;
-            let parents: BTreeSet<Hash> = nodes
-                .keys()
-                .filter(|(node_depth, _)| *node_depth == child_depth)
-                .map(|(_, path)| prefix(*path, depth))
+            let parents: BTreeSet<Hash> = current_paths
+                .iter()
+                .map(|path| prefix(*path, depth))
                 .collect();
 
-            for parent in parents {
+            for parent in &parents {
+                let parent = *parent;
                 let left_path = child_path(parent, depth, false);
                 let right_path = child_path(parent, depth, true);
                 let left = nodes
@@ -116,6 +118,7 @@ impl SparseMerkleTree {
                     .unwrap_or(empty_hashes[child_depth]);
                 nodes.insert((depth, parent), sparse_internal_hash(&left, &right));
             }
+            current_paths = parents;
         }
 
         let root = nodes

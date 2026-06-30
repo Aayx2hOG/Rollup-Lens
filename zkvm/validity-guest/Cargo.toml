@@ -1,0 +1,10 @@
+[package]
+name = "validity-guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sp1-zkvm = "6.3.1"
+validity-core = { path = "../../crates/validity-core" }

@@ -1,0 +1,20 @@
+[package]
+name = "validity-prover"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "validity-prover"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+sp1-sdk = { version = "6.3.1", features = ["blocking"] }
+validity-core = { path = "../../crates/validity-core" }
+
+[build-dependencies]
+sp1-build = "6.3.1"
+
+[dev-dependencies]
+chain-core = { path = "../../crates/chain-core" }
