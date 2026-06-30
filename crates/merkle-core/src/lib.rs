@@ -45,6 +45,13 @@ pub struct SparseMerkleTree {
     root: Hash,
 }
 
+impl Default for SparseMerkleTree {
+    fn default() -> Self {
+        Self::new(std::iter::empty::<(&[u8], &[u8])>())
+            .expect("an empty sparse Merkle tree is always valid")
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SiblingSide {

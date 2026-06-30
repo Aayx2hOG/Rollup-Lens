@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use merkle_core::{encode_hex, root_hex, SparseMerkleProof, SparseMerkleTree};
 use serde::{Deserialize, Serialize};
@@ -45,13 +45,32 @@ pub struct Block {
     pub block_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chain {
     pub genesis_accounts: Vec<Account>,
     pub accounts: BTreeMap<String, Account>,
     pub pending_transactions: Vec<Transfer>,
     pub blocks: Vec<Block>,
+    #[serde(skip)]
+    account_state_tree: SparseMerkleTree,
+    #[serde(skip, default = "default_tree_dirty")]
+    account_state_tree_dirty: bool,
+}
+
+impl PartialEq for Chain {
+    fn eq(&self, other: &Self) -> bool {
+        self.genesis_accounts == other.genesis_accounts
+            && self.accounts == other.accounts
+            && self.pending_transactions == other.pending_transactions
+            && self.blocks == other.blocks
+    }
+}
+
+impl Eq for Chain {}
+
+fn default_tree_dirty() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,12 +184,15 @@ impl From<WalletError> for ChainError {
 
 pub fn new_chain(genesis_accounts: Vec<Account>) -> Result<Chain, ChainError> {
     let accounts = accounts_from_genesis(&genesis_accounts)?;
+    let account_state_tree = account_state_tree(&accounts);
 
     Ok(Chain {
         genesis_accounts,
         accounts,
         pending_transactions: Vec::new(),
         blocks: Vec::new(),
+        account_state_tree,
+        account_state_tree_dirty: false,
     })
 }
 
@@ -192,6 +214,9 @@ pub fn add_genesis_account(
         nonce: 0,
     };
     chain.genesis_accounts.push(account.clone());
+    chain
+        .account_state_tree
+        .update(address.as_bytes(), Some(&account_state_value(&account)));
     chain.accounts.insert(address, account);
     Ok(())
 }
@@ -201,7 +226,8 @@ pub fn finalize_genesis(chain: &mut Chain) -> Result<Block, ChainError> {
         return Err(ChainError::GenesisAlreadyFinalized);
     }
 
-    let state_root = state_root(&chain.accounts);
+    ensure_account_state_tree(chain);
+    let state_root = chain.account_state_tree.root_hex();
     let transactions = Vec::new();
     let block_hash = block_hash(0, NULL_PARENT_HASH, &transactions, &state_root);
     let block = Block {
@@ -256,12 +282,18 @@ pub fn next_nonce(chain: &Chain, address: &str) -> Result<u64, ChainError> {
 
 pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
     ensure_genesis_finalized(chain)?;
+    ensure_account_state_tree(chain);
     let mut next_accounts = chain.accounts.clone();
     for transaction in &chain.pending_transactions {
         apply_transaction_to_state(&mut next_accounts, transaction)?;
     }
+    update_account_state_tree(
+        &mut chain.account_state_tree,
+        &next_accounts,
+        &chain.pending_transactions,
+    );
 
-    let state_root = state_root(&next_accounts);
+    let state_root = chain.account_state_tree.root_hex();
     let height = chain.blocks.len() as u64;
     let parent_hash = chain
         .blocks
@@ -281,6 +313,7 @@ pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
     };
 
     chain.accounts = next_accounts;
+    chain.account_state_tree_dirty = false;
     chain.blocks.push(block.clone());
     Ok(block)
 }
@@ -394,6 +427,30 @@ fn account_state_tree(accounts: &BTreeMap<String, Account>) -> SparseMerkleTree 
         .collect::<Vec<_>>();
     SparseMerkleTree::new(entries)
         .expect("account map keys must produce unique sparse Merkle paths")
+}
+
+fn ensure_account_state_tree(chain: &mut Chain) {
+    if chain.account_state_tree_dirty {
+        chain.account_state_tree = account_state_tree(&chain.accounts);
+        chain.account_state_tree_dirty = false;
+    }
+}
+
+fn update_account_state_tree(
+    tree: &mut SparseMerkleTree,
+    accounts: &BTreeMap<String, Account>,
+    transactions: &[Transfer],
+) {
+    let changed_addresses: BTreeSet<&str> = transactions
+        .iter()
+        .flat_map(|transaction| [transaction.from.as_str(), transaction.to.as_str()])
+        .collect();
+    for address in changed_addresses {
+        let account = accounts
+            .get(address)
+            .expect("applied transaction accounts must exist");
+        tree.update(address.as_bytes(), Some(&account_state_value(account)));
+    }
 }
 
 pub fn transaction_hash(transaction: &Transfer) -> String {
@@ -958,6 +1015,36 @@ mod tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn loaded_chain_rebuilds_tree_once_then_updates_it_incrementally() {
+        let alice = create_keypair();
+        let bob = create_keypair();
+        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
+        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let mut chain = new_chain(vec![Account {
+            address: alice_address.clone(),
+            balance: 100,
+            nonce: 0,
+        }])
+        .unwrap();
+        finalize_genesis(&mut chain).unwrap();
+
+        let first = sign_transfer(&alice.secret_key_base64, bob_address.clone(), 20, 0).unwrap();
+        add_pending_transaction(&mut chain, first).unwrap();
+        produce_block(&mut chain).unwrap();
+
+        let json = serde_json::to_string(&chain).unwrap();
+        assert!(!json.contains("account_state_tree"));
+        let mut loaded: Chain = serde_json::from_str(&json).unwrap();
+
+        let second = sign_transfer(&alice.secret_key_base64, bob_address, 15, 1).unwrap();
+        add_pending_transaction(&mut loaded, second).unwrap();
+        let block = produce_block(&mut loaded).unwrap();
+
+        assert_eq!(block.state_root, state_root(&loaded.accounts));
+        validate_chain(&loaded).unwrap();
     }
 
     #[test]
