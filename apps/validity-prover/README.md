@@ -39,6 +39,28 @@ cargo run --release -p validity-prover -- \
   prove witness.json --proof-out batch-proof.bin
 ```
 
-Core proofs are not directly accepted by `RollupSettlement.sol`. Production L1
-settlement additionally requires an EVM-compatible compressed proof, the
-official SP1 verifier contract, and binding the public values to `submitBatch`.
+Generate a Groth16 proof in the encoding accepted by the official SP1 Solidity
+verifier:
+
+```bash
+cargo run --release -p validity-prover -- \
+  groth16 witness.json --evm-artifact-out batch-proof.json
+```
+
+The JSON artifact contains:
+
+- `program_vkey`: the verification-key commitment that must equal the
+  `programVKey` configured in `RollupSettlement`
+- `public_values`: 224 bytes containing the ABI encoding of batch number, five
+  roots/commitments, and transaction count
+- `proof`: the selector-prefixed Groth16 proof bytes expected by SP1's
+  version-matched Solidity verifier
+- `decoded`: a human-readable copy for inspection
+
+The contract binds the first six public values to the batch arguments before
+calling the SP1 verifier. Consequently, a proof generated for one batch cannot
+be submitted with another batch number or another set of roots.
+
+Groth16 wrapping is substantially slower than `execute` or a core proof. Use
+the Succinct prover network or a machine configured for SP1 proving for
+production-sized batches.

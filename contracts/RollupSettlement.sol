@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {ISP1Verifier} from "./ISP1Verifier.sol";
+
 /// @title RollupSettlement
 /// @notice Optimistic settlement contract for the local Rust rollup simulator.
 /// @dev Batches are accepted only after a challenge window. A challenged batch
@@ -50,6 +52,8 @@ contract RollupSettlement {
     error InsufficientBond();
     error EmptyChallengeProof();
     error TransferFailed();
+    error InvalidVerifier();
+    error InvalidPublicValues();
 
     event SequencerUpdated(address indexed sequencer);
     event BatchSubmitted(
@@ -65,11 +69,9 @@ contract RollupSettlement {
     event BatchRejected(uint256 indexed batchNumber);
     event BatchChallengeDismissed(uint256 indexed batchNumber);
     event BatchFinalized(uint256 indexed batchNumber, bytes32 indexed stateRoot);
+    event ValidityProofVerified(uint256 indexed batchNumber, bytes32 indexed programVKey);
     event ForcedWithdrawalRequested(
-        uint256 indexed requestId,
-        address indexed requester,
-        bytes32 indexed l2Account,
-        uint256 amount
+        uint256 indexed requestId, address indexed requester, bytes32 indexed l2Account, uint256 amount
     );
     event ForcedWithdrawalResolved(uint256 indexed requestId);
 
@@ -78,6 +80,8 @@ contract RollupSettlement {
     uint256 public immutable forcedWithdrawalDelay;
     uint256 public immutable minimumSequencerBond;
     uint256 public immutable challengeBond;
+    ISP1Verifier public immutable sp1Verifier;
+    bytes32 public immutable programVKey;
 
     address public sequencer;
     bytes32 public finalizedStateRoot;
@@ -106,11 +110,16 @@ contract RollupSettlement {
         uint256 challengeWindow_,
         uint256 forcedWithdrawalDelay_,
         uint256 minimumSequencerBond_,
-        uint256 challengeBond_
+        uint256 challengeBond_,
+        ISP1Verifier sp1Verifier_,
+        bytes32 programVKey_
     ) {
         if (genesisStateRoot == bytes32(0)) revert InvalidRoot();
         if (challengeWindow_ == 0 || forcedWithdrawalDelay_ == 0) revert InvalidWindow();
         if (minimumSequencerBond_ == 0 || challengeBond_ == 0) revert InvalidBond();
+        if (address(sp1Verifier_) == address(0) || programVKey_ == bytes32(0)) {
+            revert InvalidVerifier();
+        }
 
         owner = msg.sender;
         finalizedStateRoot = genesisStateRoot;
@@ -118,6 +127,8 @@ contract RollupSettlement {
         forcedWithdrawalDelay = forcedWithdrawalDelay_;
         minimumSequencerBond = minimumSequencerBond_;
         challengeBond = challengeBond_;
+        sp1Verifier = sp1Verifier_;
+        programVKey = programVKey_;
     }
 
     receive() external payable {
@@ -140,7 +151,7 @@ contract RollupSettlement {
         if (msg.sender == sequencer && remaining < minimumSequencerBond) revert InvalidBond();
 
         sequencerBond[msg.sender] = remaining;
-        (bool ok, ) = msg.sender.call{value: amount}("");
+        (bool ok,) = msg.sender.call{value: amount}("");
         if (!ok) revert TransferFailed();
     }
 
@@ -156,10 +167,8 @@ contract RollupSettlement {
         if (hasPendingBatch) revert PendingBatchExists();
         if (prevStateRoot != finalizedStateRoot) revert InvalidStateTransition();
         if (
-            newStateRoot == bytes32(0) ||
-            transactionRoot == bytes32(0) ||
-            blockHashRoot == bytes32(0) ||
-            dataHash == bytes32(0)
+            newStateRoot == bytes32(0) || transactionRoot == bytes32(0) || blockHashRoot == bytes32(0)
+                || dataHash == bytes32(0)
         ) {
             revert InvalidRoot();
         }
@@ -182,14 +191,69 @@ contract RollupSettlement {
         hasPendingBatch = true;
 
         emit BatchSubmitted(
-            batchNumber,
-            prevStateRoot,
-            newStateRoot,
-            transactionRoot,
-            blockHashRoot,
-            dataHash,
-            msg.sender
+            batchNumber, prevStateRoot, newStateRoot, transactionRoot, blockHashRoot, dataHash, msg.sender
         );
+    }
+
+    /// @notice Submit and immediately finalize a batch backed by an SP1 Groth16 proof.
+    /// @dev `publicValues` must be the guest's ABI encoding of all batch commitments.
+    ///      The official SP1 verifier reverts unless `proof` proves execution of the
+    ///      immutable program verification key with exactly these public values.
+    function submitBatchWithProof(
+        uint256 batchNumber,
+        bytes32 prevStateRoot,
+        bytes32 newStateRoot,
+        bytes32 transactionRoot,
+        bytes32 blockHashRoot,
+        bytes32 dataHash,
+        bytes calldata publicValues,
+        bytes calldata proof
+    ) external onlySequencer {
+        if (batchNumber != nextBatchNumber) revert InvalidBatchNumber();
+        if (hasPendingBatch) revert PendingBatchExists();
+        if (prevStateRoot != finalizedStateRoot) revert InvalidStateTransition();
+        if (
+            newStateRoot == bytes32(0) || transactionRoot == bytes32(0) || blockHashRoot == bytes32(0)
+                || dataHash == bytes32(0)
+        ) {
+            revert InvalidRoot();
+        }
+        if (publicValues.length != 224) revert InvalidPublicValues();
+
+        if (
+            keccak256(publicValues[:192])
+                != keccak256(
+                    abi.encode(batchNumber, prevStateRoot, newStateRoot, transactionRoot, blockHashRoot, dataHash)
+                )
+        ) {
+            revert InvalidPublicValues();
+        }
+
+        sp1Verifier.verifyProof(programVKey, publicValues, proof);
+
+        batches[batchNumber] = Batch({
+            prevStateRoot: prevStateRoot,
+            newStateRoot: newStateRoot,
+            transactionRoot: transactionRoot,
+            blockHashRoot: blockHashRoot,
+            dataHash: dataHash,
+            submittedAt: block.timestamp,
+            finalizedAt: block.timestamp,
+            sequencer: msg.sender,
+            challenger: address(0),
+            challenged: false,
+            finalized: true,
+            rejected: false
+        });
+        nextBatchNumber = batchNumber + 1;
+        finalizedBatchNumber = batchNumber;
+        finalizedStateRoot = newStateRoot;
+
+        emit BatchSubmitted(
+            batchNumber, prevStateRoot, newStateRoot, transactionRoot, blockHashRoot, dataHash, msg.sender
+        );
+        emit ValidityProofVerified(batchNumber, programVKey);
+        emit BatchFinalized(batchNumber, newStateRoot);
     }
 
     function challengeBatch(uint256 batchNumber, bytes calldata proof) external payable {
@@ -223,7 +287,7 @@ contract RollupSettlement {
 
         uint256 payout = challengeBond + slashed;
         if (payout != 0) {
-            (bool ok, ) = batch.challenger.call{value: payout}("");
+            (bool ok,) = batch.challenger.call{value: payout}("");
             if (!ok) revert TransferFailed();
         }
 
@@ -266,11 +330,7 @@ contract RollupSettlement {
 
         uint256 requestId = nextWithdrawalRequestId++;
         forcedWithdrawals[requestId] = ForcedWithdrawal({
-            requester: msg.sender,
-            l2Account: l2Account,
-            amount: amount,
-            requestedAt: block.timestamp,
-            resolved: false
+            requester: msg.sender, l2Account: l2Account, amount: amount, requestedAt: block.timestamp, resolved: false
         });
 
         emit ForcedWithdrawalRequested(requestId, msg.sender, l2Account, amount);

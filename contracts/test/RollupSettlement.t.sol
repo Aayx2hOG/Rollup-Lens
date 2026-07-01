@@ -3,6 +3,27 @@ pragma solidity ^0.8.24;
 
 import "../RollupSettlement.sol";
 
+contract MockSP1Verifier is ISP1Verifier {
+    error InvalidProof();
+
+    bytes32 public immutable expectedVKey;
+    bool public rejectProof;
+
+    constructor(bytes32 expectedVKey_) {
+        expectedVKey = expectedVKey_;
+    }
+
+    function setRejectProof(bool value) external {
+        rejectProof = value;
+    }
+
+    function verifyProof(bytes32 programVKey, bytes calldata, bytes calldata proof) external view {
+        if (rejectProof || programVKey != expectedVKey || keccak256(proof) != keccak256("proof")) {
+            revert InvalidProof();
+        }
+    }
+}
+
 interface Vm {
     function deal(address account, uint256 balance) external;
     function expectRevert(bytes4 selector) external;
@@ -22,6 +43,7 @@ contract RollupSettlementTest {
     bytes32 private constant TRANSACTION_ROOT = bytes32(uint256(4));
     bytes32 private constant BLOCK_HASH_ROOT = bytes32(uint256(5));
     bytes32 private constant DATA_HASH = bytes32(uint256(6));
+    bytes32 private constant PROGRAM_VKEY = bytes32(uint256(7));
 
     uint256 private constant CHALLENGE_WINDOW = 1 days;
     uint256 private constant WITHDRAWAL_DELAY = 7 days;
@@ -29,18 +51,77 @@ contract RollupSettlementTest {
     uint256 private constant CHALLENGE_BOND = 1 ether;
 
     RollupSettlement private settlement;
+    MockSP1Verifier private verifier;
 
     receive() external payable {}
 
     function setUp() public {
+        verifier = new MockSP1Verifier(PROGRAM_VKEY);
         settlement = new RollupSettlement(
             GENESIS_ROOT,
             CHALLENGE_WINDOW,
             WITHDRAWAL_DELAY,
             MINIMUM_SEQUENCER_BOND,
-            CHALLENGE_BOND
+            CHALLENGE_BOND,
+            verifier,
+            PROGRAM_VKEY
         );
         settlement.setSequencer(SEQUENCER);
+    }
+
+    function testValidityProofFinalizesBatchImmediately() public {
+        bondSequencer();
+        vm.prank(SEQUENCER);
+        settlement.submitBatchWithProof(
+            0,
+            GENESIS_ROOT,
+            NEW_ROOT,
+            TRANSACTION_ROOT,
+            BLOCK_HASH_ROOT,
+            DATA_HASH,
+            publicValues(0, GENESIS_ROOT, NEW_ROOT),
+            "proof"
+        );
+
+        assertEq(settlement.nextBatchNumber(), 1, "next batch number");
+        assertEq(settlement.finalizedBatchNumber(), 0, "finalized batch");
+        assertEq(settlement.finalizedStateRoot(), NEW_ROOT, "finalized root");
+        assertFalse(settlement.hasPendingBatch(), "no challenge-period batch");
+        (,,,,,,,,,, bool finalized,) = settlement.batches(0);
+        assertTrue(finalized, "batch finalized");
+    }
+
+    function testValidityProofCannotBeUsedWithDifferentBatchArguments() public {
+        bondSequencer();
+        vm.prank(SEQUENCER);
+        vm.expectRevert(RollupSettlement.InvalidPublicValues.selector);
+        settlement.submitBatchWithProof(
+            0,
+            GENESIS_ROOT,
+            REPLACEMENT_ROOT,
+            TRANSACTION_ROOT,
+            BLOCK_HASH_ROOT,
+            DATA_HASH,
+            publicValues(0, GENESIS_ROOT, NEW_ROOT),
+            "proof"
+        );
+    }
+
+    function testInvalidValidityProofIsRejected() public {
+        bondSequencer();
+        verifier.setRejectProof(true);
+        vm.prank(SEQUENCER);
+        vm.expectRevert(MockSP1Verifier.InvalidProof.selector);
+        settlement.submitBatchWithProof(
+            0,
+            GENESIS_ROOT,
+            NEW_ROOT,
+            TRANSACTION_ROOT,
+            BLOCK_HASH_ROOT,
+            DATA_HASH,
+            publicValues(0, GENESIS_ROOT, NEW_ROOT),
+            "proof"
+        );
     }
 
     function testSequencerCanSubmitAndFinalizeBatch() public {
@@ -53,7 +134,7 @@ contract RollupSettlementTest {
         vm.expectRevert(RollupSettlement.ChallengeWindowOpen.selector);
         settlement.finalizeBatch(0);
 
-        vm.warp(block.timestamp + CHALLENGE_WINDOW);
+        vm.warp(2 * CHALLENGE_WINDOW + 1);
         settlement.finalizeBatch(0);
 
         assertEq(settlement.finalizedBatchNumber(), 0, "finalized batch");
@@ -64,14 +145,7 @@ contract RollupSettlementTest {
     function testSequencerNeedsMinimumBondToSubmit() public {
         vm.prank(SEQUENCER);
         vm.expectRevert(RollupSettlement.InvalidBond.selector);
-        settlement.submitBatch(
-            0,
-            GENESIS_ROOT,
-            NEW_ROOT,
-            TRANSACTION_ROOT,
-            BLOCK_HASH_ROOT,
-            DATA_HASH
-        );
+        settlement.submitBatch(0, GENESIS_ROOT, NEW_ROOT, TRANSACTION_ROOT, BLOCK_HASH_ROOT, DATA_HASH);
     }
 
     function testChallengeBlocksFinalizationAndRejectedBatchCanBeReplaced() public {
@@ -93,7 +167,7 @@ contract RollupSettlementTest {
         bondSequencer();
         submitBatch(0, GENESIS_ROOT, REPLACEMENT_ROOT);
 
-        vm.warp(block.timestamp + CHALLENGE_WINDOW);
+        vm.warp(2 * CHALLENGE_WINDOW + 1);
         settlement.finalizeBatch(0);
         assertEq(settlement.finalizedStateRoot(), REPLACEMENT_ROOT, "replacement finalized");
     }
@@ -106,14 +180,11 @@ contract RollupSettlementTest {
 
     function submitBatch(uint256 batchNumber, bytes32 prevRoot, bytes32 newRoot) private {
         vm.prank(SEQUENCER);
-        settlement.submitBatch(
-            batchNumber,
-            prevRoot,
-            newRoot,
-            TRANSACTION_ROOT,
-            BLOCK_HASH_ROOT,
-            DATA_HASH
-        );
+        settlement.submitBatch(batchNumber, prevRoot, newRoot, TRANSACTION_ROOT, BLOCK_HASH_ROOT, DATA_HASH);
+    }
+
+    function publicValues(uint256 batchNumber, bytes32 prevRoot, bytes32 newRoot) private pure returns (bytes memory) {
+        return abi.encode(batchNumber, prevRoot, newRoot, TRANSACTION_ROOT, BLOCK_HASH_ROOT, DATA_HASH, uint256(1));
     }
 
     function assertEq(uint256 actual, uint256 expected, string memory label) private pure {

@@ -10,6 +10,7 @@ default-run = "validity-prover"
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 sp1-sdk = { version = "6.3.1", features = ["blocking"] }
 validity-core = { path = "../../crates/validity-core" }
 

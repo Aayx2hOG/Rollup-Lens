@@ -2,6 +2,7 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
+use serde::Serialize;
 use sp1_sdk::{
     blocking::{ProveRequest, Prover, ProverClient},
     include_elf, Elf, HashableKey, ProvingKey, SP1Stdin,
@@ -19,12 +20,23 @@ struct Args {
     witness: PathBuf,
     #[arg(long, value_name = "PROOF_FILE")]
     proof_out: Option<PathBuf>,
+    #[arg(long, value_name = "ARTIFACT_JSON")]
+    evm_artifact_out: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Mode {
     Execute,
     Prove,
+    Groth16,
+}
+
+#[derive(Serialize)]
+struct EvmProofArtifact {
+    program_vkey: String,
+    public_values: String,
+    proof: String,
+    decoded: BatchValidityPublicValues,
 }
 
 fn main() -> Result<()> {
@@ -41,11 +53,19 @@ fn main() -> Result<()> {
 
     match args.mode {
         Mode::Execute => {
-            let (mut output, report) = client
+            let (output, report) = client
                 .execute(VALIDITY_GUEST_ELF, stdin)
                 .run()
                 .context("zkVM execution failed")?;
-            let values: BatchValidityPublicValues = output.read();
+            let values = validity_core::verify_batch_witness(&witness)
+                .context("invalid validity witness")?;
+            let expected = values
+                .encode_evm()
+                .context("failed to encode public values")?;
+            anyhow::ensure!(
+                output.as_slice() == expected,
+                "guest public values differ from host"
+            );
             println!("{}", serde_json::to_string_pretty(&values)?);
             eprintln!("instructions: {}", report.total_instruction_count());
         }
@@ -72,9 +92,54 @@ fn main() -> Result<()> {
                 proving_key.verifying_key().bytes32()
             );
         }
+        Mode::Groth16 => {
+            let artifact_out = args
+                .evm_artifact_out
+                .as_ref()
+                .context("--evm-artifact-out is required in groth16 mode")?;
+            let proving_key = client
+                .setup(VALIDITY_GUEST_ELF)
+                .context("failed to set up validity guest")?;
+            let proof = client
+                .prove(&proving_key, stdin)
+                .groth16()
+                .run()
+                .context("failed to generate Groth16 proof")?;
+            client
+                .verify(&proof, proving_key.verifying_key(), None)
+                .context("generated Groth16 proof did not verify")?;
+            let decoded = validity_core::verify_batch_witness(&witness)
+                .context("invalid validity witness")?;
+            let expected = decoded
+                .encode_evm()
+                .context("failed to encode public values")?;
+            anyhow::ensure!(
+                proof.public_values.as_slice() == expected,
+                "proof public values differ from the expected Solidity ABI encoding"
+            );
+            let artifact = EvmProofArtifact {
+                program_vkey: proving_key.verifying_key().bytes32(),
+                public_values: encode_hex(proof.public_values.as_slice()),
+                proof: encode_hex(&proof.bytes()),
+                decoded,
+            };
+            fs::write(artifact_out, serde_json::to_vec_pretty(&artifact)?)
+                .with_context(|| format!("failed to write {}", artifact_out.display()))?;
+            println!("wrote EVM proof artifact to {}", artifact_out.display());
+        }
     }
 
     Ok(())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(2 + bytes.len() * 2);
+    output.push_str("0x");
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
 }
 
 #[cfg(test)]
@@ -101,10 +166,9 @@ mod tests {
         let mut stdin = SP1Stdin::new();
         stdin.write(&witness);
 
-        let (mut output, _) = client.execute(VALIDITY_GUEST_ELF, stdin).run().unwrap();
-        let values: BatchValidityPublicValues = output.read();
-
+        let (output, _) = client.execute(VALIDITY_GUEST_ELF, stdin).run().unwrap();
+        let values = validity_core::verify_batch_witness(&witness).unwrap();
         assert_eq!(values.new_state_root, expected_new_root);
-        assert_eq!(values.transaction_count, 0);
+        assert_eq!(output.as_slice(), values.encode_evm().unwrap());
     }
 }

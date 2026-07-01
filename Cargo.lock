@@ -5843,6 +5843,7 @@ dependencies = [
  "anyhow",
  "chain-core",
  "clap",
+ "serde",
  "serde_json",
  "sp1-build",
  "sp1-sdk",

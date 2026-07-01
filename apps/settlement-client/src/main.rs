@@ -1,5 +1,7 @@
 use std::{
     ffi::OsString,
+    fs,
+    path::PathBuf,
     process::{Command, Stdio},
     time::Duration,
 };
@@ -11,6 +13,8 @@ use serde_json::{json, Value};
 
 const DEFAULT_API_URL: &str = "http://127.0.0.1:3000";
 const SUBMIT_BATCH_SIGNATURE: &str = "submitBatch(uint256,bytes32,bytes32,bytes32,bytes32,bytes32)";
+const SUBMIT_BATCH_WITH_PROOF_SIGNATURE: &str =
+    "submitBatchWithProof(uint256,bytes32,bytes32,bytes32,bytes32,bytes32,bytes,bytes)";
 const FINALIZE_BATCH_SIGNATURE: &str = "finalizeBatch(uint256)";
 const DEPOSIT_BOND_SIGNATURE: &str = "depositSequencerBond()";
 const SET_SEQUENCER_SIGNATURE: &str = "setSequencer(address)";
@@ -51,6 +55,12 @@ enum SettlementCommand {
     SubmitBatch {
         #[arg(long)]
         batch_number: u64,
+        #[arg(
+            long,
+            value_name = "EVM_PROOF_JSON",
+            help = "Groth16 artifact emitted by validity-prover"
+        )]
+        proof: Option<PathBuf>,
     },
     #[command(about = "Call RollupSettlement.finalizeBatch after the challenge window")]
     FinalizeBatch {
@@ -76,6 +86,12 @@ enum SettlementCommand {
 struct SettlementCalldata {
     signature: String,
     ordered_args: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvmProofArtifact {
+    public_values: String,
+    proof: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,7 +156,10 @@ async fn main() -> Result<()> {
     validate_private_key(&private_key)?;
 
     let command = match &cli.command {
-        SettlementCommand::SubmitBatch { batch_number } => {
+        SettlementCommand::SubmitBatch {
+            batch_number,
+            proof,
+        } => {
             let calldata = fetch_settlement_calldata(&cli.api_url, *batch_number).await?;
             if calldata.signature != SUBMIT_BATCH_SIGNATURE {
                 bail!(
@@ -155,8 +174,24 @@ async fn main() -> Result<()> {
                 );
             }
 
-            let mut args = vec![contract.clone(), SUBMIT_BATCH_SIGNATURE.to_string()];
+            let signature = if proof.is_some() {
+                SUBMIT_BATCH_WITH_PROOF_SIGNATURE
+            } else {
+                SUBMIT_BATCH_SIGNATURE
+            };
+            let mut args = vec![contract.clone(), signature.to_string()];
             args.extend(calldata.ordered_args.iter().map(cast_arg));
+            if let Some(path) = proof {
+                let artifact: EvmProofArtifact =
+                    serde_json::from_slice(&fs::read(path).with_context(|| {
+                        format!("failed to read proof artifact {}", path.display())
+                    })?)
+                    .context("invalid EVM proof artifact JSON")?;
+                validate_hex_bytes(&artifact.public_values, "proof public values")?;
+                validate_hex_bytes(&artifact.proof, "Groth16 proof")?;
+                args.push(artifact.public_values);
+                args.push(artifact.proof);
+            }
             CastCommand {
                 action: "send",
                 args,
@@ -221,6 +256,16 @@ async fn main() -> Result<()> {
             &receipt_value,
         )
         .await?;
+    }
+    Ok(())
+}
+
+fn validate_hex_bytes(value: &str, label: &str) -> Result<()> {
+    let hex = value
+        .strip_prefix("0x")
+        .with_context(|| format!("{label} must start with 0x"))?;
+    if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} must contain complete hexadecimal bytes");
     }
     Ok(())
 }

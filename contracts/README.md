@@ -1,12 +1,15 @@
 # Rollup Settlement Contract
 
-`RollupSettlement.sol` is an optimistic settlement layer for the Rust rollup
-simulator. The Rust chain still owns local execution and state-root creation;
-the contract owns finality rules for submitted rollup batches.
+`RollupSettlement.sol` supports both optimistic and SP1 validity-proof
+settlement. The Rust chain owns execution and state-root creation; the contract
+owns proof verification and finality.
 
 ## Security Rules
 
 - Only the configured sequencer can submit batches.
+- The validity path accepts only proofs for the immutable SP1 program key.
+- Every validity proof is bound to the submitted batch number and commitments.
+- Proven batches finalize immediately without a challenge window.
 - The sequencer must keep a minimum ETH bond.
 - Every batch must link from the latest finalized state root.
 - Only one unfinalized batch can be pending at a time.
@@ -41,6 +44,30 @@ block_hash_root  -> blockHashRoot
 data_hash        -> dataHash
 ```
 
+For validity settlement, generate `batch-proof.json` with `validity-prover`,
+then submit it through:
+
+```bash
+cargo run -p settlement-client -- submit-batch \
+  --batch-number 0 \
+  --proof batch-proof.json
+```
+
+Without `--proof`, the client uses the existing optimistic `submitBatch` path.
+With `--proof`, it calls `submitBatchWithProof`.
+
+## Deployment
+
+Deploy the official SP1 Groth16 verifier matching the exact SP1 SDK/circuit
+version used by the prover. Pass its address and the artifact's `program_vkey`
+to the `RollupSettlement` constructor. Both values are immutable because
+silently changing either would change what computation the settlement contract
+trusts.
+
+An SDK upgrade requires generating a new proof, deploying or selecting its
+matching official verifier, and deploying a new settlement contract (or an
+explicitly governed upgrade design).
+
 The API response includes both named `args` and `ordered_args`. The latter is
 the direct argument order for `submitBatch(uint256,bytes32,bytes32,bytes32,bytes32,bytes32)`.
 
@@ -52,6 +79,9 @@ The Foundry harness in `contracts/test/RollupSettlement.t.sol` covers:
 - challenge-window finalization
 - rejection of challenged batches
 - replacement of a rejected batch number
+- immediate finality for a validity-proven batch
+- rejection of invalid proofs
+- rejection when proof public values differ from batch arguments
 
 Run:
 
@@ -61,8 +91,10 @@ forge test
 
 ## Next Hardening Steps
 
-- Replace owner-based `rejectChallengedBatch` with an on-chain fraud-proof or
-  validity-proof verifier.
+- Use the validity path as the production submission path and retain the
+  optimistic path only if a deliberate fallback policy is required.
+- Add an integration test against the real version-matched SP1 verifier, not
+  only the deterministic verifier mock used by unit tests.
 - Add withdrawal proof verification against `finalizedStateRoot`.
 - Store submitted L2 forced-withdrawal request IDs in batch data and verify they
   were included before allowing the sequencer to mark them resolved.

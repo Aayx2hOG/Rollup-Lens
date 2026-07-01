@@ -28,6 +28,34 @@ pub struct BatchValidityPublicValues {
     pub transaction_count: usize,
 }
 
+pub const EVM_PUBLIC_VALUES_LENGTH: usize = 7 * 32;
+
+impl BatchValidityPublicValues {
+    /// Solidity ABI encoding of
+    /// `(uint256,bytes32,bytes32,bytes32,bytes32,bytes32,uint256)`.
+    pub fn encode_evm(&self) -> Result<[u8; EVM_PUBLIC_VALUES_LENGTH], ValidityError> {
+        let mut encoded = [0u8; EVM_PUBLIC_VALUES_LENGTH];
+        encoded[24..32].copy_from_slice(&self.batch_number.to_be_bytes());
+        for (index, value) in [
+            &self.prev_state_root,
+            &self.new_state_root,
+            &self.transaction_root,
+            &self.block_hash_root,
+            &self.data_hash,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            encoded[(index + 1) * 32..(index + 2) * 32].copy_from_slice(&decode_root(value)?);
+        }
+        let count = u64::try_from(self.transaction_count).map_err(|_| {
+            ValidityError::InvalidPublicValues("transaction count exceeds u64".into())
+        })?;
+        encoded[6 * 32 + 24..7 * 32].copy_from_slice(&count.to_be_bytes());
+        Ok(encoded)
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ValidityError {
     #[error("witness state does not match previous block state root")]
@@ -36,6 +64,8 @@ pub enum ValidityError {
     InvalidExecutedState { height: u64 },
     #[error("invalid batch structure: {0}")]
     InvalidBatch(String),
+    #[error("invalid public values: {0}")]
+    InvalidPublicValues(String),
 }
 
 pub fn verify_batch_witness(
@@ -96,6 +126,21 @@ fn public_values(commitment: RollupBatchCommitment) -> BatchValidityPublicValues
 
 fn invalid_batch(error: ChainError) -> ValidityError {
     ValidityError::InvalidBatch(error.to_string())
+}
+
+fn decode_root(value: &str) -> Result<[u8; 32], ValidityError> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 64 {
+        return Err(ValidityError::InvalidPublicValues(
+            "roots must contain exactly 32 bytes".into(),
+        ));
+    }
+    let mut result = [0u8; 32];
+    for (index, byte) in result.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| ValidityError::InvalidPublicValues("root is not hexadecimal".into()))?;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -168,5 +213,24 @@ mod tests {
             blocks: vec![forged_block],
         })
         .is_err());
+    }
+
+    #[test]
+    fn evm_public_values_match_solidity_abi_layout() {
+        let values = BatchValidityPublicValues {
+            batch_number: 7,
+            prev_state_root: "11".repeat(32),
+            new_state_root: "22".repeat(32),
+            transaction_root: "33".repeat(32),
+            block_hash_root: "44".repeat(32),
+            data_hash: "55".repeat(32),
+            transaction_count: 9,
+        };
+
+        let encoded = values.encode_evm().unwrap();
+        assert_eq!(encoded.len(), 224);
+        assert_eq!(&encoded[24..32], &7u64.to_be_bytes());
+        assert_eq!(&encoded[32..64], &[0x11; 32]);
+        assert_eq!(&encoded[192 + 24..224], &9u64.to_be_bytes());
     }
 }
