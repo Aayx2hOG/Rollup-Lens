@@ -43,7 +43,6 @@ Thumbs.db
 # Codex/agent local workspace metadata
 .codex/
 .agents/
-.plans/
 .designs/
 next_project.txt
 docs/system-design.md

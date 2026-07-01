@@ -6,7 +6,7 @@ export function Shell({ children }: { children: ReactNode }) {
     <main className="relative min-h-screen overflow-hidden bg-ink">
       <div className="grid-mask pointer-events-none absolute inset-0" />
       <div className="beam-field pointer-events-none absolute inset-0" />
-      <div className="relative mx-auto flex w-full max-w-[88rem] flex-col gap-5 px-4 py-4 sm:px-6 lg:px-8">
+      <div className="relative mx-auto flex w-full max-w-[82rem] flex-col gap-5 px-4 py-4 sm:px-6 lg:px-8">
         {children}
       </div>
     </main>
@@ -15,7 +15,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
 export function Panel({ className, children, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <section className={cn("surface rounded-xl", className)} {...props}>
+    <section className={cn("surface rounded-2xl", className)} {...props}>
       {children}
     </section>
   );
@@ -40,14 +40,14 @@ export function Stat({
   };
 
   return (
-    <Panel className="relative min-h-32 overflow-hidden p-4">
+    <Panel className="relative min-h-28 overflow-hidden p-4">
       <div className={cn("absolute inset-x-0 top-0 h-px bg-gradient-to-r to-transparent", accents[accent])} />
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs font-medium uppercase tracking-[0.18em] text-white/44">{label}</div>
         <div className={cn("h-2 w-2 rounded-full bg-current", accents[accent])} />
       </div>
-      <div className="mt-4 text-3xl font-semibold leading-none text-white sm:text-4xl">{value}</div>
-      <div className="mt-3 text-sm leading-5 text-white/56">{detail}</div>
+      <div className="mt-3 text-3xl font-semibold leading-none text-white">{value}</div>
+      <div className="mt-2 text-sm leading-5 text-white/52">{detail}</div>
     </Panel>
   );
 }

@@ -4,6 +4,13 @@ React/Vite explorer dashboard for the local zk-rollup chain.
 
 ## Run
 
+On a new database, initialize genesis once from a real account allocation as
+described in the repository README:
+
+```bash
+bun run genesis:init genesis.json
+```
+
 Start the Postgres-backed API from the repository root:
 
 ```bash

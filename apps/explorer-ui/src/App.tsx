@@ -4,7 +4,6 @@ import {
   Activity,
   ArrowRight,
   ArrowUpRight,
-  BarChart3,
   Blocks,
   CheckCircle2,
   Clock3,
@@ -15,7 +14,6 @@ import {
   Gauge,
   Landmark,
   Layers3,
-  Network,
   PackageCheck,
   Play,
   RefreshCcw,
@@ -23,7 +21,6 @@ import {
   Search,
   Send,
   ShieldAlert,
-  Users,
   Wallet,
   XCircle,
 } from "lucide-react";
@@ -43,16 +40,14 @@ import {
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
 import { Badge, IconButton, Panel, Shell, Skeleton, Stat } from "./components/ui";
 
-const tabs = ["Overview", "Blocks", "Accounts", "Rollup", "Sequencer", "Health"] as const;
+const tabs = ["Overview", "Activity", "Settlement", "Operate"] as const;
 type Tab = (typeof tabs)[number];
 
 const tabMeta: Record<Tab, { label: string; icon: React.ReactNode }> = {
-  Overview: { label: "Dashboard", icon: <Gauge className="h-4 w-4" /> },
-  Blocks: { label: "Activity", icon: <Blocks className="h-4 w-4" /> },
-  Accounts: { label: "People", icon: <Users className="h-4 w-4" /> },
-  Rollup: { label: "Settlement", icon: <PackageCheck className="h-4 w-4" /> },
-  Sequencer: { label: "Send", icon: <Send className="h-4 w-4" /> },
-  Health: { label: "System", icon: <ShieldAlert className="h-4 w-4" /> },
+  Overview: { label: "Overview", icon: <Gauge className="h-4 w-4" /> },
+  Activity: { label: "Activity", icon: <Blocks className="h-4 w-4" /> },
+  Settlement: { label: "Settlement", icon: <PackageCheck className="h-4 w-4" /> },
+  Operate: { label: "Operate", icon: <Send className="h-4 w-4" /> },
 };
 
 export function App() {
@@ -146,15 +141,15 @@ export function App() {
       setSearchResult(result);
       if (result.kind === "Block") {
         setSelectedHeight(result.data.height);
-        setActiveTab("Blocks");
+        setActiveTab("Activity");
       }
       if (result.kind === "Account") {
         setSelectedAccount(result.data.address);
-        setActiveTab("Accounts");
+        setActiveTab("Activity");
       }
       if (result.kind === "Transaction") {
         setSelectedTx(result.data.hash);
-        setActiveTab("Blocks");
+        setActiveTab("Activity");
       }
     } catch (error) {
       setSearchResult(null);
@@ -172,12 +167,12 @@ export function App() {
                 <Layers3 className="h-5 w-5" />
               </div>
               <div className="min-w-0">
-                <h1 className="truncate text-xl font-semibold leading-tight text-white sm:text-2xl">RollupLens Explorer</h1>
+                <h1 className="truncate text-xl font-semibold leading-tight text-white sm:text-2xl">RollupLens</h1>
                 <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-white/56 sm:text-sm">
                   <Badge tone={readStatus === "ok" ? "good" : "warn"}>
                     {readStatusLabel(readStatus)}
                   </Badge>
-                  <span>Transfers, accounts, and settlement</span>
+                  <span>See how L2 activity becomes a verified L1 state</span>
                   <span className="hidden text-white/24 sm:inline">/</span>
                   <span className="hash max-w-[12rem]">{shortHash(summary.data?.latest_block_hash)}</span>
                 </div>
@@ -218,8 +213,8 @@ export function App() {
             summary={summary.data}
             latestBlock={blockItems[0]}
             pendingTransfers={summary.data?.pending_transaction_count ?? 0}
-            onOpenActivity={() => setActiveTab("Blocks")}
-            onOpenSettlement={() => setActiveTab("Rollup")}
+            onOpenActivity={() => setActiveTab("Activity")}
+            onOpenSettlement={() => setActiveTab("Settlement")}
           />
           <SummaryStats summary={summary.data} loading={summary.isLoading} />
           <Overview
@@ -230,19 +225,19 @@ export function App() {
             onSelectBlock={setSelectedHeight}
             onSelectAccount={(address) => {
               setSelectedAccount(address);
-              setActiveTab("Accounts");
+              setActiveTab("Activity");
             }}
           />
         </div>
       )}
 
-      {activeTab === "Blocks" && (
+      {activeTab === "Activity" && (
         <div className="grid gap-5">
           <PageIntro
             icon={<Blocks className="h-5 w-5" />}
             title="Activity"
-            description="Inspect grouped transfers, block fingerprints, sender and receiver flow, and individual transfer details."
-            meta={`${blockItems.length}/${blockTotal} groups loaded`}
+            description="Follow transfers through L2 blocks, then inspect the current balance and nonce for any wallet involved."
+            meta={`${blockItems.length}/${blockTotal} blocks`}
           />
           <BlocksView
             blocks={blockItems}
@@ -256,20 +251,9 @@ export function App() {
             onSelectBlock={setSelectedHeight}
             onSelectAccount={(address) => {
               setSelectedAccount(address);
-              setActiveTab("Accounts");
+              setActiveTab("Activity");
             }}
             onSelectTx={setSelectedTx}
-          />
-        </div>
-      )}
-
-      {activeTab === "Accounts" && (
-        <div className="grid gap-5">
-          <PageIntro
-            icon={<Users className="h-5 w-5" />}
-            title="People"
-            description="Look up wallet balances, open senders and receivers from current activity, and keep account state separate from block browsing."
-            meta={selectedAccount ? shortHash(selectedAccount) : "no wallet selected"}
           />
           <AccountsView
             candidates={accountsFromBlocks}
@@ -281,13 +265,13 @@ export function App() {
         </div>
       )}
 
-      {activeTab === "Rollup" && (
+      {activeTab === "Settlement" && (
         <div className="grid gap-5">
           <PageIntro
             icon={<PackageCheck className="h-5 w-5" />}
             title="Settlement"
-            description="Review settlement packages, L1 receipt metadata, state commitments, and the transfers included in each package."
-            meta={`${batchItems.length}/${batchTotal} packages`}
+            description="Verify which L2 batches reached Ethereum and inspect the state commitments and proof-related receipt data."
+            meta={`${batchItems.length}/${batchTotal} batches`}
           />
           <RollupView
             batches={batchItems}
@@ -298,19 +282,19 @@ export function App() {
             onSelectBatch={setSelectedBatch}
             onSelectTx={(hash) => {
               setSelectedTx(hash);
-              setActiveTab("Blocks");
+              setActiveTab("Activity");
             }}
           />
         </div>
       )}
 
-      {activeTab === "Sequencer" && (
+      {activeTab === "Operate" && (
         <div className="grid gap-5">
           <PageIntro
             icon={<Send className="h-5 w-5" />}
-            title="Send"
-            description="Submit signed transfer JSON and group waiting transfers into the next local activity block."
-            meta={`${transactionPool.data?.total ?? 0} waiting or processed`}
+            title="Operate the local rollup"
+            description="Add a signed transfer, build the next L2 block, and check service health from one place."
+            meta={health.data?.status ?? "checking"}
           />
           <SequencerView
             pool={transactionPool.data?.items ?? []}
@@ -321,20 +305,9 @@ export function App() {
             }}
             onSequenced={async (height) => {
               setSelectedHeight(height);
-              setActiveTab("Blocks");
+              setActiveTab("Activity");
               await refreshAll();
             }}
-          />
-        </div>
-      )}
-
-      {activeTab === "Health" && (
-        <div className="grid gap-5">
-          <PageIntro
-            icon={<ShieldAlert className="h-5 w-5" />}
-            title="System"
-            description="Monitor API status, indexed data consistency, and recent service events without mixing them into explorer workflows."
-            meta={health.data?.status ?? "checking"}
           />
           <HealthView health={health.data} errors={errors.data ?? []} summary={summary.data} />
         </div>
@@ -555,21 +528,21 @@ function HomeHero({
 }) {
   const live = readStatus === "ok";
   return (
-    <section className="relative overflow-hidden rounded-[1.4rem] border border-white/10 bg-white/[0.025] px-4 py-6 shadow-2xl shadow-black/20 sm:px-6 lg:px-8">
+    <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.025] px-5 py-7 shadow-xl shadow-black/20 sm:px-7">
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent" />
-      <div className="grid min-h-[30rem] grid-cols-1 items-center gap-8 lg:grid-cols-[0.92fr_1.08fr]">
+      <div className="grid grid-cols-1 items-center gap-8 lg:grid-cols-[1.05fr_0.95fr]">
         <div className="max-w-3xl">
-          <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 py-1.5 text-xs font-medium text-white/68">
+          <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 py-1.5 text-xs font-medium text-white/68">
             <span className={cn("h-2 w-2 rounded-full", live ? "bg-mint shadow-[0_0_18px_rgba(88,244,183,0.8)]" : "bg-amber")} />
-            {live ? "Live rollup monitor" : "Waiting for local services"}
+            {live ? "Local rollup is live" : "Waiting for local services"}
           </div>
-          <h2 className="max-w-4xl text-4xl font-semibold leading-[1.02] text-white sm:text-5xl lg:text-6xl">
-            A settlement-aware explorer for local rollup operations.
+          <h2 className="max-w-3xl text-4xl font-semibold leading-[1.05] text-white sm:text-5xl">
+            Follow a transaction from L2 execution to L1 settlement.
           </h2>
-          <p className="mt-5 max-w-2xl text-base leading-7 text-white/62 sm:text-lg">
-            Track transfers from intake to grouped blocks, settlement packages, and L1 receipts without digging through logs or raw database rows.
+          <p className="mt-4 max-w-2xl text-base leading-7 text-white/62">
+            RollupLens turns blocks, state roots, validity batches, and Ethereum receipts into one understandable workflow.
           </p>
-          <div className="mt-7 flex flex-col gap-3 sm:flex-row">
+          <div className="mt-6 flex flex-col gap-3 sm:flex-row">
             <button
               onClick={onOpenActivity}
               className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-mint px-4 text-sm font-semibold text-ink shadow-lg shadow-mint/10 transition hover:bg-mint/90"
@@ -585,7 +558,7 @@ function HomeHero({
               <Landmark className="h-4 w-4" />
             </button>
           </div>
-          <div className="mt-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="mt-7 grid grid-cols-2 gap-3 sm:grid-cols-4">
             <HeroMetric label="Latest block" value={summary?.height ?? "none"} />
             <HeroMetric label="Transfers" value={formatNumber(summary?.transaction_count)} />
             <HeroMetric label="Wallets" value={formatNumber(summary?.account_count)} />
@@ -593,28 +566,55 @@ function HomeHero({
           </div>
         </div>
 
-        <div className="hero-visual relative min-h-[26rem] overflow-hidden rounded-[1.25rem] border border-white/10 p-4">
-          <div className="scan-line absolute left-0 top-24 h-px w-full" />
-          <div className="absolute inset-4 rounded-2xl border border-white/8" />
-          <div className="absolute left-8 top-8 right-8 flex items-center justify-between text-xs text-white/42">
-            <span>rollup path</span>
-            <span className="hash">{shortHash(latestBlock?.block_hash, 8, 6)}</span>
+        <div className="rounded-2xl border border-white/10 bg-black/20 p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-medium uppercase tracking-[0.18em] text-mint">How to use this explorer</div>
+              <div className="mt-1 text-sm text-white/48">Three steps explain the complete rollup path.</div>
+            </div>
+            <Badge tone={summary?.valid ? "good" : "warn"}>{summary?.valid ? "State valid" : "Check state"}</Badge>
           </div>
-          <TopologyNode className="left-[8%] top-[34%]" icon={<Send className="h-4 w-4" />} label="Intake" value={`${pendingTransfers} waiting`} tone="mint" />
-          <TopologyNode className="left-[35%] top-[18%]" icon={<Cpu className="h-4 w-4" />} label="Executor" value={summary?.valid ? "consistent" : "review"} tone="cyan" />
-          <TopologyNode className="left-[57%] top-[48%]" icon={<PackageCheck className="h-4 w-4" />} label="Package" value={latestBlock ? `block ${latestBlock.height}` : "idle"} tone="amber" />
-          <TopologyNode className="right-[7%] top-[28%]" icon={<Landmark className="h-4 w-4" />} label="L1 receipt" value="indexed" tone="rose" />
-          <div className="absolute left-[18%] top-[43%] h-px w-[22%] rotate-[-18deg] bg-gradient-to-r from-mint/70 to-cyan/60" />
-          <div className="absolute left-[45%] top-[34%] h-px w-[20%] rotate-[28deg] bg-gradient-to-r from-cyan/60 to-amber/70" />
-          <div className="absolute left-[67%] top-[45%] h-px w-[22%] rotate-[-16deg] bg-gradient-to-r from-amber/70 to-rose/70" />
-          <div className="absolute bottom-5 left-5 right-5 grid grid-cols-3 gap-3">
-            <SignalTile icon={<Network className="h-4 w-4" />} label="Blocks" value={latestBlock ? String(latestBlock.height) : "0"} />
-            <SignalTile icon={<BarChart3 className="h-4 w-4" />} label="Throughput" value={pluralize(latestBlock?.transaction_count ?? 0, "transfer")} />
-            <SignalTile icon={<ShieldAlert className="h-4 w-4" />} label="Status" value={readStatusLabel(readStatus)} />
+          <div className="mt-5 grid gap-3">
+            <JourneyStep number="1" icon={<Send className="h-4 w-4" />} title="Submit and execute" description="Signed transfers enter the pool and become an L2 block." />
+            <JourneyStep number="2" icon={<Cpu className="h-4 w-4" />} title="Prove the new state" description="The batch commits to transaction, block, and state roots." />
+            <JourneyStep number="3" icon={<Landmark className="h-4 w-4" />} title="Settle on Ethereum" description="The validity proof authorizes the new finalized state root." />
+          </div>
+          <div className="mt-4 flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.035] px-3 py-2 text-xs">
+            <span className="text-white/42">Latest L2 block</span>
+            <span className="hash text-white/72">
+              {latestBlock ? `#${latestBlock.height} · ${shortHash(latestBlock.block_hash, 8, 6)}` : "No blocks yet"}
+            </span>
           </div>
         </div>
       </div>
     </section>
+  );
+}
+
+function JourneyStep({
+  number,
+  icon,
+  title,
+  description,
+}: {
+  number: string;
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="flex gap-3 rounded-xl border border-white/8 bg-white/[0.035] p-3">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-sm font-semibold text-mint">
+        {number}
+      </div>
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 text-sm font-semibold text-white">
+          <span className="text-mint">{icon}</span>
+          {title}
+        </div>
+        <p className="mt-1 text-sm leading-5 text-white/50">{description}</p>
+      </div>
+    </div>
   );
 }
 
@@ -623,48 +623,6 @@ function HeroMetric({ label, value }: { label: string; value: React.ReactNode })
     <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
       <div className="text-xs text-white/42">{label}</div>
       <div className="mt-2 text-xl font-semibold text-white">{value}</div>
-    </div>
-  );
-}
-
-function TopologyNode({
-  className,
-  icon,
-  label,
-  value,
-  tone,
-}: {
-  className: string;
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  tone: "mint" | "cyan" | "amber" | "rose";
-}) {
-  const tones = {
-    mint: "border-mint/25 bg-mint/10 text-mint",
-    cyan: "border-cyan/25 bg-cyan/10 text-cyan",
-    amber: "border-amber/25 bg-amber/10 text-amber",
-    rose: "border-rose/25 bg-rose/10 text-rose",
-  };
-  return (
-    <div className={cn("absolute min-w-32 rounded-xl border p-3 shadow-xl shadow-black/20 backdrop-blur", tones[tone], className)}>
-      <div className="flex items-center gap-2 text-sm font-semibold">
-        {icon}
-        {label}
-      </div>
-      <div className="mt-2 text-xs text-white/58">{value}</div>
-    </div>
-  );
-}
-
-function SignalTile({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
-  return (
-    <div className="min-w-0 rounded-xl border border-white/10 bg-black/20 p-3">
-      <div className="flex items-center gap-2 text-xs text-white/46">
-        <span className="text-mint">{icon}</span>
-        {label}
-      </div>
-      <div className="mt-2 truncate text-sm font-semibold text-white">{value}</div>
     </div>
   );
 }

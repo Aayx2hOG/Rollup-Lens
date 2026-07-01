@@ -12,7 +12,7 @@ use chain_core::{
     rollup_batch_commitment, sign_transfer, transaction_hash, Account, Chain,
     RollupBatchCommitment,
 };
-use explorer_api::app_with_pool;
+use explorer_api::{app_with_pool, initialize_genesis, GenesisConfig};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
@@ -28,6 +28,66 @@ async fn postgres_router_exposes_index_without_database_queries() {
 
     let index = get_json(app, "/").await;
     assert_eq!(index["name"], json!("zk-rollup explorer api"));
+}
+
+#[tokio::test]
+async fn genesis_initialization_is_atomic_and_one_time() {
+    let Some(database_url) = optional_test_database_url() else {
+        eprintln!("skipping Postgres integration test; set TEST_DATABASE_URL or DATABASE_URL");
+        return;
+    };
+
+    let alice = create_keypair();
+    let bob = create_keypair();
+    let accounts = vec![
+        Account {
+            address: address_from_public_key(&alice.public_key_base64).unwrap(),
+            balance: 1_000,
+            nonce: 0,
+        },
+        Account {
+            address: address_from_public_key(&bob.public_key_base64).unwrap(),
+            balance: 0,
+            nonce: 0,
+        },
+    ];
+    let mut expected_chain = new_chain(accounts.clone()).unwrap();
+    let expected_genesis = finalize_genesis(&mut expected_chain).unwrap();
+    let (pool, schema) = setup_postgres_test_database(&database_url).await;
+
+    let initialized = initialize_genesis(
+        &pool,
+        GenesisConfig {
+            accounts: accounts.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(initialized.account_count, 2);
+    assert_eq!(initialized.state_root, expected_genesis.state_root);
+    assert_eq!(initialized.block_hash, expected_genesis.block_hash);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM blocks")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM accounts")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+
+    let repeated = initialize_genesis(&pool, GenesisConfig { accounts })
+        .await
+        .unwrap_err();
+    assert!(repeated.to_string().contains("requires empty"));
+
+    teardown_postgres_test_database(&pool, &schema).await;
 }
 
 #[tokio::test]

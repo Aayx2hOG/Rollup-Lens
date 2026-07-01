@@ -54,6 +54,52 @@ Apply migrations:
 bun run db:migrate
 ```
 
+## Initialize Genesis
+
+Genesis is a one-time state allocation, not demo data. Create or import the
+wallets that should control the allocated balances:
+
+```bash
+cargo run -p wallet-cli -- create --output alice-keypair.json
+cargo run -p wallet-cli -- address --key-file alice-keypair.json
+```
+
+Create `genesis.json` using the printed address:
+
+```json
+{
+  "accounts": [
+    {
+      "address": "<address printed by wallet-cli>",
+      "balance": 1000000,
+      "nonce": 0
+    }
+  ]
+}
+```
+
+Initialize the database:
+
+```bash
+bun run genesis:init genesis.json
+```
+
+Or invoke the binary directly:
+
+```bash
+cargo run -p explorer-api -- \
+  --initialize-genesis genesis.json
+```
+
+The command calculates the sparse account-state root and genesis block through
+`chain-core`, writes the block and all accounts atomically, prints the resulting
+state root and block hash, and exits. It refuses to run when blocks or accounts
+already exist.
+
+Keep keypair files outside source control. Genesis contains only public
+addresses, balances, and nonces; private keys never belong in the allocation
+file or database.
+
 ## Explorer API
 
 Run the Postgres-backed API:

@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
 };
 use chain_core::{
-    apply_transaction_to_state, produce_block_from_indexed_state,
+    apply_transaction_to_state, finalize_genesis, new_chain, produce_block_from_indexed_state,
     rollup_batch_commitment_from_blocks, state_root, transaction_hash, Account, Block,
     RollupBatchCommitment, Transfer,
 };
@@ -26,6 +26,99 @@ use tower_http::cors::CorsLayer;
 const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
 const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 100;
+const GENESIS_INITIALIZATION_LOCK: i64 = 8_739_912_441;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisConfig {
+    pub accounts: Vec<Account>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GenesisInitialization {
+    pub account_count: usize,
+    pub state_root: String,
+    pub block_hash: String,
+}
+
+/// Initializes the canonical genesis state exactly once.
+///
+/// The block and all account allocations are derived through `chain-core` and
+/// committed in one database transaction. A transaction-scoped advisory lock
+/// serializes concurrent initialization attempts.
+pub async fn initialize_genesis(
+    pool: &PgPool,
+    config: GenesisConfig,
+) -> anyhow::Result<GenesisInitialization> {
+    let mut chain = new_chain(config.accounts)?;
+    let genesis = finalize_genesis(&mut chain)?;
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(GENESIS_INITIALIZATION_LOCK)
+        .execute(&mut *tx)
+        .await?;
+
+    let block_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blocks")
+        .fetch_one(&mut *tx)
+        .await?;
+    let account_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
+        .fetch_one(&mut *tx)
+        .await?;
+    if block_count != 0 || account_count != 0 {
+        anyhow::bail!(
+            "genesis initialization requires empty blocks and accounts tables; found {block_count} blocks and {account_count} accounts"
+        );
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO blocks (
+            height, parent_hash, state_root, block_hash, transaction_count, raw_block
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(0_i64)
+    .bind(&genesis.parent_hash)
+    .bind(&genesis.state_root)
+    .bind(&genesis.block_hash)
+    .bind(0_i32)
+    .bind(serde_json::to_value(&genesis)?)
+    .execute(&mut *tx)
+    .await?;
+
+    for account in chain.accounts.values() {
+        sqlx::query(
+            r#"
+            INSERT INTO accounts (address, balance, nonce)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(&account.address)
+        .bind(i64::try_from(account.balance).map_err(|_| {
+            anyhow::anyhow!(
+                "account {} balance exceeds PostgreSQL BIGINT",
+                account.address
+            )
+        })?)
+        .bind(i64::try_from(account.nonce).map_err(|_| {
+            anyhow::anyhow!(
+                "account {} nonce exceeds PostgreSQL BIGINT",
+                account.address
+            )
+        })?)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(GenesisInitialization {
+        account_count: chain.accounts.len(),
+        state_root: genesis.state_root,
+        block_hash: genesis.block_hash,
+    })
+}
 
 #[derive(Debug, Clone)]
 struct AppState {

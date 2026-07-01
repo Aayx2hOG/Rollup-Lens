@@ -1,8 +1,10 @@
-use std::{env, net::SocketAddr, time::Duration};
+use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use explorer_api::{app_with_pool, sequence_pending_transactions};
+use explorer_api::{
+    app_with_pool, initialize_genesis, sequence_pending_transactions, GenesisConfig,
+};
 use sqlx::postgres::PgPoolOptions;
 
 const PRISMA_ENV_PATH: &str = "prisma/.env";
@@ -18,27 +20,48 @@ struct Cli {
     bind: SocketAddr,
 
     #[arg(long)]
-    auto_demo: bool,
+    auto_sequence: bool,
 
     #[arg(long, default_value_t = 10)]
-    auto_demo_interval_seconds: u64,
+    auto_sequence_interval_seconds: u64,
+
+    #[arg(
+        long,
+        value_name = "GENESIS_JSON",
+        conflicts_with = "auto_sequence",
+        help = "Initialize genesis atomically from an account allocation file, then exit"
+    )]
+    initialize_genesis: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let listener = tokio::net::TcpListener::bind(cli.bind)
-        .await
-        .with_context(|| format!("failed to bind explorer API to {}", cli.bind))?;
-
     let database_url = database_url(cli.database_url)?;
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
         .context("failed to connect to Postgres")?;
-    if cli.auto_demo {
-        spawn_auto_demo(pool.clone(), cli.auto_demo_interval_seconds);
+
+    if let Some(path) = &cli.initialize_genesis {
+        let config: GenesisConfig = serde_json::from_slice(
+            &fs::read(path)
+                .with_context(|| format!("failed to read genesis file {}", path.display()))?,
+        )
+        .with_context(|| format!("failed to parse genesis file {}", path.display()))?;
+        let initialized = initialize_genesis(&pool, config)
+            .await
+            .context("genesis initialization failed")?;
+        println!("{}", serde_json::to_string_pretty(&initialized)?);
+        return Ok(());
+    }
+
+    let listener = tokio::net::TcpListener::bind(cli.bind)
+        .await
+        .with_context(|| format!("failed to bind explorer API to {}", cli.bind))?;
+    if cli.auto_sequence {
+        spawn_auto_sequencer(pool.clone(), cli.auto_sequence_interval_seconds);
     }
 
     let router = app_with_pool(pool);
@@ -49,20 +72,20 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn spawn_auto_demo(pool: sqlx::PgPool, interval_seconds: u64) {
+fn spawn_auto_sequencer(pool: sqlx::PgPool, interval_seconds: u64) {
     let interval = Duration::from_secs(interval_seconds.max(1));
     tokio::spawn(async move {
         println!(
-            "auto demo sequencer enabled; checking pending transactions every {} seconds",
+            "automatic sequencer enabled; checking pending transactions every {} seconds",
             interval.as_secs()
         );
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
             match sequence_pending_transactions(pool.clone(), 100).await {
-                Ok(true) => println!("auto demo sequenced pending transactions"),
+                Ok(true) => println!("automatic sequencer processed pending transactions"),
                 Ok(false) => {}
-                Err(error) => eprintln!("auto demo sequencing failed: {error}"),
+                Err(error) => eprintln!("automatic sequencing failed: {error}"),
             }
         }
     });
