@@ -4,6 +4,38 @@
 settlement. The Rust chain owns execution and state-root creation; the contract
 owns proof verification and finality.
 
+For new validity-rollup deployments, prefer
+`ValidityRollupSettlement.sol`. It deliberately removes the optimistic
+challenge, bond, pending-batch, withdrawal, and governance-resolution state.
+`RollupSettlement.sol` remains available as the backwards-compatible hybrid.
+
+## Validity-Only Storage
+
+The minimal contract persists only:
+
+- `finalizedStateRoot`
+- `nextBatchNumber`
+- one `batchCommitments[batchNumber]` value per batch
+
+The batch commitment is `keccak256(publicValues)`, covering the batch number,
+five roots/commitments, and transaction count proved by SP1. Full historical
+fields are emitted in `BatchFinalized` for indexers instead of occupying
+permanent storage slots.
+
+The validity-only constructor is:
+
+```solidity
+new ValidityRollupSettlement(
+    genesisStateRoot,
+    officialSp1Verifier,
+    programVKey
+);
+```
+
+It exposes the same `submitBatchWithProof` signature already used by
+`settlement-client --proof`, so the client requires only the new deployed
+contract address.
+
 ## Security Rules
 
 - Only the configured sequencer can submit batches.
@@ -82,6 +114,10 @@ The Foundry harness in `contracts/test/RollupSettlement.t.sol` covers:
 - immediate finality for a validity-proven batch
 - rejection of invalid proofs
 - rejection when proof public values differ from batch arguments
+
+`contracts/test/ValidityRollupSettlement.t.sol` additionally covers minimal
+commitment storage, sequential state updates, argument binding, and atomic
+rejection without state writes.
 
 Run:
 

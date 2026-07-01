@@ -13,6 +13,7 @@ crates/
   validity-core/    Shared batch validity statement and witness verification
 contracts/
   RollupSettlement.sol  Optimistic L1 settlement rules for rollup batches
+  ValidityRollupSettlement.sol  Minimal SP1 validity-only settlement
 apps/
   wallet-cli/       Development wallet utilities
   merkle-cli/       Merkle proof utilities
