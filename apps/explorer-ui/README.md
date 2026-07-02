@@ -22,26 +22,26 @@ described in the repository README:
 bun run genesis:init genesis.json
 ```
 
-Start the Postgres-backed API from the repository root:
-
-```bash
-bun run api:dev
-```
-
-In a second terminal, start the UI from `apps/explorer-ui`:
+Start the UI from `apps/explorer-ui`:
 
 ```bash
 bun install
 bun run dev
 ```
 
-The Vite dev server proxies `/api/*` to `http://127.0.0.1:3000`.
+This single command starts the Explorer API, waits until it is healthy, and
+then starts Vite. Stopping it also stops both processes. If an API is already
+healthy on `127.0.0.1:3000`, it is reused and left running when Vite stops.
+Vite proxies `/api/*` to that API.
 
-To point the UI at a different API without the dev proxy:
+To point the UI at a different API, the launcher skips the local API:
 
 ```bash
 VITE_EXPLORER_API_BASE=http://127.0.0.1:3000 bun run dev
 ```
+
+The database must still be reachable through `DATABASE_URL` or `prisma/.env`,
+and its migrations and one-time genesis initialization must already be applied.
 
 ## Checks
 

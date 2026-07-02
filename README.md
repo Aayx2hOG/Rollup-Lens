@@ -167,12 +167,17 @@ From the repository root, the same UI command is also available as:
 bun run ui:dev
 ```
 
-For day-to-day development after Postgres is running and migrations are applied,
-start both the API and UI together:
+For day-to-day development after the database is configured and migrations are
+applied, start the complete application:
 
 ```bash
 bun run dev
 ```
+
+The UI launcher starts the API automatically, waits for its health endpoint,
+and then starts Vite. `Ctrl+C` stops both. The same integrated command is
+available inside `apps/explorer-ui` as `bun run dev`, so a separate backend
+terminal is not required.
 
 Vite proxies `/api/*` to `http://127.0.0.1:3000` during development. The UI
 includes overview, block, account, rollup batch, sequencer, and API health

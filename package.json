@@ -5,8 +5,8 @@
     "db:migrate": "bunx prisma migrate dev",
     "genesis:init": "cargo run -p explorer-api -- --initialize-genesis",
     "api:dev": "cargo run -p explorer-api -- --bind 127.0.0.1:3000",
-    "ui:dev": "bun --cwd apps/explorer-ui run dev",
-    "dev": "sh -c 'trap \"kill 0\" EXIT; bun run api:dev & bun run ui:dev'"
+    "ui:dev": "bun run --cwd apps/explorer-ui dev",
+    "dev": "bun run ui:dev"
   },
   "dependencies": {
     "@prisma/client": "^7.8.0"

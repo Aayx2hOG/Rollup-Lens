@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "bun scripts/dev.mjs",
+    "dev:ui-only": "vite --host 0.0.0.0",
     "build": "bunx tsc && bunx vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "bun test"
