@@ -1,5 +1,16 @@
 # Explorer UI
 
+## Wallet operation
+
+The Operate view supports `wallet-cli` JSON key files and browser-generated
+keypairs with the same Ed25519 format. It constructs the domain-separated
+`chain-core` transfer payload, signs locally, and submits only the signed
+transfer to `POST /rollup/transactions`.
+
+Keys are not written to browser storage or sent to the explorer API. A newly
+created keypair is exported immediately and remains usable in memory until the
+page is reloaded or the wallet is locked.
+
 React/Vite explorer dashboard for the local zk-rollup chain.
 
 ## Run

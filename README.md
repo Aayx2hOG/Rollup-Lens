@@ -178,6 +178,15 @@ Vite proxies `/api/*` to `http://127.0.0.1:3000` during development. The UI
 includes overview, block, account, rollup batch, sequencer, and API health
 views.
 
+The Operate view can load the JSON key file produced by `wallet-cli`, or create
+and export a compatible keypair. Transfer signing happens in the browser and
+only the signed transfer is sent to the API. Private keys are held in memory
+for the current page session; they are never sent to or persisted by the API.
+
+Creating a browser wallet does not allocate funds. Its address must already be
+part of the explicit genesis allocation (or receive funds through a future
+deposit path) before it can submit transfers.
+
 ## Wallet CLI
 
 Create a development keypair:

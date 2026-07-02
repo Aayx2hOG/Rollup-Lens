@@ -22,6 +22,9 @@ alice.json
 bob.json
 dev-keypair.json
 imported-keypair.json
+sender-keypair.json
+recipient-keypair.json
+genesis.json
 *.signature.json
 *.proof.json
 *.batch.json

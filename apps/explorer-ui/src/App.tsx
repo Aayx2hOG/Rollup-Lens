@@ -38,6 +38,14 @@ import {
   type TransactionPoolEntry,
 } from "./lib/api";
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
+import {
+  addressFromPublicKey,
+  createKeypair,
+  downloadKeypair,
+  importKeypair,
+  signTransfer,
+  type RollupKeypair,
+} from "./lib/wallet";
 import { Badge, IconButton, Panel, Shell, Skeleton, Stat } from "./components/ui";
 
 const tabs = ["Overview", "Activity", "Settlement", "Operate"] as const;
@@ -293,7 +301,7 @@ export function App() {
           <PageIntro
             icon={<Send className="h-5 w-5" />}
             title="Operate the local rollup"
-            description="Add a signed transfer, build the next L2 block, and check service health from one place."
+            description="Sign a real transfer in this browser, submit it to the transaction pool, and build the next L2 block."
             meta={health.data?.status ?? "checking"}
           />
           <SequencerView
@@ -954,10 +962,68 @@ function SequencerView({
   onSequenced: (height: number) => Promise<void>;
 }) {
   const [transferJson, setTransferJson] = useState("");
+  const [keypair, setKeypair] = useState<RollupKeypair | null>(null);
+  const [recipient, setRecipient] = useState("");
+  const [amount, setAmount] = useState(1);
+  const [showSignedJson, setShowSignedJson] = useState(false);
   const [limit, setLimit] = useState(100);
   const [submitting, setSubmitting] = useState(false);
   const [sequencing, setSequencing] = useState(false);
   const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
+  const walletAddress = keypair ? addressFromPublicKey(keypair.public_key_base64) : null;
+  const walletAccount = useQuery({
+    queryKey: ["account", walletAddress],
+    queryFn: () => api.account(walletAddress!),
+    enabled: Boolean(walletAddress),
+    retry: false,
+  });
+  const pendingFromWallet = walletAddress
+    ? pool.filter((entry) => entry.status === "pending" && entry.transfer.from === walletAddress).length
+    : 0;
+  const nextNonce = (walletAccount.data?.nonce ?? 0) + pendingFromWallet;
+
+  async function createWallet() {
+    setNotice(null);
+    try {
+      const created = await createKeypair();
+      downloadKeypair(created);
+      setKeypair(created);
+      setNotice({
+        tone: "neutral",
+        message: "Wallet created and key file exported. The private key remains in this browser session.",
+      });
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet creation failed" });
+    }
+  }
+
+  async function loadWallet(file: File) {
+    setNotice(null);
+    try {
+      const loaded = await importKeypair(await file.text());
+      setKeypair(loaded);
+      setNotice({ tone: "neutral", message: `Loaded wallet ${addressFromPublicKey(loaded.public_key_base64)} for this session.` });
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Key file import failed" });
+    }
+  }
+
+  async function signAndSubmitTransfer() {
+    if (!keypair || !walletAccount.data) return;
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const transfer = await signTransfer(keypair, recipient.trim(), amount, nextNonce);
+      const submitted = await api.submitTransaction(transfer);
+      setRecipient("");
+      setNotice({ tone: "good", message: `Signed transfer ${shortHash(submitted.hash, 10, 8)} is waiting to be grouped.` });
+      await onSubmitted(submitted.hash);
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Transaction submission failed" });
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   async function submitTransfer() {
     setSubmitting(true);
@@ -996,21 +1062,84 @@ function SequencerView({
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
       <div className="grid gap-4">
         <Panel className="p-4">
-          <SectionTitle icon={<Send className="h-4 w-4" />} title="Add a signed transfer" action="JSON from wallet CLI" flush />
-          <textarea
-            value={transferJson}
-            onChange={(event) => setTransferJson(event.target.value)}
-            placeholder='{"from":"...","to":"...","amount":5,"nonce":0,"public_key_base64":"...","signature_base64":"..."}'
-            className="mt-4 min-h-44 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
-          />
-          <button
-            onClick={submitTransfer}
-            disabled={submitting || transferJson.trim().length === 0}
-            className="mt-3 inline-flex items-center gap-2 rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Send className="h-4 w-4" />
-            Add transfer
+          <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Browser wallet" action="keys stay local" flush />
+          {!keypair ? (
+            <div className="mt-4 grid gap-3">
+              <p className="text-sm leading-6 text-white/58">
+                Load a wallet created by wallet-cli, or create a new compatible keypair and retain the exported file.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90">
+                  <Wallet className="h-4 w-4" />
+                  Load key file
+                  <input
+                    type="file"
+                    accept="application/json,.json"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void loadWallet(file);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                <button onClick={createWallet} className="rounded-lg border border-white/12 bg-white/[0.06] px-3 py-2 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint">
+                  Create and export
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 grid gap-3">
+              <HashLine label="Signing wallet" value={walletAddress} />
+              <div className="grid grid-cols-3 gap-2">
+                <MetricLine label="Balance" value={walletAccount.data?.balance ?? "not allocated"} />
+                <MetricLine label="Chain nonce" value={walletAccount.data?.nonce ?? "—"} />
+                <MetricLine label="Next nonce" value={nextNonce} />
+              </div>
+              {walletAccount.error && (
+                <div className="rounded-lg border border-amber/25 bg-amber/10 p-3 text-sm text-amber">
+                  This wallet has no genesis allocation or current account state.
+                </div>
+              )}
+              <label className="grid gap-2 text-sm text-white/62">
+                Recipient address
+                <input value={recipient} onChange={(event) => setRecipient(event.target.value)} className="h-10 rounded-lg border border-white/10 bg-white/[0.06] px-3 font-mono text-sm text-white outline-none focus:border-mint/40" />
+              </label>
+              <label className="grid gap-2 text-sm text-white/62">
+                Amount
+                <input type="number" min={1} step={1} value={amount} onChange={(event) => setAmount(Number(event.target.value))} className="h-10 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-white outline-none focus:border-mint/40" />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={signAndSubmitTransfer}
+                  disabled={submitting || !walletAccount.data || recipient.trim().length === 0}
+                  className="inline-flex items-center gap-2 rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Send className="h-4 w-4" />
+                  Sign and submit
+                </button>
+                <button onClick={() => setKeypair(null)} className="rounded-lg border border-white/12 px-3 py-2 text-sm text-white/58 hover:text-white">
+                  Lock wallet
+                </button>
+              </div>
+            </div>
+          )}
+          <button onClick={() => setShowSignedJson((shown) => !shown)} className="mt-4 text-xs text-white/42 hover:text-white/70">
+            {showSignedJson ? "Hide" : "Show"} advanced signed JSON submission
           </button>
+          {showSignedJson && (
+            <div className="mt-3">
+              <textarea
+                value={transferJson}
+                onChange={(event) => setTransferJson(event.target.value)}
+                placeholder='{"from":"...","to":"...","amount":5,"nonce":0,"public_key_base64":"...","signature_base64":"..."}'
+                className="min-h-36 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
+              />
+              <button onClick={submitTransfer} disabled={submitting || transferJson.trim().length === 0} className="mt-3 rounded-lg border border-mint/30 px-3 py-2 text-sm font-medium text-mint disabled:opacity-50">
+                Submit signed JSON
+              </button>
+            </div>
+          )}
         </Panel>
 
         <Panel className="p-4">
