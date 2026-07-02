@@ -199,6 +199,7 @@ async fn main() -> Result<()> {
                 persisted_status: Some(PersistedStatus {
                     batch_number: *batch_number,
                     status: "submitted",
+                    immediately_finalized: proof.is_some(),
                 }),
             }
         }
@@ -213,6 +214,7 @@ async fn main() -> Result<()> {
             persisted_status: Some(PersistedStatus {
                 batch_number: *batch_number,
                 status: "finalized",
+                immediately_finalized: false,
             }),
         },
         SettlementCommand::DepositBond { value } => CastCommand {
@@ -256,6 +258,20 @@ async fn main() -> Result<()> {
             &receipt_value,
         )
         .await?;
+        if persisted.immediately_finalized {
+            persist_settlement_status(
+                &cli.api_url,
+                persisted.batch_number,
+                "finalized",
+                &output.tx_hash,
+                &contract,
+                chain_id,
+                block_number,
+                gas_used,
+                &receipt_value,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -402,6 +418,7 @@ struct CastCommand {
 struct PersistedStatus {
     batch_number: u64,
     status: &'static str,
+    immediately_finalized: bool,
 }
 
 #[derive(Debug)]

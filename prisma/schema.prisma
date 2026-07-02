@@ -113,6 +113,7 @@ model RollupBatch {
   l1FinalizeGasUsed BigInt?                 @map("l1_finalize_gas_used")
   l1FinalizeReceipt Json?                   @map("l1_finalize_receipt")
   rawCommitment   Json                      @map("raw_commitment")
+  validityWitness Json?                     @map("validity_witness")
   transactions    RollupBatchTransaction[]
 
   @@index([startBlockHeight])

@@ -133,6 +133,7 @@ GET  /rollup/batches
 POST /rollup/batches
 GET  /rollup/batches/:batch_number
 GET  /rollup/batches/:batch_number/settlement-calldata
+GET  /rollup/batches/:batch_number/validity-witness
 GET  /errors
 GET  /errors/latest
 GET  /search/:query
@@ -150,6 +151,11 @@ rollup batch commitment.
 `GET /rollup/batches/:batch_number/settlement-calldata` exports the built batch
 in the argument order expected by `RollupSettlement.submitBatch`, including
 Solidity-ready `0x`-prefixed `bytes32` roots.
+
+The sequencer also persists the batch's private pre-state and current blocks
+atomically. `GET /rollup/batches/:batch_number/validity-witness` exports that
+input for `validity-prover`; a prover does not need to reconstruct historical
+account state from the latest snapshot.
 
 ## Explorer UI
 

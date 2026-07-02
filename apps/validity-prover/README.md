@@ -47,6 +47,13 @@ cargo run --release -p validity-prover -- \
   groth16 witness.json --evm-artifact-out batch-proof.json
 ```
 
+For a batch produced by the explorer sequencer, export its persisted witness:
+
+```bash
+curl http://127.0.0.1:3000/rollup/batches/0/validity-witness \
+  > witness.json
+```
+
 The JSON artifact contains:
 
 - `program_vkey`: the verification-key commitment that must equal the

@@ -1,6 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
+use chain_core::sign_transfer;
 use clap::{Parser, Subcommand};
 use wallet_core::{
     address_from_public_key, create_keypair, keypair_from_secret, public_key_from_secret,
@@ -89,6 +90,17 @@ enum Command {
         #[arg(long)]
         signature: String,
     },
+
+    SignTransfer {
+        #[arg(long)]
+        key_file: PathBuf,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        amount: u64,
+        #[arg(long)]
+        nonce: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -136,6 +148,16 @@ fn main() -> Result<()> {
             signature,
         } => {
             println!("{}", verify_message(&public_key, &message, &signature)?);
+        }
+        Command::SignTransfer {
+            key_file,
+            to,
+            amount,
+            nonce,
+        } => {
+            let keypair = read_keypair(&key_file)?;
+            let transfer = sign_transfer(&keypair.secret_key_base64, to, amount, nonce)?;
+            println!("{}", serde_json::to_string_pretty(&transfer)?);
         }
     }
 

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
+use validity_core::{verify_batch_witness, BatchValidityWitness};
 
 const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -409,6 +410,10 @@ pub fn app_with_pool(pool: PgPool) -> Router {
             get(rollup_batch_settlement_calldata),
         )
         .route(
+            "/rollup/batches/:batch_number/validity-witness",
+            get(rollup_batch_validity_witness),
+        )
+        .route(
             "/rollup/batches/:batch_number/settlement",
             post(update_rollup_batch_settlement),
         )
@@ -672,6 +677,27 @@ async fn rollup_batch_settlement_calldata(
         },
     )
     .await
+}
+
+async fn rollup_batch_validity_witness(
+    State(state): State<Arc<AppState>>,
+    Path(batch_number): Path<u64>,
+) -> Result<Json<Value>, ApiError> {
+    let witness = sqlx::query_scalar::<_, Option<Value>>(
+        "SELECT validity_witness FROM rollup_batches WHERE batch_number = $1",
+    )
+    .bind(to_i64(batch_number, "rollup batch number")?)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(database_error)?
+    .ok_or_else(|| ApiError::NotFound(format!("rollup batch {batch_number} not found")))?
+    .ok_or_else(|| {
+        ApiError::Conflict(format!(
+            "rollup batch {batch_number} has no persisted validity witness"
+        ))
+    })?;
+
+    Ok(Json(witness))
 }
 
 async fn update_rollup_batch_settlement(
@@ -1054,6 +1080,7 @@ impl DbSource {
             .iter()
             .map(|entry| entry.transfer.clone())
             .collect::<Vec<_>>();
+        let accounts_before = accounts.clone();
         let block = produce_block_from_indexed_state(&mut accounts, &latest_block, transactions)
             .map_err(|error| ApiError::BadRequest(error.to_string()))?;
 
@@ -1106,7 +1133,7 @@ impl DbSource {
             .map_err(database_error)?;
         }
 
-        let rollup_batch = rebuild_rollup_batch_tx(&mut tx).await?;
+        let rollup_batch = rebuild_rollup_batch_tx(&mut tx, accounts_before).await?;
         tx.commit().await.map_err(database_error)?;
 
         let included_transactions = accepted
@@ -1718,7 +1745,22 @@ async fn replace_accounts_tx(
 
 async fn rebuild_rollup_batch_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    accounts_before_latest_block: BTreeMap<String, Account>,
 ) -> Result<Option<RollupBatchSummary>, ApiError> {
+    let existing_witness = sqlx::query_scalar::<_, Option<Value>>(
+        "SELECT validity_witness FROM rollup_batches WHERE batch_number = 0",
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .flatten()
+    .map(|value| {
+        serde_json::from_value::<BatchValidityWitness>(value).map_err(|error| {
+            ApiError::InvalidIndexedData(format!("invalid persisted validity witness: {error}"))
+        })
+    })
+    .transpose()?;
+
     sqlx::query("DELETE FROM rollup_batch_transactions")
         .execute(&mut **tx)
         .await
@@ -1750,8 +1792,29 @@ async fn rebuild_rollup_batch_tx(
     let post_genesis_blocks = &blocks[1..];
     let commitment = rollup_batch_commitment_from_blocks(0, previous_block, post_genesis_blocks)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
+    let witness = BatchValidityWitness {
+        batch_number: 0,
+        accounts_before: existing_witness
+            .map(|witness| witness.accounts_before)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                reconstruct_pre_batch_accounts(
+                    accounts_before_latest_block,
+                    &post_genesis_blocks[..post_genesis_blocks.len() - 1],
+                )
+            })?,
+        previous_block: previous_block.clone(),
+        blocks: post_genesis_blocks.to_vec(),
+    };
+    let public_values = verify_batch_witness(&witness)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
+    if public_values.new_state_root != commitment.new_state_root {
+        return Err(ApiError::InvalidIndexedData(
+            "validity witness does not match rebuilt batch commitment".to_string(),
+        ));
+    }
 
-    insert_rollup_batch_tx(tx, &commitment, "built").await?;
+    insert_rollup_batch_tx(tx, &commitment, "built", &witness).await?;
     for block in post_genesis_blocks {
         for (transaction_index, transaction) in block.transactions.iter().enumerate() {
             let hash = transaction_hash(transaction);
@@ -1805,10 +1868,60 @@ async fn rebuild_rollup_batch_tx(
     }))
 }
 
+fn reconstruct_pre_batch_accounts(
+    mut accounts: BTreeMap<String, Account>,
+    blocks: &[Block],
+) -> Result<BTreeMap<String, Account>, ApiError> {
+    for block in blocks.iter().rev() {
+        for transfer in block.transactions.iter().rev() {
+            if transfer.from == transfer.to {
+                let account = accounts.get_mut(&transfer.from).ok_or_else(|| {
+                    ApiError::InvalidIndexedData(format!(
+                        "cannot reconstruct missing account {}",
+                        transfer.from
+                    ))
+                })?;
+                account.nonce = account.nonce.checked_sub(1).ok_or_else(|| {
+                    ApiError::InvalidIndexedData("cannot reconstruct account nonce".to_string())
+                })?;
+                continue;
+            }
+
+            let receiver = accounts.get_mut(&transfer.to).ok_or_else(|| {
+                ApiError::InvalidIndexedData(format!(
+                    "cannot reconstruct missing account {}",
+                    transfer.to
+                ))
+            })?;
+            receiver.balance = receiver
+                .balance
+                .checked_sub(transfer.amount)
+                .ok_or_else(|| {
+                    ApiError::InvalidIndexedData("cannot reconstruct receiver balance".to_string())
+                })?;
+
+            let sender = accounts.get_mut(&transfer.from).ok_or_else(|| {
+                ApiError::InvalidIndexedData(format!(
+                    "cannot reconstruct missing account {}",
+                    transfer.from
+                ))
+            })?;
+            sender.balance = sender.balance.checked_add(transfer.amount).ok_or_else(|| {
+                ApiError::InvalidIndexedData("cannot reconstruct sender balance".to_string())
+            })?;
+            sender.nonce = sender.nonce.checked_sub(1).ok_or_else(|| {
+                ApiError::InvalidIndexedData("cannot reconstruct sender nonce".to_string())
+            })?;
+        }
+    }
+    Ok(accounts)
+}
+
 async fn insert_rollup_batch_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commitment: &RollupBatchCommitment,
     status: &str,
+    witness: &BatchValidityWitness,
 ) -> Result<(), ApiError> {
     sqlx::query(
         r#"
@@ -1823,9 +1936,10 @@ async fn insert_rollup_batch_tx(
             data_hash,
             transaction_count,
             status,
-            raw_commitment
+            raw_commitment,
+            validity_witness
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(to_i64(commitment.batch_number, "rollup batch number")?)
@@ -1849,6 +1963,10 @@ async fn insert_rollup_batch_tx(
     .bind(status)
     .bind(
         serde_json::to_value(commitment)
+            .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?,
+    )
+    .bind(
+        serde_json::to_value(witness)
             .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?,
     )
     .execute(&mut **tx)

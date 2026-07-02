@@ -40,6 +40,16 @@ Submit a built rollup batch:
 cargo run -p settlement-client -- submit-batch --batch-number 0
 ```
 
+Submit an SP1 proof to `ValidityRollupSettlement`:
+
+```bash
+cargo run -p settlement-client -- \
+  submit-batch --batch-number 0 --proof batch-proof.json
+```
+
+Because validity-only submission finalizes atomically, the client persists both
+the submission and finalization milestones from the same verified L1 receipt.
+
 After a successful broadcast, the client extracts the returned L1 transaction
 hash, verifies the transaction receipt through JSON-RPC, and persists the
 receipt block, gas, chain ID, and raw receipt to the explorer API as the batch's

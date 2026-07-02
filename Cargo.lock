@@ -1206,6 +1206,7 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tower-http",
+ "validity-core",
  "wallet-core",
 ]
 
@@ -5891,6 +5892,7 @@ name = "wallet-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chain-core",
  "clap",
  "serde_json",
  "wallet-core",
