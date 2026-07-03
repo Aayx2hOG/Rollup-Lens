@@ -70,15 +70,21 @@ Use `--dry-run` to print the `cast send` command without broadcasting:
 cargo run -p settlement-client -- --dry-run submit-batch --batch-number 0
 ```
 
-## End-to-end validity settlement test
+## End-to-end validity settlement tests
 
-The ignored Rust integration test creates an isolated Postgres schema, runs the
-explorer API, sequences a signed transfer, generates an SP1 Groth16 proof,
-deploys the real SP1 verifier and validity settlement contract to Anvil, submits
-the proof through this client, and verifies both L1 state and persisted receipt
-metadata.
+Both ignored Rust integration-test tiers create an isolated Postgres schema,
+run the explorer API, sequence a signed transfer, deploy contracts to Anvil,
+submit through this client, and verify L1 state and persisted receipt metadata.
 
-Build the prover once, then run the test explicitly:
+The fast tier uses a deterministic verifier mock and does not require SP1:
+
+```bash
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
+cargo test -p settlement-client --test validity_settlement_e2e \
+  sequences_and_finalizes_a_batch_with_mock_verifier -- --ignored --nocapture
+```
+
+The real tier generates a Groth16 proof and deploys the official SP1 verifier:
 
 ```bash
 cargo build --release -p validity-prover
@@ -86,8 +92,9 @@ cargo build --release -p validity-prover
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
 VALIDITY_PROVER_BIN="$PWD/target/release/validity-prover" \
 cargo test -p settlement-client --test validity_settlement_e2e \
-  -- --ignored --nocapture
+  proves_sequences_and_finalizes_a_batch_on_anvil -- --ignored --nocapture
 ```
 
 The database user must be allowed to create and drop schemas. Anvil, `forge`,
-`cast`, and the SP1 proving toolchain must be available on `PATH`.
+and `cast` must be available on `PATH`. The real tier also requires the SP1
+proving toolchain and sufficient proving resources.

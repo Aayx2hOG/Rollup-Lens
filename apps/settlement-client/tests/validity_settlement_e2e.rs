@@ -1,8 +1,8 @@
-//! Full validity-rollup settlement test.
+//! Validity-rollup settlement integration tests.
 //!
-//! This test is ignored because it requires Postgres, Anvil, Forge, and an SP1
-//! installation capable of producing Groth16 proofs. See the settlement-client
-//! README for the exact invocation.
+//! Both tiers require Postgres, Anvil, and Forge. The fast tier uses a
+//! deterministic verifier mock. The real tier additionally generates and
+//! verifies an SP1 Groth16 proof.
 
 use std::{
     env, fs,
@@ -22,6 +22,9 @@ use wallet_core::{address_from_public_key, create_keypair};
 const ANVIL_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const ANVIL_ADDRESS: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+const MOCK_PROGRAM_VKEY: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000007";
+const MOCK_PROOF: &str = "0x70726f6f66";
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/0001_init/migration.sql"),
@@ -34,18 +37,40 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TEST_DATABASE_URL, Anvil, and Forge"]
+async fn sequences_and_finalizes_a_batch_with_mock_verifier() {
+    run_scenario(VerifierMode::Mock).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TEST_DATABASE_URL, Anvil, Forge, and an SP1 Groth16 prover"]
 async fn proves_sequences_and_finalizes_a_batch_on_anvil() {
+    run_scenario(VerifierMode::RealSp1).await;
+}
+
+#[derive(Clone, Copy)]
+enum VerifierMode {
+    Mock,
+    RealSp1,
+}
+
+async fn run_scenario(verifier_mode: VerifierMode) {
     let database_url = env::var("TEST_DATABASE_URL")
         .expect("set TEST_DATABASE_URL to a disposable Postgres database");
-    let prover = env::var_os("VALIDITY_PROVER_BIN")
-        .map(PathBuf::from)
-        .expect("set VALIDITY_PROVER_BIN to a release build of validity-prover");
-    assert!(
-        prover.is_file(),
-        "VALIDITY_PROVER_BIN does not point to a file: {}",
-        prover.display()
-    );
+    let prover = match verifier_mode {
+        VerifierMode::Mock => None,
+        VerifierMode::RealSp1 => {
+            let path = env::var_os("VALIDITY_PROVER_BIN")
+                .map(PathBuf::from)
+                .expect("set VALIDITY_PROVER_BIN to a release build of validity-prover");
+            assert!(
+                path.is_file(),
+                "VALIDITY_PROVER_BIN does not point to a file: {}",
+                path.display()
+            );
+            Some(path)
+        }
+    };
     require_tool("anvil");
     require_tool("forge");
     require_tool("cast");
@@ -104,14 +129,32 @@ async fn proves_sequences_and_finalizes_a_batch_on_anvil() {
     fs::write(&witness_path, serde_json::to_vec_pretty(&witness).unwrap()).unwrap();
 
     let artifact_path = temp.path().join("proof.json");
-    run(
-        Command::new(&prover)
-            .arg("groth16")
-            .arg(&witness_path)
-            .arg("--evm-artifact-out")
-            .arg(&artifact_path),
-        "generate SP1 Groth16 proof",
-    );
+    match prover {
+        Some(prover) => {
+            run(
+                Command::new(&prover)
+                    .arg("groth16")
+                    .arg(&witness_path)
+                    .arg("--evm-artifact-out")
+                    .arg(&artifact_path),
+                "generate SP1 Groth16 proof",
+            );
+        }
+        None => {
+            let calldata = get_ok(
+                &client,
+                &format!("{api_url}/rollup/batches/0/settlement-calldata"),
+            )
+            .await;
+            let batch = get_ok(&client, &format!("{api_url}/rollup/batches/0")).await;
+            let artifact = mock_proof_artifact(&calldata, &batch);
+            fs::write(
+                &artifact_path,
+                serde_json::to_vec_pretty(&artifact).unwrap(),
+            )
+            .unwrap();
+        }
+    }
     let artifact: Value =
         serde_json::from_slice(&fs::read(&artifact_path).unwrap()).expect("parse proof artifact");
     let decoded = &artifact["decoded"];
@@ -132,13 +175,21 @@ async fn proves_sequences_and_finalizes_a_batch_on_anvil() {
     );
     wait_for_rpc(&client, &rpc_url).await;
 
-    let verifier = forge_create(
-        &workspace,
-        &rpc_url,
-        "lib/sp1-contracts/contracts/src/v6.1.0/SP1VerifierGroth16.sol:SP1Verifier",
-        &[],
-    );
     let program_vkey = artifact["program_vkey"].as_str().unwrap();
+    let verifier = match verifier_mode {
+        VerifierMode::Mock => forge_create(
+            &workspace,
+            &rpc_url,
+            "contracts/mocks/ValidityVerifierMock.sol:ValidityVerifierMock",
+            &[program_vkey],
+        ),
+        VerifierMode::RealSp1 => forge_create(
+            &workspace,
+            &rpc_url,
+            "lib/sp1-contracts/contracts/src/v6.1.0/SP1VerifierGroth16.sol:SP1Verifier",
+            &[],
+        ),
+    };
     let genesis_root = format!("0x{}", genesis.state_root);
     let settlement = forge_create(
         &workspace,
@@ -180,7 +231,7 @@ async fn proves_sequences_and_finalizes_a_batch_on_anvil() {
     );
 
     let batch = get_ok(&client, &format!("{api_url}/rollup/batches/0")).await;
-    assert_eq!(batch["settlement_status"], json!("finalized"));
+    assert_eq!(batch["status"], json!("finalized"));
     assert!(batch["l1_submit_tx_hash"]
         .as_str()
         .unwrap()
@@ -192,6 +243,46 @@ async fn proves_sequences_and_finalizes_a_batch_on_anvil() {
     let _ = api_task.await;
     drop(anvil);
     drop_schema(&pool, &schema).await;
+}
+
+fn mock_proof_artifact(calldata: &Value, batch: &Value) -> Value {
+    let args = calldata["ordered_args"]
+        .as_array()
+        .expect("settlement calldata args");
+    assert_eq!(args.len(), 6);
+
+    let mut public_values = String::from("0x");
+    public_values.push_str(&abi_u256(args[0].as_u64().expect("batch number")));
+    for root in &args[1..] {
+        let root = root.as_str().expect("bytes32 root");
+        let root = strip_hex(root);
+        assert_eq!(root.len(), 64, "root must be bytes32");
+        public_values.push_str(root);
+    }
+    public_values.push_str(&abi_u256(
+        batch["transaction_count"]
+            .as_u64()
+            .expect("transaction count"),
+    ));
+
+    json!({
+        "program_vkey": MOCK_PROGRAM_VKEY,
+        "public_values": public_values,
+        "proof": MOCK_PROOF,
+        "decoded": {
+            "batch_number": args[0],
+            "prev_state_root": args[1],
+            "new_state_root": args[2],
+            "transaction_root": args[3],
+            "block_hash_root": args[4],
+            "data_hash": args[5],
+            "transaction_count": batch["transaction_count"]
+        }
+    })
+}
+
+fn abi_u256(value: u64) -> String {
+    format!("{value:064x}")
 }
 
 fn settlement_client(api_url: &str, rpc_url: &str, contract: &str, args: &[&str]) {
@@ -349,7 +440,8 @@ fn run(command: &mut Command, action: &str) -> Output {
         .unwrap_or_else(|error| panic!("failed to {action}: {error}"));
     assert!(
         output.status.success(),
-        "failed to {action}\nstdout:\n{}\nstderr:\n{}",
+        "failed to {action} ({})\nstdout:\n{}\nstderr:\n{}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

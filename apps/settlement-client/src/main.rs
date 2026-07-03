@@ -525,15 +525,29 @@ fn cast_arg(value: &Value) -> String {
 }
 
 fn extract_tx_hash(output: &str) -> Option<String> {
-    output
+    let parts = output
         .split(|character: char| {
             character.is_whitespace() || matches!(character, ':' | ',' | '"' | '\'')
         })
-        .find_map(|part| {
-            let hex = part.strip_prefix("0x")?;
-            (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                .then(|| format!("0x{}", hex.to_ascii_lowercase()))
-        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    for (index, part) in parts.iter().enumerate() {
+        if *part == "transactionHash" {
+            return parts
+                .get(index + 1)
+                .and_then(|value| normalized_hash(value));
+        }
+    }
+
+    let trimmed = output.trim();
+    normalized_hash(trimmed)
+}
+
+fn normalized_hash(value: &str) -> Option<String> {
+    let hex = value.strip_prefix("0x")?;
+    (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| format!("0x{}", hex.to_ascii_lowercase()))
 }
 
 fn printable_command(bin: &str, args: &[OsString]) -> String {
@@ -641,10 +655,21 @@ mod tests {
     #[test]
     fn extracts_transaction_hash_from_cast_output() {
         let hash = format!("0x{}", "A".repeat(64));
-        let output = format!("transactionHash {hash}\nblockNumber 1\n");
+        let block_hash = format!("0x{}", "B".repeat(64));
+        let output =
+            format!("blockHash {block_hash}\nblockNumber 1\ntransactionHash {hash}\nstatus 1\n");
 
         assert_eq!(
             extract_tx_hash(&output),
+            Some(format!("0x{}", "a".repeat(64)))
+        );
+    }
+
+    #[test]
+    fn extracts_bare_transaction_hash_from_cast_output() {
+        let hash = format!("0x{}", "A".repeat(64));
+        assert_eq!(
+            extract_tx_hash(&hash),
             Some(format!("0x{}", "a".repeat(64)))
         );
     }
