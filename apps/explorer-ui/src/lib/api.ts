@@ -18,6 +18,11 @@ export type Health = {
   latest_error: ErrorEvent | null;
 };
 
+export type Readiness = {
+  status: "ready";
+  database: "available";
+};
+
 export type BlockSummary = {
   height: number;
   parent_hash: string;
@@ -179,6 +184,7 @@ function apiConnectionMessage(error: unknown) {
 }
 
 export const api = {
+  ready: () => request<Readiness>("/ready"),
   health: () => request<Health>("/health"),
   summary: () => request<ChainSummary>("/chain/summary"),
   blocks: (limit = 50, offset = 0) => request<Page<BlockSummary>>(`/blocks?limit=${limit}&offset=${offset}`),

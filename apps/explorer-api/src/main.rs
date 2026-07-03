@@ -38,11 +38,11 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let database_url = database_url(cli.database_url)?;
+    validate_database_url(&database_url)?;
     let pool = PgPoolOptions::new()
         .max_connections(5)
-        .connect(&database_url)
-        .await
-        .context("failed to connect to Postgres")?;
+        .connect_lazy(&database_url)
+        .context("DATABASE_URL is not a valid Postgres connection string")?;
 
     if let Some(path) = &cli.initialize_genesis {
         let config: GenesisConfig = serde_json::from_slice(
@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
 
     println!("serving Postgres-backed rollup API");
     println!("listening on http://{}", cli.bind);
+    println!("readiness probe available at /ready");
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -97,6 +98,16 @@ fn database_url(cli_value: Option<String>) -> Result<String> {
         .or_else(database_url_from_prisma_env)
         .filter(|value| !value.trim().is_empty())
         .context("provide --database-url, set DATABASE_URL, or add DATABASE_URL to prisma/.env")
+}
+
+fn validate_database_url(database_url: &str) -> Result<()> {
+    if !database_url.starts_with("postgres://") && !database_url.starts_with("postgresql://") {
+        anyhow::bail!("DATABASE_URL must use the postgres:// or postgresql:// scheme");
+    }
+    if !database_url.contains('@') {
+        anyhow::bail!("DATABASE_URL must include database credentials and a host");
+    }
+    Ok(())
 }
 
 fn database_url_from_prisma_env() -> Option<String> {

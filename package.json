@@ -3,6 +3,7 @@
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "db:migrate": "bunx prisma migrate dev",
+    "db:migrate:deploy": "bun scripts/migrate-deploy.mjs",
     "genesis:init": "cargo run -p explorer-api -- --initialize-genesis",
     "api:dev": "cargo run -p explorer-api -- --bind 127.0.0.1:3000",
     "ui:dev": "bun run --cwd apps/explorer-ui dev",
@@ -10,5 +11,8 @@
   },
   "dependencies": {
     "@prisma/client": "^7.8.0"
+  },
+  "devDependencies": {
+    "prisma": "^7.8.0"
   }
 }

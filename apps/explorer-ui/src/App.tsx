@@ -8,8 +8,8 @@ import {
   CheckCircle2,
   Clock3,
   Copy,
-  Cpu,
   Database,
+  Download,
   ExternalLink,
   Gauge,
   Landmark,
@@ -21,6 +21,7 @@ import {
   Search,
   Send,
   ShieldAlert,
+  Upload,
   Wallet,
   XCircle,
 } from "lucide-react";
@@ -46,14 +47,34 @@ import {
   signTransfer,
   type RollupKeypair,
 } from "./lib/wallet";
-import { Badge, IconButton, Panel, Shell, Skeleton, Stat } from "./components/ui";
+import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
 
-const tabs = ["Overview", "Activity", "Settlement", "Operate"] as const;
+const tabs = ["Overview", "Transactions", "Settlement", "Operate"] as const;
 type Tab = (typeof tabs)[number];
+
+type TransactionReferenceFile = {
+  format: "rolluplens.transaction-reference";
+  version: 1;
+  exported_at: string;
+  api_base: string;
+  transaction: {
+    hash: string;
+    block_height: number | null;
+    transaction_index: number | null;
+    from: string;
+    to: string;
+    amount: number;
+    nonce: number;
+  };
+  batch: {
+    number: number;
+    status: string;
+  } | null;
+};
 
 const tabMeta: Record<Tab, { label: string; icon: React.ReactNode }> = {
   Overview: { label: "Overview", icon: <Gauge className="h-4 w-4" /> },
-  Activity: { label: "Activity", icon: <Blocks className="h-4 w-4" /> },
+  Transactions: { label: "Transactions", icon: <Blocks className="h-4 w-4" /> },
   Settlement: { label: "Settlement", icon: <PackageCheck className="h-4 w-4" /> },
   Operate: { label: "Operate", icon: <Send className="h-4 w-4" /> },
 };
@@ -67,7 +88,10 @@ export function App() {
   const [selectedBatch, setSelectedBatch] = useState<number | null>(null);
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [connectionSeconds, setConnectionSeconds] = useState(0);
+  const [overviewBlockTarget, setOverviewBlockTarget] = useState<number | null>(null);
 
+  const readiness = useQuery({ queryKey: ["readiness"], queryFn: api.ready });
   const summary = useQuery({ queryKey: ["summary"], queryFn: api.summary });
   const blocks = useQuery({ queryKey: ["blocks"], queryFn: () => api.blocks() });
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
@@ -96,16 +120,36 @@ export function App() {
     queryFn: () => api.rollupBatch(selectedBatch!),
     enabled: selectedBatch !== null,
   });
-  const connectionError = firstError(summary.error, blocks.error);
+  const connectionError = firstError(readiness.error, summary.error, blocks.error);
   const connectionMessage = connectionError ?? "Backend request failed";
   const hasCoreData = Boolean(summary.data && blocks.data);
-  const isOffline = Boolean(connectionError && !hasCoreData);
+  const databaseUnavailable = Boolean(
+    readiness.error instanceof Error && readiness.error.message.toLowerCase().includes("database"),
+  );
+  const isWaking = Boolean(connectionError && !hasCoreData && !databaseUnavailable && connectionSeconds < 60);
+  const isOffline = Boolean(connectionError && !hasCoreData && !databaseUnavailable && !isWaking);
   const isStale = Boolean(connectionError && hasCoreData);
-  const readStatus = isOffline ? "offline" : isStale ? "stale" : hasCoreData ? "ok" : "connecting";
+  const readStatus = databaseUnavailable
+    ? "database"
+    : isWaking
+      ? "waking"
+    : isOffline
+      ? "offline"
+      : isStale
+        ? "stale"
+        : hasCoreData
+          ? health.data?.status === "degraded" ? "degraded" : "ok"
+          : "connecting";
   const blockItems = blocks.data?.items ?? [];
   const blockTotal = blocks.data?.total ?? blockItems.length;
   const batchItems = rollupBatches.data?.items ?? [];
   const batchTotal = rollupBatches.data?.total ?? batchItems.length;
+
+  useEffect(() => {
+    if (hasCoreData || databaseUnavailable) return;
+    const timer = window.setInterval(() => setConnectionSeconds((seconds) => seconds + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasCoreData, databaseUnavailable]);
 
   useEffect(() => {
     if (selectedHeight === null && blockItems[0]) {
@@ -118,6 +162,21 @@ export function App() {
       setSelectedBatch(batchItems[0].batch_number);
     }
   }, [batchItems, selectedBatch]);
+
+  useEffect(() => {
+    if (overviewBlockTarget === null || block.data?.height !== overviewBlockTarget) return;
+    const transactions = block.data.transaction_views;
+    if (transactions.length === 1) {
+      setSelectedTx(transactions[0].hash);
+      window.setTimeout(() => {
+        document.getElementById("selected-transaction")?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 100);
+    }
+    setOverviewBlockTarget(null);
+  }, [block.data, overviewBlockTarget]);
 
   const accountsFromBlocks = useMemo(() => {
     const seen = new Map<string, { address: string; touches: number; sent: number; received: number }>();
@@ -149,15 +208,15 @@ export function App() {
       setSearchResult(result);
       if (result.kind === "Block") {
         setSelectedHeight(result.data.height);
-        setActiveTab("Activity");
+        setActiveTab("Transactions");
       }
       if (result.kind === "Account") {
         setSelectedAccount(result.data.address);
-        setActiveTab("Activity");
+        setActiveTab("Transactions");
       }
       if (result.kind === "Transaction") {
         setSelectedTx(result.data.hash);
-        setActiveTab("Activity");
+        setActiveTab("Transactions");
       }
     } catch (error) {
       setSearchResult(null);
@@ -199,7 +258,13 @@ export function App() {
         </div>
       </header>
 
-      {isOffline && <ConnectionError message={connectionMessage} />}
+      {!hasCoreData && (
+        <ConnectionState
+          status={readStatus}
+          message={connectionMessage}
+          onRetry={refreshAll}
+        />
+      )}
       {isStale && <StaleDataNotice message={connectionMessage} />}
 
       <AnimatePresence>
@@ -220,31 +285,36 @@ export function App() {
             readStatus={readStatus}
             summary={summary.data}
             latestBlock={blockItems[0]}
+            latestBatch={batchItems[0]}
             pendingTransfers={summary.data?.pending_transaction_count ?? 0}
-            onOpenActivity={() => setActiveTab("Activity")}
+            onOpenActivity={() => setActiveTab("Transactions")}
             onOpenSettlement={() => setActiveTab("Settlement")}
+            onOpenOperate={() => setActiveTab("Operate")}
           />
-          <SummaryStats summary={summary.data} loading={summary.isLoading} />
           <Overview
             summary={summary.data}
             blocks={blockItems}
             blockTotal={blockTotal}
             selectedBlock={block.data}
-            onSelectBlock={setSelectedHeight}
+            onSelectBlock={(height) => {
+              setSelectedHeight(height);
+              setOverviewBlockTarget(height);
+              setActiveTab("Transactions");
+            }}
             onSelectAccount={(address) => {
               setSelectedAccount(address);
-              setActiveTab("Activity");
+              setActiveTab("Transactions");
             }}
           />
         </div>
       )}
 
-      {activeTab === "Activity" && (
+      {activeTab === "Transactions" && (
         <div className="grid gap-5">
           <PageIntro
             icon={<Blocks className="h-5 w-5" />}
-            title="Activity"
-            description="Follow transfers through L2 blocks, then inspect the current balance and nonce for any wallet involved."
+            title="Transactions"
+            description="Inspect transfers, their L2 inclusion, proof batch, and L1 settlement progress."
             meta={`${blockItems.length}/${blockTotal} blocks`}
           />
           <BlocksView
@@ -255,20 +325,19 @@ export function App() {
             blockLoading={block.isLoading}
             selectedTx={selectedTx}
             transaction={transaction.data}
+            pool={transactionPool.data?.items ?? []}
+            batches={batchItems}
+            accountCandidates={accountsFromBlocks}
+            selectedAccount={selectedAccount}
+            account={account.data}
+            accountError={account.error instanceof Error ? account.error.message : null}
             transactionError={transaction.error instanceof Error ? transaction.error.message : null}
             onSelectBlock={setSelectedHeight}
             onSelectAccount={(address) => {
               setSelectedAccount(address);
-              setActiveTab("Activity");
+              setActiveTab("Transactions");
             }}
             onSelectTx={setSelectedTx}
-          />
-          <AccountsView
-            candidates={accountsFromBlocks}
-            selectedAccount={selectedAccount}
-            account={account.data}
-            accountError={account.error instanceof Error ? account.error.message : null}
-            onSelectAccount={setSelectedAccount}
           />
         </div>
       )}
@@ -290,7 +359,7 @@ export function App() {
             onSelectBatch={setSelectedBatch}
             onSelectTx={(hash) => {
               setSelectedTx(hash);
-              setActiveTab("Activity");
+              setActiveTab("Transactions");
             }}
           />
         </div>
@@ -300,24 +369,30 @@ export function App() {
         <div className="grid gap-5">
           <PageIntro
             icon={<Send className="h-5 w-5" />}
-            title="Operate the local rollup"
-            description="Sign a real transfer in this browser, submit it to the transaction pool, and build the next L2 block."
-            meta={health.data?.status ?? "checking"}
+            title="Operate"
+            description="Submit a signed transfer, build the next L2 block, and monitor service health."
+            meta={pluralize(summary.data?.pending_transaction_count ?? 0, "pending transfer")}
           />
+          <OperatorWorkflow />
           <SequencerView
             pool={transactionPool.data?.items ?? []}
-            poolTotal={transactionPool.data?.total ?? 0}
+            health={health.data}
+            errors={errors.data ?? []}
+            summary={summary.data}
+            onRefresh={refreshAll}
+            onOpenTransaction={(hash) => {
+              setSelectedTx(hash);
+              setActiveTab("Transactions");
+            }}
             onSubmitted={async (hash) => {
               setSelectedTx(hash);
               await refreshAll();
             }}
             onSequenced={async (height) => {
               setSelectedHeight(height);
-              setActiveTab("Activity");
               await refreshAll();
             }}
           />
-          <HealthView health={health.data} errors={errors.data ?? []} summary={summary.data} />
         </div>
       )}
     </Shell>
@@ -333,9 +408,66 @@ function firstError(...errors: Array<unknown>) {
 
 function readStatusLabel(status: string) {
   if (status === "ok") return "Live";
+  if (status === "degraded") return "Degraded";
+  if (status === "database") return "Database unavailable";
+  if (status === "waking") return "Waking service";
   if (status === "stale") return "Last good data";
   if (status === "offline") return "Offline";
   return "Connecting";
+}
+
+function ConnectionState({
+  status,
+  message,
+  onRetry,
+}: {
+  status: string;
+  message: string;
+  onRetry: () => Promise<void>;
+}) {
+  const connecting = status === "connecting";
+  const waking = status === "waking";
+  const database = status === "database";
+  return (
+    <Panel className={cn("p-4", database || status === "offline" ? "border-rose/25 bg-rose/10" : "border-amber/25 bg-amber/10")}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3">
+          {connecting || waking ? (
+            <RefreshCcw className="mt-0.5 h-4 w-4 animate-spin text-amber" />
+          ) : (
+            <XCircle className="mt-0.5 h-4 w-4 text-rose" />
+          )}
+          <div>
+            <div className="text-sm font-semibold text-white">
+              {connecting
+                ? "Connecting to the explorer API"
+                : waking
+                  ? "Waking the explorer service"
+                  : database
+                    ? "Database connection failed"
+                    : "Explorer API unavailable"}
+            </div>
+            <div className="mt-1 text-sm text-white/58">
+              {connecting
+                ? "Starting the initial API request."
+                : waking
+                  ? "Free instances can take up to a minute to resume. Requests retry automatically."
+                : database
+                  ? "The API is online, but it cannot authenticate with Postgres. Verify DATABASE_URL and redeploy."
+                  : message}
+            </div>
+          </div>
+        </div>
+        <button
+          onClick={() => void onRetry()}
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/12 px-3 text-sm text-white/72 hover:border-mint/30 hover:text-mint"
+        >
+          <RefreshCcw className="h-4 w-4" />
+          Retry
+        </button>
+      </div>
+    </Panel>
+  );
 }
 
 function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (tab: Tab) => void }) {
@@ -365,38 +497,30 @@ function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (t
   );
 }
 
-function SummaryStats({
-  summary,
-  loading,
-}: {
-  summary?: {
-    height: number | null;
-    transaction_count: number;
-    pending_transaction_count: number;
-    account_count: number;
-    valid: boolean;
-    genesis_finalized: boolean;
-  };
-  loading: boolean;
-}) {
+function OperatorWorkflow() {
+  const steps = [
+    { label: "Load funded wallet", detail: "Use a key whose address has a balance" },
+    { label: "Submit transfer", detail: "The signed transfer enters the pending queue" },
+    { label: "Build L2 block", detail: "Pending transfers are sequenced into the next block" },
+  ];
+
   return (
-    <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-      {loading ? (
-        <>
-          <Skeleton className="h-32" />
-          <Skeleton className="h-32" />
-          <Skeleton className="h-32" />
-          <Skeleton className="h-32" />
-        </>
-      ) : (
-        <>
-          <Stat label="Latest block" value={summary?.height ?? 0} detail="Newest confirmed activity group" accent="mint" />
-          <Stat label="Transfers" value={formatNumber(summary?.transaction_count)} detail={`${formatNumber(summary?.pending_transaction_count)} waiting to be grouped`} accent="cyan" />
-          <Stat label="Accounts" value={formatNumber(summary?.account_count)} detail="Wallets with current balances" accent="amber" />
-          <Stat label="System check" value={summary?.valid ? "Healthy" : "Needs review"} detail={summary?.genesis_finalized ? "Starting point is locked" : "Starting point is not locked"} accent={summary?.valid ? "mint" : "rose"} />
-        </>
-      )}
-    </section>
+    <Panel className="p-4">
+      <div className="mb-3 text-xs font-medium uppercase tracking-[0.16em] text-white/38">Test a transfer</div>
+      <div className="grid gap-2 md:grid-cols-3">
+        {steps.map((step, index) => (
+          <div key={step.label} className="flex gap-3 rounded-lg border border-white/8 bg-white/[0.035] p-3">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-mint/10 text-xs font-semibold text-mint">
+              {index + 1}
+            </span>
+            <div>
+              <div className="text-sm font-semibold text-white">{step.label}</div>
+              <div className="mt-1 text-xs leading-5 text-white/46">{step.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }
 
@@ -426,25 +550,6 @@ function PageIntro({
         {meta && <div className="shrink-0 text-sm text-white/48">{meta}</div>}
       </div>
     </section>
-  );
-}
-
-function ConnectionError({ message }: { message: string }) {
-  return (
-    <Panel className="border-rose/25 bg-rose/10 p-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-sm font-semibold text-rose">
-            <XCircle className="h-4 w-4" />
-            Backend connection failed
-          </div>
-          <div className="mt-2 text-sm text-white/68">{message}</div>
-        </div>
-        <div className="hash max-w-full rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-white/58 sm:max-w-md">
-          {API_BASE}
-        </div>
-      </div>
-    </Panel>
   );
 }
 
@@ -523,106 +628,75 @@ function HomeHero({
   readStatus,
   summary,
   latestBlock,
+  latestBatch,
   pendingTransfers,
   onOpenActivity,
   onOpenSettlement,
+  onOpenOperate,
 }: {
   readStatus: string;
   summary?: { height: number | null; transaction_count: number; account_count: number; valid: boolean };
   latestBlock?: BlockSummary;
+  latestBatch?: RollupBatchSummary;
   pendingTransfers: number;
   onOpenActivity: () => void;
   onOpenSettlement: () => void;
+  onOpenOperate: () => void;
 }) {
   const live = readStatus === "ok";
   return (
-    <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.025] px-5 py-7 shadow-xl shadow-black/20 sm:px-7">
+    <section className="relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.025] p-5 shadow-xl shadow-black/20">
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent" />
-      <div className="grid grid-cols-1 items-center gap-8 lg:grid-cols-[1.05fr_0.95fr]">
-        <div className="max-w-3xl">
-          <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 py-1.5 text-xs font-medium text-white/68">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-medium text-white/68">
             <span className={cn("h-2 w-2 rounded-full", live ? "bg-mint shadow-[0_0_18px_rgba(88,244,183,0.8)]" : "bg-amber")} />
-            {live ? "Local rollup is live" : "Waiting for local services"}
+            {live ? "Rollup services operational" : readStatusLabel(readStatus)}
           </div>
-          <h2 className="max-w-3xl text-4xl font-semibold leading-[1.05] text-white sm:text-5xl">
-            Follow a transaction from L2 execution to L1 settlement.
+          <h2 className="mt-2 text-2xl font-semibold leading-tight text-white">
+            L2 execution and L1 settlement
           </h2>
-          <p className="mt-4 max-w-2xl text-base leading-7 text-white/62">
-            RollupLens turns blocks, state roots, validity batches, and Ethereum receipts into one understandable workflow.
+          <p className="mt-1 text-sm text-white/52">
+            Current chain state, pending work, and settlement progress.
           </p>
-          <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+        </div>
+        <div className="flex flex-wrap gap-2">
             <button
               onClick={onOpenActivity}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-mint px-4 text-sm font-semibold text-ink shadow-lg shadow-mint/10 transition hover:bg-mint/90"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90"
             >
-              Open activity
+            Transactions
               <ArrowUpRight className="h-4 w-4" />
             </button>
             <button
               onClick={onOpenSettlement}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.045] px-4 text-sm font-semibold text-white/82 transition hover:border-amber/30 hover:bg-amber/10 hover:text-amber"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.045] px-3 text-sm font-semibold text-white/82 transition hover:border-amber/30 hover:text-amber"
             >
-              View settlement
+            Settlement
               <Landmark className="h-4 w-4" />
             </button>
-          </div>
-          <div className="mt-7 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <HeroMetric label="Latest block" value={summary?.height ?? "none"} />
-            <HeroMetric label="Transfers" value={formatNumber(summary?.transaction_count)} />
-            <HeroMetric label="Wallets" value={formatNumber(summary?.account_count)} />
-            <HeroMetric label="Waiting" value={formatNumber(pendingTransfers)} />
-          </div>
+            <button
+              onClick={onOpenOperate}
+              className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.045] px-3 text-sm font-semibold text-white/82 transition hover:border-cyan/30 hover:text-cyan"
+            >
+              Operate
+              <Send className="h-4 w-4" />
+            </button>
         </div>
-
-        <div className="rounded-2xl border border-white/10 bg-black/20 p-5">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-xs font-medium uppercase tracking-[0.18em] text-mint">How to use this explorer</div>
-              <div className="mt-1 text-sm text-white/48">Three steps explain the complete rollup path.</div>
-            </div>
-            <Badge tone={summary?.valid ? "good" : "warn"}>{summary?.valid ? "State valid" : "Check state"}</Badge>
-          </div>
-          <div className="mt-5 grid gap-3">
-            <JourneyStep number="1" icon={<Send className="h-4 w-4" />} title="Submit and execute" description="Signed transfers enter the pool and become an L2 block." />
-            <JourneyStep number="2" icon={<Cpu className="h-4 w-4" />} title="Prove the new state" description="The batch commits to transaction, block, and state roots." />
-            <JourneyStep number="3" icon={<Landmark className="h-4 w-4" />} title="Settle on Ethereum" description="The validity proof authorizes the new finalized state root." />
-          </div>
-          <div className="mt-4 flex items-center justify-between rounded-xl border border-white/8 bg-white/[0.035] px-3 py-2 text-xs">
-            <span className="text-white/42">Latest L2 block</span>
-            <span className="hash text-white/72">
-              {latestBlock ? `#${latestBlock.height} · ${shortHash(latestBlock.block_hash, 8, 6)}` : "No blocks yet"}
-            </span>
-          </div>
-        </div>
+      </div>
+      <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <HeroMetric label="Latest block" value={summary?.height ?? "none"} />
+        <HeroMetric label="Transfers" value={formatNumber(summary?.transaction_count)} />
+        <HeroMetric label="Pending" value={formatNumber(pendingTransfers)} />
+        <HeroMetric label="Latest batch" value={latestBatch ? `#${latestBatch.batch_number}` : "none"} />
+        <HeroMetric label="Settlement" value={latestBatch ? settlementStatusLabel(latestBatch.status) : "none"} />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-white/42">
+        <span>{formatNumber(summary?.account_count)} accounts indexed</span>
+        <span className="hash">{latestBlock ? shortHash(latestBlock.block_hash, 10, 8) : "No block indexed"}</span>
+        <Badge tone={summary?.valid ? "good" : "warn"}>{summary?.valid ? "State valid" : "Check state"}</Badge>
       </div>
     </section>
-  );
-}
-
-function JourneyStep({
-  number,
-  icon,
-  title,
-  description,
-}: {
-  number: string;
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="flex gap-3 rounded-xl border border-white/8 bg-white/[0.035] p-3">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-sm font-semibold text-mint">
-        {number}
-      </div>
-      <div className="min-w-0">
-        <div className="flex items-center gap-2 text-sm font-semibold text-white">
-          <span className="text-mint">{icon}</span>
-          {title}
-        </div>
-        <p className="mt-1 text-sm leading-5 text-white/50">{description}</p>
-      </div>
-    </div>
   );
 }
 
@@ -683,10 +757,10 @@ function Overview({
       </Panel>
 
       <Panel className="p-4">
-        <SectionTitle icon={<Gauge className="h-4 w-4" />} title="Current snapshot" action="Latest fingerprint" flush />
+        <SectionTitle icon={<Gauge className="h-4 w-4" />} title="Current snapshot" action="Canonical chain state" flush />
         <div className="mt-4 space-y-4">
-          <HashLine label="Balance fingerprint" value={summary?.state_root} />
-          <HashLine label="Latest activity fingerprint" value={summary?.latest_block_hash} />
+          <HashLine label="State root" value={summary?.state_root} />
+          <HashLine label="Latest block hash" value={summary?.latest_block_hash} />
           <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
             <div className="text-xs uppercase tracking-[0.18em] text-white/38">Selected activity flow</div>
             <div className="mt-3 flex items-center gap-2 text-sm">
@@ -771,6 +845,12 @@ function BlocksView({
   blockLoading,
   selectedTx,
   transaction,
+  pool,
+  batches,
+  accountCandidates,
+  selectedAccount,
+  account,
+  accountError,
   transactionError,
   onSelectBlock,
   onSelectAccount,
@@ -783,36 +863,77 @@ function BlocksView({
   blockLoading: boolean;
   selectedTx: string | null;
   transaction?: { block_height: number | null; transaction_index: number; transfer: Transfer; hash: string };
+  pool: TransactionPoolEntry[];
+  batches: RollupBatchSummary[];
+  accountCandidates: Array<{ address: string; touches: number; sent: number; received: number }>;
+  selectedAccount: string | null;
+  account?: Account;
+  accountError: string | null;
   transactionError: string | null;
   onSelectBlock: (height: number) => void;
   onSelectAccount: (address: string) => void;
   onSelectTx: (hash: string) => void;
 }) {
+  const [lookupHash, setLookupHash] = useState("");
+  const [referenceError, setReferenceError] = useState<string | null>(null);
+  const poolEntry = selectedTx ? pool.find((entry) => entry.hash === selectedTx) : undefined;
+  const visibleTransfer = transaction?.transfer ?? poolEntry?.transfer;
+  const blockHeight = transaction?.block_height ?? poolEntry?.included_block_height ?? null;
+  const batch = blockHeight === null
+    ? undefined
+    : batches.find((entry) => entry.start_block_height <= blockHeight && entry.end_block_height >= blockHeight);
+
+  async function openReferenceFile(file: File) {
+    setReferenceError(null);
+    try {
+      const parsed = JSON.parse(await file.text()) as Partial<TransactionReferenceFile>;
+      if (
+        parsed.format !== "rolluplens.transaction-reference"
+        || parsed.version !== 1
+        || typeof parsed.transaction?.hash !== "string"
+        || !parsed.transaction.hash.trim()
+      ) {
+        throw new Error("This is not a valid RollupLens transaction reference file.");
+      }
+      setLookupHash(parsed.transaction.hash);
+      onSelectTx(parsed.transaction.hash);
+    } catch (error) {
+      setReferenceError(error instanceof Error ? error.message : "Could not read transaction reference file.");
+    }
+  }
+
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[23rem_1fr]">
-      <Panel className="overflow-hidden">
-        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Activity groups" action={`${blocks.length}/${blockTotal} indexed`} />
-        <div className="max-h-[36rem] overflow-auto">
-          {blocks.map((block) => (
-            <button
-              key={block.height}
-              onClick={() => onSelectBlock(block.height)}
-              className={cn(
-                "flex w-full items-center gap-3 border-b border-white/8 px-4 py-3 text-left transition",
-                selectedHeight === block.height ? "bg-mint/10" : "hover:bg-white/[0.045]",
-              )}
-            >
-              <div className="flex h-9 w-12 shrink-0 items-center justify-center rounded-md bg-white/[0.06] text-sm font-semibold text-white">
-                {block.height}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="hash text-sm text-white/82">{block.block_hash}</div>
-                <div className="mt-1 text-xs text-white/42">{pluralize(block.transaction_count, "transfer")}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </Panel>
+    <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[23rem_1fr]">
+      <div className="grid content-start gap-4">
+        <Panel className="overflow-hidden">
+          <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Activity groups" action={`${blocks.length}/${blockTotal} indexed`} />
+          <div className="max-h-[36rem] overflow-auto">
+            {blocks.map((block) => (
+              <button
+                key={block.height}
+                onClick={() => onSelectBlock(block.height)}
+                className={cn(
+                  "flex w-full items-center gap-3 border-b border-white/8 px-4 py-3 text-left transition",
+                  selectedHeight === block.height ? "bg-mint/10" : "hover:bg-white/[0.045]",
+                )}
+              >
+                <div className="flex h-9 w-12 shrink-0 items-center justify-center rounded-md bg-white/[0.06] text-sm font-semibold text-white">
+                  {block.height}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="hash text-sm text-white/82">{block.block_hash}</div>
+                  <div className="mt-1 text-xs text-white/42">{pluralize(block.transaction_count, "transfer")}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </Panel>
+        <AccountFinder
+          candidates={accountCandidates}
+          selectedAccount={selectedAccount}
+          onSelectAccount={onSelectAccount}
+        />
+      </div>
 
       <div className="grid gap-4">
         <Panel className="p-4">
@@ -822,17 +943,17 @@ function BlocksView({
           ) : selectedBlock ? (
             <div className="mt-4 grid gap-3">
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <HashLine label="Group fingerprint" value={selectedBlock.block_hash} />
-                <HashLine label="Previous group fingerprint" value={selectedBlock.parent_hash} />
-                <HashLine label="Balance fingerprint" value={selectedBlock.state_root} />
+                <HashLine label="Block hash" value={selectedBlock.block_hash} />
+                <HashLine label="Parent block hash" value={selectedBlock.parent_hash} />
+                <HashLine label="State root" value={selectedBlock.state_root} />
                 <MetricLine label="Transfers" value={selectedBlock.transactions.length} />
               </div>
               <div className="overflow-hidden rounded-lg border border-white/10">
-                <div className="grid grid-cols-[1fr_auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
+                <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)_4rem] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-center text-xs uppercase tracking-[0.14em] text-white/38">
                   <span>Sender</span>
-                  <span>Amount</span>
+                  <span className="text-center">Amount</span>
                   <span>Receiver</span>
-                  <span>Open</span>
+                  <span>Details</span>
                 </div>
                 {selectedBlock.transactions.length === 0 ? (
                   <div className="px-3 py-6 text-sm text-white/48">The first block only starts the system, so it has no transfers.</div>
@@ -854,110 +975,267 @@ function BlocksView({
           )}
         </Panel>
 
-        <Panel className="p-4">
-          <SectionTitle icon={<Activity className="h-4 w-4" />} title="Transfer lookup" action={selectedTx ? shortHash(selectedTx) : "paste fingerprint"} flush />
-          {transaction ? (
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <HashLine label="Transfer fingerprint" value={transaction.hash} />
-              <MetricLine label="Activity group" value={transaction.block_height ?? "waiting"} />
-              <TransferDetail tx={transaction.transfer} onSelectAccount={onSelectAccount} />
+        <Panel id="selected-transaction" className="scroll-mt-40 p-4">
+          <SectionTitle icon={<Activity className="h-4 w-4" />} title="Selected transaction" action={selectedTx ? shortHash(selectedTx) : "none selected"} flush />
+          <form
+            className="mt-4 flex flex-wrap gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const hash = lookupHash.trim();
+              if (hash) onSelectTx(hash);
+            }}
+          >
+            <input
+              value={lookupHash}
+              onChange={(event) => setLookupHash(event.target.value)}
+              placeholder="Paste transaction hash"
+              aria-label="Transaction hash"
+              className="h-10 min-w-[16rem] flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:font-sans placeholder:text-white/34 focus:border-mint/40"
+            />
+            <button
+              type="submit"
+              disabled={!lookupHash.trim()}
+              className="inline-flex h-10 items-center gap-2 rounded-lg bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Search className="h-4 w-4" />
+              Open
+            </button>
+            <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-lg border border-white/12 px-3 text-sm font-medium text-white/68 transition hover:border-mint/30 hover:text-mint">
+              <Upload className="h-4 w-4" />
+              Open reference
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void openReferenceFile(file);
+                  event.target.value = "";
+                }}
+              />
+            </label>
+          </form>
+          {referenceError && <div className="mt-3 text-sm text-rose">{referenceError}</div>}
+          {selectedTx && visibleTransfer ? (
+            <div className="mt-4 grid gap-4">
+              <div className="flex flex-col gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-white">Portable transaction reference</div>
+                  <div className="mt-1 text-xs text-white/46">
+                    The transaction hash is the stable lookup ID. Export it with public metadata to reopen this transaction later.
+                  </div>
+                </div>
+                <button
+                  onClick={() => downloadTransactionReference({
+                    hash: selectedTx,
+                    transfer: visibleTransfer,
+                    blockHeight,
+                    transactionIndex: transaction?.transaction_index ?? poolEntry?.included_transaction_index ?? null,
+                    batch,
+                  })}
+                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg border border-mint/25 bg-mint/10 px-3 text-sm font-medium text-mint hover:bg-mint/15"
+                >
+                  <Download className="h-4 w-4" />
+                  Export reference
+                </button>
+              </div>
+              <TransactionLifecycle
+                hash={selectedTx}
+                poolEntry={poolEntry}
+                blockHeight={blockHeight}
+                batch={batch}
+              />
+              <div className="grid gap-3 md:grid-cols-2">
+                <HashLine label="Transaction hash" value={selectedTx} />
+                <MetricLine label="Activity group" value={blockHeight ?? "waiting"} />
+                <TransferDetail tx={visibleTransfer} onSelectAccount={onSelectAccount} />
+              </div>
             </div>
           ) : transactionError ? (
             <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{transactionError}</div>
           ) : (
-            <div className="mt-4 text-sm text-white/50">Search a transfer fingerprint or open one from an activity row.</div>
+            <div className="mt-4 text-sm text-white/50">
+              Paste a transaction hash above or select the details icon in an activity row.
+            </div>
           )}
         </Panel>
+        <AccountDetail
+          selectedAccount={selectedAccount}
+          account={account}
+          accountError={accountError}
+        />
       </div>
     </div>
   );
 }
 
-function AccountsView({
+function TransactionLifecycle({
+  hash,
+  poolEntry,
+  blockHeight,
+  batch,
+}: {
+  hash: string;
+  poolEntry?: TransactionPoolEntry;
+  blockHeight: number | null;
+  batch?: RollupBatchSummary;
+}) {
+  const failed = poolEntry?.status === "failed" || poolEntry?.status === "expired";
+  const steps = [
+    {
+      label: "Submitted",
+      complete: Boolean(poolEntry || blockHeight !== null),
+      detail: failed ? poolEntry?.failure_reason ?? poolEntry?.status : poolEntry?.created_at ?? shortHash(hash),
+    },
+    {
+      label: "Sequenced",
+      complete: blockHeight !== null,
+      detail: blockHeight === null ? "Waiting for an L2 block" : `Included in block ${blockHeight}`,
+    },
+    {
+      label: "Proven",
+      complete: Boolean(batch && batch.status !== "built"),
+      detail: !batch
+        ? "Waiting for a validity batch"
+        : batch.status === "built"
+          ? `Batch ${batch.batch_number} is ready for proof`
+          : `Batch ${batch.batch_number} proof submitted`,
+    },
+    {
+      label: "Settled",
+      complete: batch?.status === "finalized",
+      detail: batch?.status === "finalized"
+        ? `Finalized on chain ${batch.l1_chain_id ?? "L1"}`
+        : "Waiting for L1 finalization",
+    },
+  ];
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+      <div className="mb-3 text-xs font-medium uppercase tracking-[0.16em] text-white/38">Lifecycle</div>
+      <div className="grid gap-2 md:grid-cols-4">
+        {steps.map((step, index) => (
+          <div key={step.label} className="relative min-w-0 rounded-lg border border-white/8 bg-white/[0.035] p-3">
+            <div className="flex items-center gap-2">
+              <div className={cn(
+                "flex h-6 w-6 items-center justify-center rounded-full border text-xs font-semibold",
+                failed && index === 0
+                  ? "border-rose/30 bg-rose/10 text-rose"
+                  : step.complete
+                    ? "border-mint/30 bg-mint/10 text-mint"
+                    : "border-white/10 bg-white/[0.04] text-white/38",
+              )}>
+                {step.complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : index + 1}
+              </div>
+              <span className="text-sm font-semibold text-white">{step.label}</span>
+            </div>
+            <div className="mt-2 truncate text-xs text-white/44" title={step.detail}>{step.detail}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AccountFinder({
   candidates,
   selectedAccount,
-  account,
-  accountError,
   onSelectAccount,
 }: {
   candidates: Array<{ address: string; touches: number; sent: number; received: number }>;
   selectedAccount: string | null;
-  account?: Account;
-  accountError: string | null;
   onSelectAccount: (address: string) => void;
 }) {
   const [manual, setManual] = useState("");
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[25rem_1fr]">
-      <Panel className="p-4">
-        <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Find a wallet" action="Current balance" flush />
-        <form
-          className="mt-4 flex gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (manual.trim()) onSelectAccount(manual.trim());
-          }}
-        >
-          <input
-            value={manual}
-            onChange={(event) => setManual(event.target.value)}
-            placeholder="Paste wallet address"
-            className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none placeholder:text-white/34 focus:border-mint/40"
-          />
-          <button className="rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90">
-            Open
+    <Panel className="p-4">
+      <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Find a wallet" action="Current balance" flush />
+      <form
+        className="mt-4 flex gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (manual.trim()) onSelectAccount(manual.trim());
+        }}
+      >
+        <input
+          value={manual}
+          onChange={(event) => setManual(event.target.value)}
+          placeholder="Paste wallet address"
+          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none placeholder:text-white/34 focus:border-mint/40"
+        />
+        <button className="rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90">
+          Open
+        </button>
+      </form>
+      <div className="mt-4 space-y-2">
+        {candidates.map((candidate) => (
+          <button
+            key={candidate.address}
+            onClick={() => onSelectAccount(candidate.address)}
+            className={cn(
+              "w-full rounded-lg border p-3 text-left transition",
+              selectedAccount === candidate.address
+                ? "border-mint/35 bg-mint/10"
+                : "border-white/10 bg-white/[0.035] hover:border-white/20",
+            )}
+          >
+            <div className="hash text-sm text-white">{candidate.address}</div>
+            <div className="mt-2 flex gap-2 text-xs text-white/48">
+              <span>{pluralize(candidate.touches, "transfer")}</span>
+              <span>sent {candidate.sent}</span>
+              <span>received {candidate.received}</span>
+            </div>
           </button>
-        </form>
-        <div className="mt-4 space-y-2">
-          {candidates.map((candidate) => (
-            <button
-              key={candidate.address}
-              onClick={() => onSelectAccount(candidate.address)}
-              className={cn(
-                "w-full rounded-lg border p-3 text-left transition",
-                selectedAccount === candidate.address
-                  ? "border-mint/35 bg-mint/10"
-                  : "border-white/10 bg-white/[0.035] hover:border-white/20",
-              )}
-            >
-              <div className="hash text-sm text-white">{candidate.address}</div>
-              <div className="mt-2 flex gap-2 text-xs text-white/48">
-                <span>{pluralize(candidate.touches, "transfer")}</span>
-                <span>sent {candidate.sent}</span>
-                <span>received {candidate.received}</span>
-              </div>
-            </button>
-          ))}
-        </div>
-      </Panel>
+        ))}
+      </div>
+    </Panel>
+  );
+}
 
-      <Panel className="p-4">
-        <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Wallet detail" action={selectedAccount ? shortHash(selectedAccount) : "none"} flush />
-        {account ? (
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
-            <HashLine label="Wallet address" value={account.address} />
-            <MetricLine label="Balance" value={account.balance} />
-            <MetricLine label="Next transfer #" value={account.nonce} />
-          </div>
-        ) : accountError ? (
-          <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{accountError}</div>
-        ) : (
-          <div className="mt-4 text-sm text-white/50">Select a wallet from the current activity group or paste an address.</div>
-        )}
-      </Panel>
-    </div>
+function AccountDetail({
+  selectedAccount,
+  account,
+  accountError,
+}: {
+  selectedAccount: string | null;
+  account?: Account;
+  accountError: string | null;
+}) {
+  return (
+    <Panel className="p-4">
+      <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Wallet detail" action={selectedAccount ? shortHash(selectedAccount) : "none"} flush />
+      {account ? (
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <HashLine label="Wallet address" value={account.address} />
+          <MetricLine label="Balance" value={account.balance} />
+          <MetricLine label="Next transfer #" value={account.nonce} />
+        </div>
+      ) : accountError ? (
+        <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{accountError}</div>
+      ) : (
+        <div className="mt-4 text-sm text-white/50">Select a wallet from the current activity group or paste an address.</div>
+      )}
+    </Panel>
   );
 }
 
 function SequencerView({
   pool,
-  poolTotal,
+  health,
+  errors,
+  summary,
+  onRefresh,
+  onOpenTransaction,
   onSubmitted,
   onSequenced,
 }: {
   pool: TransactionPoolEntry[];
-  poolTotal: number;
+  health?: { status: string; latest_error: unknown };
+  errors: Array<{ id: number; severity: string; message: string; service: string; created_at: string; resolved_at: string | null }>;
+  summary?: { height: number | null; valid: boolean; block_count: number };
+  onRefresh: () => Promise<void>;
+  onOpenTransaction: (hash: string) => void;
   onSubmitted: (hash: string) => Promise<void>;
   onSequenced: (height: number) => Promise<void>;
 }) {
@@ -980,6 +1258,9 @@ function SequencerView({
   const pendingFromWallet = walletAddress
     ? pool.filter((entry) => entry.status === "pending" && entry.transfer.from === walletAddress).length
     : 0;
+  const pendingTotal = pool.filter((entry) => entry.status === "pending").length;
+  const pendingEntries = pool.filter((entry) => entry.status === "pending");
+  const recentIncluded = pool.filter((entry) => entry.status === "included").slice(0, 5);
   const nextNonce = (walletAccount.data?.nonce ?? 0) + pendingFromWallet;
 
   async function createWallet() {
@@ -1052,14 +1333,23 @@ function SequencerView({
       });
       await onSequenced(result.block.height);
     } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Batch sequencing failed" });
+      const message = error instanceof Error ? error.message : "Batch sequencing failed";
+      if (message.toLowerCase().includes("no pending transactions")) {
+        setNotice({
+          tone: "neutral",
+          message: "The queue was already processed. Latest block data has been refreshed.",
+        });
+        await onRefresh();
+      } else {
+        setNotice({ tone: "bad", message });
+      }
     } finally {
       setSequencing(false);
     }
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
+    <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[0.85fr_1.15fr]">
       <div className="grid gap-4">
         <Panel className="p-4">
           <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Browser wallet" action="keys stay local" flush />
@@ -1143,28 +1433,39 @@ function SequencerView({
         </Panel>
 
         <Panel className="p-4">
-          <SectionTitle icon={<Play className="h-4 w-4" />} title="Group waiting transfers" action="Local builder" flush />
+          <SectionTitle
+            icon={<Play className="h-4 w-4" />}
+            title="Build the next L2 block"
+            action={pluralize(pendingTotal, "pending transfer")}
+            flush
+          />
+          <p className="mt-2 text-sm leading-6 text-white/48">
+            Sequence pending transfers into a new block. Submit a transfer first when the queue is empty.
+          </p>
           <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
             <label className="grid gap-2 text-sm text-white/62">
-              Max transfers
+              Transfer limit
               <input
                 type="number"
                 min={1}
                 max={100}
                 value={limit}
-                onChange={(event) => setLimit(Number(event.target.value))}
+                onChange={(event) => setLimit(Math.min(100, Math.max(1, Number(event.target.value) || 1)))}
                 className="h-10 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-white outline-none focus:border-mint/40"
               />
             </label>
             <button
               onClick={sequenceBatch}
-              disabled={sequencing}
-              className="self-end inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan px-3 text-sm font-semibold text-ink transition hover:bg-cyan/90 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={sequencing || pendingTotal === 0}
+              className="self-end inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan px-3 text-sm font-semibold text-ink transition hover:bg-cyan/90 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
             >
               <Play className="h-4 w-4" />
-              Build group
+              Build block
             </button>
           </div>
+          {pendingTotal === 0 && (
+            <div className="mt-3 text-xs text-white/40">Waiting for a submitted transfer.</div>
+          )}
         </Panel>
 
         {notice && (
@@ -1172,79 +1473,133 @@ function SequencerView({
             <div className={cn("text-sm font-medium", notice.tone === "bad" ? "text-rose" : "text-mint")}>{notice.message}</div>
           </Panel>
         )}
+        <SystemStatusPanel health={health} summary={summary} />
       </div>
 
-      <Panel className="overflow-hidden">
-        <SectionTitle icon={<Activity className="h-4 w-4" />} title="Waiting transfers" action={`${pool.length}/${poolTotal} loaded`} />
-        <div className="max-h-[42rem] overflow-auto">
-          {pool.length === 0 ? (
-            <div className="px-4 py-10 text-sm text-white/48">No transfers are waiting to be grouped.</div>
+      <div className="grid content-start gap-4">
+        <Panel className="overflow-hidden">
+          <SectionTitle
+            icon={<Activity className="h-4 w-4" />}
+            title="Pending transfers"
+            action={pluralize(pendingEntries.length, "waiting")}
+          />
+          {pendingEntries.length === 0 ? (
+            <div className="flex items-center justify-between gap-3 px-4 py-5">
+              <span className="text-sm text-white/48">The queue is empty.</span>
+              <Badge tone="good">All processed</Badge>
+            </div>
           ) : (
-            pool.map((entry) => (
-              <div key={entry.id} className="grid gap-3 border-b border-white/8 px-4 py-3 last:border-b-0">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="hash min-w-0 text-sm text-white">{entry.hash}</div>
-                  <Badge tone={entry.status === "included" ? "good" : entry.status === "failed" ? "bad" : "warn"}>{entry.status}</Badge>
-                </div>
-                <div className="grid gap-2 text-xs text-white/48 sm:grid-cols-3">
-                  <span className="hash">sender {shortHash(entry.transfer.from, 8, 6)}</span>
-                  <span className="hash">receiver {shortHash(entry.transfer.to, 8, 6)}</span>
-                  <span>amount {entry.transfer.amount} / transfer #{entry.transfer.nonce}</span>
-                </div>
-                {entry.included_block_height !== null && (
-                  <div className="text-xs text-mint">
-                    grouped in block {entry.included_block_height} at position {entry.included_transaction_index}
-                  </div>
-                )}
-                {entry.failure_reason && <div className="text-xs text-rose">{entry.failure_reason}</div>}
-              </div>
-            ))
+            <div className="max-h-[24rem] overflow-auto">
+              {pendingEntries.map((entry) => (
+                <TransferQueueRow key={entry.id} entry={entry} />
+              ))}
+            </div>
           )}
-        </div>
-      </Panel>
+        </Panel>
+
+        <Panel className="overflow-hidden">
+          <SectionTitle
+            icon={<Blocks className="h-4 w-4" />}
+            title="Recent sequencing activity"
+            action={`${recentIncluded.length} recent`}
+          />
+          {recentIncluded.length === 0 ? (
+            <div className="px-4 py-5 text-sm text-white/48">No transfers have been included yet.</div>
+          ) : (
+            <div className="divide-y divide-white/8">
+              {recentIncluded.map((entry) => (
+                <div key={entry.id} className="flex items-center gap-3 px-4 py-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-sm font-semibold text-mint">
+                    {entry.included_block_height ?? "–"}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="hash text-sm text-white/78">{entry.hash}</div>
+                    <div className="mt-1 text-xs text-white/44">
+                      {entry.transfer.amount} transferred · position {entry.included_transaction_index ?? "–"}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => onOpenTransaction(entry.hash)}
+                    title="Open transaction details"
+                    aria-label="Open transaction details"
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 text-white/48 hover:border-mint/30 hover:text-mint"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+        <SystemIssuesPanel errors={errors} />
+      </div>
     </div>
   );
 }
 
-function HealthView({
+function TransferQueueRow({ entry }: { entry: TransactionPoolEntry }) {
+  return (
+    <div className="grid gap-3 border-b border-white/8 px-4 py-3 last:border-b-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="hash min-w-0 text-sm text-white">{entry.hash}</div>
+        <Badge tone="warn">pending</Badge>
+      </div>
+      <div className="grid gap-2 text-xs text-white/48 sm:grid-cols-3">
+        <span className="hash">sender {shortHash(entry.transfer.from, 8, 6)}</span>
+        <span className="hash">receiver {shortHash(entry.transfer.to, 8, 6)}</span>
+        <span>amount {entry.transfer.amount} / transfer #{entry.transfer.nonce}</span>
+      </div>
+    </div>
+  );
+}
+
+function SystemStatusPanel({
   health,
-  errors,
   summary,
 }: {
   health?: { status: string; latest_error: unknown };
-  errors: Array<{ id: number; severity: string; message: string; service: string; created_at: string; resolved_at: string | null }>;
   summary?: { height: number | null; valid: boolean; block_count: number };
 }) {
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
-      <Panel className="p-4">
-        <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="System status" action={health?.status ?? "optional"} flush />
-        <div className="mt-4 grid gap-3">
-          <StatusLine label="API connection" ok={health?.status === "ok"} value={health?.status ?? "unavailable"} />
-          <StatusLine label="Data consistency" ok={Boolean(summary?.valid)} value={summary?.valid ? "healthy" : "needs review"} />
-          <StatusLine label="Latest activity group" ok value={summary?.height ?? "none"} />
-          <StatusLine label="Stored groups" ok value={summary?.block_count ?? 0} />
+    <Panel className="p-4">
+      <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="System status" action={health?.status ?? "optional"} flush />
+      <div className="mt-4 grid gap-3">
+        <StatusLine label="API connection" ok={health?.status === "ok"} value={health?.status ?? "unavailable"} />
+        <StatusLine label="Data consistency" ok={Boolean(summary?.valid)} value={summary?.valid ? "healthy" : "needs review"} />
+        <StatusLine label="Latest activity group" ok value={summary?.height ?? "none"} />
+        <StatusLine label="Stored groups" ok value={summary?.block_count ?? 0} />
+      </div>
+    </Panel>
+  );
+}
+
+function SystemIssuesPanel({
+  errors,
+}: {
+  errors: Array<{ id: number; severity: string; message: string; service: string; created_at: string; resolved_at: string | null }>;
+}) {
+  return (
+    <Panel className="overflow-hidden">
+      <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="System issues" action={`${errors.length} recent`} />
+      {errors.length === 0 ? (
+        <div className="flex items-center justify-between gap-3 px-4 py-5">
+          <span className="text-sm text-white/48">No active API or sequencing issues.</span>
+          <Badge tone="good">Healthy</Badge>
         </div>
-      </Panel>
-      <Panel className="overflow-hidden">
-        <SectionTitle icon={<Activity className="h-4 w-4" />} title="System events" action={`${errors.length} recent`} />
-        {errors.length === 0 ? (
-          <div className="px-4 py-10 text-sm text-white/48">No system issues are currently exposed.</div>
-        ) : (
-          <div className="divide-y divide-white/8">
-            {errors.map((error) => (
-              <div key={error.id} className="grid gap-1 px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <Badge tone={error.resolved_at ? "neutral" : error.severity === "warning" ? "warn" : "bad"}>{error.severity}</Badge>
-                  <span className="text-sm font-medium text-white">{error.message}</span>
-                </div>
-                <div className="text-xs text-white/44">{error.service} / {error.created_at}</div>
+      ) : (
+        <div className="divide-y divide-white/8">
+          {errors.map((error) => (
+            <div key={error.id} className="grid gap-1 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <Badge tone={error.resolved_at ? "neutral" : error.severity === "warning" ? "warn" : "bad"}>{error.severity}</Badge>
+                <span className="text-sm font-medium text-white">{error.message}</span>
               </div>
-            ))}
-          </div>
-        )}
-      </Panel>
-    </div>
+              <div className="text-xs text-white/44">{error.service} / {error.created_at}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -1290,7 +1645,7 @@ function RollupView({
                   groups {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "transfer")}
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-white/48">
-                  <span>chain {batch.l1_chain_id ?? "none"}</span>
+                  <span>{batch.l1_chain_id ? `chain ${batch.l1_chain_id}` : "L1 not selected"}</span>
                   <span>{settlementMilestoneText(batch)}</span>
                 </div>
                 <div className="mt-2 text-xs text-mint/72">
@@ -1323,48 +1678,64 @@ function RollupView({
               <MetricLine label="Last group" value={selectedBatch.end_block_height} />
               <MetricLine label="Transfers" value={selectedBatch.transaction_count} />
             </div>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <StatusLine label="Settlement state" ok={selectedBatch.status === "finalized"} value={<Badge tone={settlementStatusTone(selectedBatch.status)}>{settlementStatusLabel(selectedBatch.status)}</Badge>} />
-              <MetricLine label="Settlement chain" value={selectedBatch.l1_chain_id ?? "none"} />
-              <MetricLine label="L1 progress" value={settlementMilestoneText(selectedBatch)} />
-            </div>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-              <MetricLine label="Send block" value={selectedBatch.l1_submit_block_number ?? "none"} />
-              <MetricLine label="Send gas" value={selectedBatch.l1_submit_gas_used ?? "none"} />
-              <MetricLine label="Final block" value={selectedBatch.l1_finalize_block_number ?? "none"} />
-              <MetricLine label="Final gas" value={selectedBatch.l1_finalize_gas_used ?? "none"} />
-            </div>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <HashLine label="Previous balance fingerprint" value={selectedBatch.prev_state_root} />
-              <HashLine label="New balance fingerprint" value={selectedBatch.new_state_root} />
-              <HashLine label="Transfer fingerprint" value={selectedBatch.transaction_root} />
-              <HashLine label="Group fingerprint" value={selectedBatch.block_hash_root} />
-              <HashLine label="Package fingerprint" value={selectedBatch.data_hash} />
+            <SettlementProgress batch={selectedBatch} />
+            <div className="flex flex-col gap-2 border-b border-white/8 pb-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-white">Validity commitments</h3>
+                <p className="mt-1 text-xs leading-5 text-white/48">
+                  Copy these only when comparing prover output, API responses, or settlement calldata.
+                </p>
+              </div>
+              <span className="text-xs text-white/36">Use the copy icon to capture the complete value</span>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <HashLine label="Settlement contract" value={selectedBatch.l1_contract_address} />
-              <HashLine label="Submit transaction" value={selectedBatch.l1_submit_tx_hash} />
-              <HashLine label="Finalize transaction" value={selectedBatch.l1_finalize_tx_hash} />
-              <HashLine label="Finalized at" value={selectedBatch.l1_finalized_at} />
+              <HashLine label="Previous state root" value={selectedBatch.prev_state_root} />
+              <HashLine label="New state root" value={selectedBatch.new_state_root} />
+              <HashLine label="Transaction root" value={selectedBatch.transaction_root} />
+              <HashLine label="Block hash root" value={selectedBatch.block_hash_root} />
+              <HashLine label="Batch commitment" value={selectedBatch.data_hash} />
             </div>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              <SettlementReceiptPanel
-                title="Submit receipt"
-                timestamp={selectedBatch.l1_submitted_at}
-                txHash={selectedBatch.l1_submit_tx_hash}
-                blockNumber={selectedBatch.l1_submit_block_number}
-                gasUsed={selectedBatch.l1_submit_gas_used}
-                receipt={selectedBatch.l1_submit_receipt}
-              />
-              <SettlementReceiptPanel
-                title="Finalize receipt"
-                timestamp={selectedBatch.l1_finalized_at}
-                txHash={selectedBatch.l1_finalize_tx_hash}
-                blockNumber={selectedBatch.l1_finalize_block_number}
-                gasUsed={selectedBatch.l1_finalize_gas_used}
-                receipt={selectedBatch.l1_finalize_receipt}
-              />
-            </div>
+            {selectedBatch.status === "built" ? (
+              <SettlementNextStep batchNumber={selectedBatch.batch_number} />
+            ) : (
+              <>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  <MetricLine label="Settlement chain" value={selectedBatch.l1_chain_id ?? "unavailable"} />
+                  <MetricLine label="Submit block" value={selectedBatch.l1_submit_block_number ?? "pending"} />
+                  <MetricLine label="Submit gas" value={selectedBatch.l1_submit_gas_used ?? "pending"} />
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <HashLine label="Settlement contract" value={selectedBatch.l1_contract_address} />
+                  <HashLine label="Submit transaction" value={selectedBatch.l1_submit_tx_hash} />
+                  {selectedBatch.status === "finalized" && (
+                    <>
+                      <HashLine label="Finalize transaction" value={selectedBatch.l1_finalize_tx_hash} />
+                      <HashLine label="Finalized at" value={selectedBatch.l1_finalized_at} />
+                    </>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <SettlementReceiptPanel
+                    title="Submit receipt"
+                    timestamp={selectedBatch.l1_submitted_at}
+                    txHash={selectedBatch.l1_submit_tx_hash}
+                    blockNumber={selectedBatch.l1_submit_block_number}
+                    gasUsed={selectedBatch.l1_submit_gas_used}
+                    receipt={selectedBatch.l1_submit_receipt}
+                  />
+                  {selectedBatch.status === "finalized" && (
+                    <SettlementReceiptPanel
+                      title="Finalize receipt"
+                      timestamp={selectedBatch.l1_finalized_at}
+                      txHash={selectedBatch.l1_finalize_tx_hash}
+                      blockNumber={selectedBatch.l1_finalize_block_number}
+                      gasUsed={selectedBatch.l1_finalize_gas_used}
+                      receipt={selectedBatch.l1_finalize_receipt}
+                    />
+                  )}
+                </div>
+              </>
+            )}
             <div className="overflow-hidden rounded-lg border border-white/10">
               <div className="grid grid-cols-[auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
                 <span>Group</span>
@@ -1403,6 +1774,81 @@ function RollupView({
   );
 }
 
+function SettlementProgress({ batch }: { batch: RollupBatchSummary }) {
+  const submitted = batch.status === "submitted" || batch.status === "finalized";
+  const finalized = batch.status === "finalized";
+  const steps = [
+    { label: "Batch built", complete: true, detail: `Package ${batch.batch_number}` },
+    { label: "Proof submitted", complete: submitted, detail: submitted ? "Validity proof sent" : "Next action" },
+    { label: "L1 finalized", complete: finalized, detail: finalized ? `Chain ${batch.l1_chain_id}` : "Waiting" },
+  ];
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <span className="text-xs font-medium uppercase tracking-[0.16em] text-white/38">Settlement progress</span>
+        <Badge tone={settlementStatusTone(batch.status)}>{settlementStatusLabel(batch.status)}</Badge>
+      </div>
+      <div className="grid gap-2 md:grid-cols-3">
+        {steps.map((step, index) => (
+          <div key={step.label} className="flex items-center gap-3 rounded-lg border border-white/8 bg-white/[0.035] p-3">
+            <div className={cn(
+              "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold",
+              step.complete
+                ? "border-mint/30 bg-mint/10 text-mint"
+                : "border-white/10 bg-white/[0.04] text-white/38",
+            )}>
+              {step.complete ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-white">{step.label}</div>
+              <div className="mt-0.5 text-xs text-white/44">{step.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SettlementNextStep({ batchNumber }: { batchNumber: number }) {
+  const witnessUrl = `${API_BASE}/rollup/batches/${batchNumber}/validity-witness`;
+  const calldataUrl = `${API_BASE}/rollup/batches/${batchNumber}/settlement-calldata`;
+
+  return (
+    <div className="rounded-lg border border-amber/25 bg-amber/10 p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-amber">Next: prove and submit this batch</div>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-white/58">
+            Export the witness for the prover, then use the generated settlement calldata when submitting the proof to L1.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <a
+            href={witnessUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint"
+          >
+            <ExternalLink className="h-4 w-4" />
+            Open witness
+          </a>
+          <a
+            href={calldataUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-9 items-center gap-2 rounded-lg bg-amber px-3 text-sm font-semibold text-ink hover:bg-amber/90"
+          >
+            <ExternalLink className="h-4 w-4" />
+            Open calldata
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SettlementReceiptPanel({
   title,
   timestamp,
@@ -1437,7 +1883,7 @@ function SettlementReceiptPanel({
       <div className="mt-3 flex min-w-0 items-center gap-2 rounded-md border border-white/8 bg-black/15 px-2.5 py-2">
         <span className="text-xs uppercase tracking-[0.14em] text-white/36">Tx</span>
         <span className="hash min-w-0 flex-1 text-sm text-white/72">{txHash ?? "none"}</span>
-        {txHash && <CopyButton value={txHash} />}
+        {txHash && <CopyButton value={txHash} label={`${title} transaction`} />}
       </div>
     </div>
   );
@@ -1473,7 +1919,7 @@ function HashLine({ label, value }: { label: string; value?: string | null }) {
       <div className="mb-2 text-xs uppercase tracking-[0.16em] text-white/36">{label}</div>
       <div className="flex min-w-0 items-center gap-2">
         <div className="hash min-w-0 flex-1 text-sm text-white/78">{value ?? "none"}</div>
-        {value && <CopyButton value={value} />}
+        {value && <CopyButton value={value} label={label} />}
       </div>
     </div>
   );
@@ -1522,12 +1968,12 @@ function StatusLine({ label, ok, value }: { label: string; ok: boolean; value: R
   );
 }
 
-function CopyButton({ value }: { value: string }) {
+function CopyButton({ value, label = "value" }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
-      title="Copy"
-      aria-label="Copy"
+      title={`Copy ${label.toLowerCase()}`}
+      aria-label={`Copy ${label.toLowerCase()}`}
       onClick={async () => {
         await navigator.clipboard.writeText(value);
         setCopied(true);
@@ -1540,16 +1986,78 @@ function CopyButton({ value }: { value: string }) {
   );
 }
 
+function downloadTransactionReference({
+  hash,
+  transfer,
+  blockHeight,
+  transactionIndex,
+  batch,
+}: {
+  hash: string;
+  transfer: Transfer;
+  blockHeight: number | null;
+  transactionIndex: number | null;
+  batch?: RollupBatchSummary;
+}) {
+  const apiBase = API_BASE.startsWith("/")
+    ? `${window.location.origin}${API_BASE}`
+    : API_BASE;
+  const reference: TransactionReferenceFile = {
+    format: "rolluplens.transaction-reference",
+    version: 1,
+    exported_at: new Date().toISOString(),
+    api_base: apiBase,
+    transaction: {
+      hash,
+      block_height: blockHeight,
+      transaction_index: transactionIndex,
+      from: transfer.from,
+      to: transfer.to,
+      amount: transfer.amount,
+      nonce: transfer.nonce,
+    },
+    batch: batch ? { number: batch.batch_number, status: batch.status } : null,
+  };
+  const blob = new Blob([`${JSON.stringify(reference, null, 2)}\n`], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `rolluplens-transaction-${hash.slice(0, 12)}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 function TransactionMini({ tx, onSelectAccount }: { tx: Transfer; onSelectAccount: (address: string) => void }) {
   return (
     <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
-      <div className="flex items-center gap-2 text-sm">
-        <button onClick={() => onSelectAccount(tx.from)} className="hash min-w-0 flex-1 text-cyan hover:text-cyan/80">
-          {shortHash(tx.from, 9, 6)}
+      <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)] items-end gap-3">
+        <button
+          onClick={() => onSelectAccount(tx.from)}
+          title={tx.from}
+          className="min-w-0 text-center"
+        >
+          <span className="block text-xs uppercase tracking-[0.14em] text-white/36">Sender</span>
+          <span className="hash mt-1 block text-sm text-cyan hover:text-cyan/80">
+            {shortHash(tx.from, 10, 8)}
+          </span>
         </button>
-        <span className="rounded-md bg-amber/10 px-2 py-1 text-xs font-semibold text-amber">{tx.amount}</span>
-        <button onClick={() => onSelectAccount(tx.to)} className="hash min-w-0 flex-1 text-mint hover:text-mint/80">
-          {shortHash(tx.to, 9, 6)}
+        <div className="text-center">
+          <span className="block text-xs uppercase tracking-[0.14em] text-white/36">Amount</span>
+          <span className="mt-1 inline-block rounded-md bg-amber/10 px-2 py-1 text-xs font-semibold text-amber">
+            {tx.amount}
+          </span>
+        </div>
+        <button
+          onClick={() => onSelectAccount(tx.to)}
+          title={tx.to}
+          className="min-w-0 text-center"
+        >
+          <span className="block text-xs uppercase tracking-[0.14em] text-white/36">Receiver</span>
+          <span className="hash mt-1 block text-sm text-mint hover:text-mint/80">
+            {shortHash(tx.to, 10, 8)}
+          </span>
         </button>
       </div>
     </div>
@@ -1568,21 +2076,30 @@ function TransactionRow({
   onSelectTx: (hash: string) => void;
 }) {
   return (
-    <div className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-3 border-b border-white/8 px-3 py-3 text-sm last:border-b-0">
-      <button onClick={() => onSelectAccount(tx.from)} className="hash min-w-0 text-left text-cyan hover:text-cyan/80">
-        {shortHash(tx.from)}
+    <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)_4rem] items-center gap-3 border-b border-white/8 px-3 py-3 text-sm last:border-b-0">
+      <button
+        onClick={() => onSelectAccount(tx.from)}
+        title={tx.from}
+        className="hash min-w-0 text-center text-cyan hover:text-cyan/80"
+      >
+        {shortHash(tx.from, 10, 8)}
       </button>
-      <span className="rounded-md bg-amber/10 px-2 py-1 text-xs font-semibold text-amber">{tx.amount}</span>
-      <button onClick={() => onSelectAccount(tx.to)} className="hash min-w-0 text-left text-mint hover:text-mint/80">
-        {shortHash(tx.to)}
+      <span className="justify-self-center rounded-md bg-amber/10 px-2 py-1 text-xs font-semibold text-amber">{tx.amount}</span>
+      <button
+        onClick={() => onSelectAccount(tx.to)}
+        title={tx.to}
+        className="hash min-w-0 text-center text-mint hover:text-mint/80"
+      >
+        {shortHash(tx.to, 10, 8)}
       </button>
       <button
         disabled={!hash}
         onClick={() => hash && onSelectTx(hash)}
-        className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.045] px-2 py-1 text-xs text-white/58 transition hover:border-mint/30 hover:text-mint disabled:opacity-40"
+        title={hash ? `Open transaction ${hash}` : "Transaction unavailable"}
+        aria-label={hash ? "Open transaction details" : "Transaction unavailable"}
+        className="inline-flex h-8 w-8 items-center justify-center justify-self-center rounded-md border border-white/10 bg-white/[0.045] text-white/58 transition hover:border-mint/30 hover:text-mint disabled:opacity-40"
       >
-        <ExternalLink className="h-3 w-3" />
-        {hash ? shortHash(hash, 6, 4) : "no hash"}
+        <ExternalLink className="h-3.5 w-3.5" />
       </button>
     </div>
   );

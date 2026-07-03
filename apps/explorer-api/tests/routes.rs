@@ -31,6 +31,20 @@ async fn postgres_router_exposes_index_without_database_queries() {
 }
 
 #[tokio::test]
+async fn readiness_reports_an_unavailable_database() {
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy("postgresql://postgres:postgres@127.0.0.1:1/zk_rollup")
+        .unwrap();
+    let response = get_response(app_with_pool(pool), "/ready").await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = response_json(response).await;
+    assert_eq!(payload["status"], json!("not_ready"));
+    assert_eq!(payload["database"], json!("unavailable"));
+}
+
+#[tokio::test]
 async fn genesis_initialization_is_atomic_and_one_time() {
     let Some(database_url) = optional_test_database_url() else {
         eprintln!("skipping Postgres integration test; set TEST_DATABASE_URL or DATABASE_URL");

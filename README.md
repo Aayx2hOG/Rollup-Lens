@@ -46,7 +46,13 @@ For the local container above:
 
 ```env
 DATABASE_URL="postgresql://postgres:postgres@localhost:5432/zk_rollup"
+DIRECT_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/zk_rollup"
 ```
+
+With Neon, use the pooled connection string for `DATABASE_URL` and the
+non-pooler connection string from Neon's Connect dialog for
+`DIRECT_DATABASE_URL`. Prisma migrations prefer the direct URL; the running API
+continues to use the pooled URL.
 
 Apply migrations:
 
@@ -120,6 +126,7 @@ Core endpoints:
 
 ```text
 GET  /health
+GET  /ready
 GET  /
 GET  /chain/summary
 GET  /blocks
@@ -138,6 +145,10 @@ GET  /errors
 GET  /errors/latest
 GET  /search/:query
 ```
+
+`/health` reports application state stored by the explorer. `/ready` actively
+checks Postgres and returns HTTP 503 with a safe diagnostic when the database
+is unavailable.
 
 `POST /rollup/transactions` accepts a signed transfer and stores it in the
 durable transaction pool after validating it against current account state plus
@@ -188,6 +199,30 @@ terminal is not required.
 Vite proxies `/api/*` to `http://127.0.0.1:3000` during development. The UI
 includes overview, block, account, rollup batch, sequencer, and API health
 views.
+
+## Production deployment
+
+The repository root contains `render.yaml` for a Render web service. It builds
+the Rust API, checks `/ready`, and starts the API on Render's assigned port.
+Apply committed Prisma migrations as a separate deployment step so overlapping
+service starts cannot contend for Prisma's advisory lock.
+
+Set `DATABASE_URL` as a secret in Render using the complete Neon connection
+string. Do not add quotes around the value. For an existing manually configured
+service, use:
+
+```text
+Build: cargo build --release -p explorer-api
+Migration: bun run db:migrate:deploy
+Start: ./target/release/explorer-api --bind 0.0.0.0:$PORT
+Health check: /ready
+```
+
+When the UI is hosted separately, set its build-time API origin:
+
+```env
+VITE_EXPLORER_API_BASE=https://your-api.onrender.com
+```
 
 The Operate view can load the JSON key file produced by `wallet-cli`, or create
 and export a compatible keypair. Transfer signing happens in the browser and

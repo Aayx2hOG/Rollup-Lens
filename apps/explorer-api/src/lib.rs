@@ -388,6 +388,7 @@ pub fn app_with_pool(pool: PgPool) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/ready", get(readiness))
         .route("/chain/summary", get(chain_summary))
         .route("/blocks", get(blocks))
         .route("/blocks/:height", get(block_by_height))
@@ -455,11 +456,35 @@ async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiEr
     })))
 }
 
+async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ready", "database": "available" })),
+        ),
+        Err(error) => {
+            eprintln!("database readiness check failed: {error}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "not_ready",
+                    "database": "unavailable",
+                    "error": "Database connection failed. Check DATABASE_URL and database availability."
+                })),
+            )
+        }
+    }
+}
+
 async fn index() -> Json<Value> {
     Json(json!({
         "name": "zk-rollup explorer api",
         "endpoints": [
             "GET /health",
+            "GET /ready",
             "GET /chain/summary",
             "GET /blocks",
             "GET /blocks/:height",

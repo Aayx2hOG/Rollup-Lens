@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: rollup-lens-api
+    runtime: rust
+    plan: free
+    buildCommand: bun install --frozen-lockfile && cargo build --release -p explorer-api
+    startCommand: ./target/release/explorer-api --bind 0.0.0.0:$PORT
+    healthCheckPath: /ready
+    envVars:
+      - key: DATABASE_URL
+        sync: false
