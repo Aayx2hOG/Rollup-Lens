@@ -16,3 +16,11 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+chain-core = { path = "../../crates/chain-core" }
+explorer-api = { path = "../explorer-api" }
+sqlx.workspace = true
+tempfile.workspace = true
+wallet-core = { path = "../../crates/wallet-core" }

@@ -69,3 +69,25 @@ Use `--dry-run` to print the `cast send` command without broadcasting:
 ```bash
 cargo run -p settlement-client -- --dry-run submit-batch --batch-number 0
 ```
+
+## End-to-end validity settlement test
+
+The ignored Rust integration test creates an isolated Postgres schema, runs the
+explorer API, sequences a signed transfer, generates an SP1 Groth16 proof,
+deploys the real SP1 verifier and validity settlement contract to Anvil, submits
+the proof through this client, and verifies both L1 state and persisted receipt
+metadata.
+
+Build the prover once, then run the test explicitly:
+
+```bash
+cargo build --release -p validity-prover
+
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
+VALIDITY_PROVER_BIN="$PWD/target/release/validity-prover" \
+cargo test -p settlement-client --test validity_settlement_e2e \
+  -- --ignored --nocapture
+```
+
+The database user must be allowed to create and drop schemas. Anvil, `forge`,
+`cast`, and the SP1 proving toolchain must be available on `PATH`.
