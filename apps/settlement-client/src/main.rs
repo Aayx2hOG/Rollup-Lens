@@ -42,8 +42,18 @@ struct Cli {
     #[arg(long, env = "CAST_BIN", default_value = "cast")]
     cast_bin: String,
 
+    #[arg(long, env = "SETTLEMENT_UPDATE_TOKEN")]
+    settlement_update_token: Option<String>,
+
     #[arg(long, global = true)]
     dry_run: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Do not send client-observed receipt metadata to the explorer API"
+    )]
+    no_persist: bool,
 
     #[command(subcommand)]
     command: SettlementCommand,
@@ -239,38 +249,42 @@ async fn main() -> Result<()> {
     };
 
     let output = run_cast(&cli, &rpc_url, &private_key, command)?;
-    if let Some(persisted) = output.persisted_status {
-        let chain_id = fetch_chain_id(&rpc_url).await?;
-        let (receipt, receipt_value) =
-            fetch_verified_receipt(&rpc_url, &output.tx_hash, &contract).await?;
-        let block_number = parse_hex_u64(&receipt.block_number, "receipt block number")?;
-        let gas_used = parse_hex_u64(&receipt.gas_used, "receipt gas used")?;
+    if !cli.no_persist {
+        if let Some(persisted) = output.persisted_status {
+            let chain_id = fetch_chain_id(&rpc_url).await?;
+            let (receipt, receipt_value) =
+                fetch_verified_receipt(&rpc_url, &output.tx_hash, &contract).await?;
+            let block_number = parse_hex_u64(&receipt.block_number, "receipt block number")?;
+            let gas_used = parse_hex_u64(&receipt.gas_used, "receipt gas used")?;
 
-        persist_settlement_status(
-            &cli.api_url,
-            persisted.batch_number,
-            persisted.status,
-            &output.tx_hash,
-            &contract,
-            chain_id,
-            block_number,
-            gas_used,
-            &receipt_value,
-        )
-        .await?;
-        if persisted.immediately_finalized {
             persist_settlement_status(
                 &cli.api_url,
                 persisted.batch_number,
-                "finalized",
+                persisted.status,
                 &output.tx_hash,
                 &contract,
                 chain_id,
                 block_number,
                 gas_used,
                 &receipt_value,
+                cli.settlement_update_token.as_deref(),
             )
             .await?;
+            if persisted.immediately_finalized {
+                persist_settlement_status(
+                    &cli.api_url,
+                    persisted.batch_number,
+                    "finalized",
+                    &output.tx_hash,
+                    &contract,
+                    chain_id,
+                    block_number,
+                    gas_used,
+                    &receipt_value,
+                    cli.settlement_update_token.as_deref(),
+                )
+                .await?;
+            }
         }
     }
     Ok(())
@@ -488,11 +502,15 @@ async fn persist_settlement_status(
     block_number: u64,
     gas_used: u64,
     receipt: &Value,
+    update_token: Option<&str>,
 ) -> Result<()> {
     let api_url = api_url.trim_end_matches('/');
     let url = format!("{api_url}/rollup/batches/{batch_number}/settlement");
-    let response = reqwest::Client::new()
-        .post(&url)
+    let mut request = reqwest::Client::new().post(&url);
+    if let Some(token) = update_token {
+        request = request.header("x-settlement-update-token", token);
+    }
+    let response = request
         .json(&SettlementStatusUpdate {
             status,
             tx_hash,

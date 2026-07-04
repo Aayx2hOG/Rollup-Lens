@@ -34,6 +34,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/0005_l1_settlement_status/migration.sql"),
     include_str!("../../../prisma/migrations/0006_l1_receipt_metadata/migration.sql"),
     include_str!("../../../prisma/migrations/0007_validity_witness/migration.sql"),
+    include_str!("../../../prisma/migrations/0008_operator_and_l1_indexer/migration.sql"),
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

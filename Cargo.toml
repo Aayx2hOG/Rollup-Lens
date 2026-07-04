@@ -9,6 +9,7 @@ members = [
     "apps/merkle-cli",
     "apps/explorer-api",
     "apps/settlement-client",
+    "apps/operator",
     "apps/validity-prover",
     "zkvm/validity-guest",
 ]

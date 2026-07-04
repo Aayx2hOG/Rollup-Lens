@@ -3,7 +3,8 @@ use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use clap::Parser;
 use explorer_api::{
-    app_with_pool, initialize_genesis, sequence_pending_transactions, GenesisConfig,
+    app_with_pool_and_settlement_token, initialize_genesis, sequence_pending_transactions,
+    GenesisConfig,
 };
 use sqlx::postgres::PgPoolOptions;
 
@@ -64,7 +65,13 @@ async fn main() -> Result<()> {
         spawn_auto_sequencer(pool.clone(), cli.auto_sequence_interval_seconds);
     }
 
-    let router = app_with_pool(pool);
+    // The legacy receipt-update endpoint is disabled unless an explicit shared
+    // token is configured. The automated operator indexes L1 directly.
+    let settlement_token = env::var("SETTLEMENT_UPDATE_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| Some("__settlement_updates_disabled__".to_string()));
+    let router = app_with_pool_and_settlement_token(pool, settlement_token);
 
     println!("serving Postgres-backed rollup API");
     println!("listening on http://{}", cli.bind);

@@ -18,6 +18,7 @@ export SETTLEMENT_API_URL=http://127.0.0.1:3000
 export EVM_RPC_URL=http://127.0.0.1:8545
 export ROLLUP_SETTLEMENT_CONTRACT=0x...
 export EVM_PRIVATE_KEY=0x...
+export SETTLEMENT_UPDATE_TOKEN=...
 ```
 
 ## Commands
@@ -49,6 +50,10 @@ cargo run -p settlement-client -- \
 
 Because validity-only submission finalizes atomically, the client persists both
 the submission and finalization milestones from the same verified L1 receipt.
+
+The production explorer requires `SETTLEMENT_UPDATE_TOKEN` for these
+client-written updates. Automated operation passes `--no-persist`; its L1
+indexer records authoritative finality instead.
 
 After a successful broadcast, the client extracts the returned L1 transaction
 hash, verifies the transaction receipt through JSON-RPC, and persists the

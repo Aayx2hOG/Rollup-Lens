@@ -6,6 +6,7 @@
     "db:migrate:deploy": "bun scripts/migrate-deploy.mjs",
     "genesis:init": "cargo run -p explorer-api -- --initialize-genesis",
     "api:dev": "cargo run -p explorer-api -- --bind 127.0.0.1:3000",
+    "operator:dev": "cargo run -p operator",
     "ui:dev": "bun run --cwd apps/explorer-ui dev",
     "dev": "bun run ui:dev"
   },

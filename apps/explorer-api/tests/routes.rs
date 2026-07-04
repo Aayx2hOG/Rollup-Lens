@@ -367,16 +367,18 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
         sequenced["included_transactions"].as_array().unwrap().len(),
         1
     );
+    assert_eq!(sequenced["rollup_batch"]["batch_number"], json!(1));
+    assert_eq!(sequenced["rollup_batch"]["start_block_height"], json!(4));
     assert_eq!(sequenced["rollup_batch"]["end_block_height"], json!(4));
-    assert_eq!(sequenced["rollup_batch"]["transaction_count"], json!(4));
+    assert_eq!(sequenced["rollup_batch"]["transaction_count"], json!(1));
 
-    let witness = get_json(app.clone(), "/rollup/batches/0/validity-witness").await;
-    assert_eq!(witness["batch_number"], json!(0));
-    assert_eq!(witness["previous_block"]["height"], json!(0));
-    assert_eq!(witness["blocks"].as_array().unwrap().len(), 4);
+    let witness = get_json(app.clone(), "/rollup/batches/1/validity-witness").await;
+    assert_eq!(witness["batch_number"], json!(1));
+    assert_eq!(witness["previous_block"]["height"], json!(3));
+    assert_eq!(witness["blocks"].as_array().unwrap().len(), 1);
     assert_eq!(
         witness["accounts_before"][&fixture.alice_address]["nonce"],
-        json!(0)
+        json!(fixture.alice_nonce)
     );
 
     let sequenced_summary = get_json(app.clone(), "/chain/summary").await;
@@ -468,6 +470,7 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0005_l1_settlement_status/migration.sql"),
     include_str!("../../../prisma/migrations/0006_l1_receipt_metadata/migration.sql"),
     include_str!("../../../prisma/migrations/0007_validity_witness/migration.sql"),
+    include_str!("../../../prisma/migrations/0008_operator_and_l1_indexer/migration.sql"),
 ];
 
 fn optional_test_database_url() -> Option<String> {

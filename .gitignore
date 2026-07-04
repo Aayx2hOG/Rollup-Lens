@@ -81,3 +81,4 @@ tmp/
 temp/
 *.tmp
 *.bak
+operator-artifacts/

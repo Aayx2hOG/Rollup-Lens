@@ -20,6 +20,7 @@ apps/
   explorer-api/     Postgres-backed rollup API and sequencer
   explorer-ui/      React explorer and sequencer UI
   validity-prover/  SP1 batch execution, proving, and local verification
+  operator/         Automated sequencing, proving, submission, and L1 indexing
 prisma/
   schema.prisma     Postgres schema for blocks, transactions, accounts,
                     rollup batches, transaction pool, and error events
@@ -167,6 +168,20 @@ The sequencer also persists the batch's private pre-state and current blocks
 atomically. `GET /rollup/batches/:batch_number/validity-witness` exports that
 input for `validity-prover`; a prover does not need to reconstruct historical
 account state from the latest snapshot.
+
+Each sequencing operation appends an immutable batch with the next batch
+number. Existing or finalized batch commitments are never rebuilt when later
+transactions arrive.
+
+## Automated Operator
+
+After deploying `ValidityRollupSettlement`, the operator runs the complete
+batch lifecycle continuously. It sequences pending transfers, proves only the
+batch currently expected by the L1 contract, submits it, and derives finality
+from confirmed `BatchFinalized` events whose commitments match Postgres.
+
+See [`apps/operator/README.md`](apps/operator/README.md) for configuration and
+failure semantics.
 
 ## Explorer UI
 

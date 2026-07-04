@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -125,6 +125,7 @@ pub async fn initialize_genesis(
 struct AppState {
     pool: PgPool,
     cache: Arc<Mutex<ResponseCache>>,
+    settlement_update_token: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -365,6 +366,7 @@ enum ApiError {
     Database(String),
     InvalidIndexedData(String),
     Conflict(String),
+    Unauthorized(String),
 }
 
 impl fmt::Display for ApiError {
@@ -374,15 +376,24 @@ impl fmt::Display for ApiError {
             | ApiError::NotFound(message)
             | ApiError::Database(message)
             | ApiError::InvalidIndexedData(message)
-            | ApiError::Conflict(message) => formatter.write_str(message),
+            | ApiError::Conflict(message)
+            | ApiError::Unauthorized(message) => formatter.write_str(message),
         }
     }
 }
 
 pub fn app_with_pool(pool: PgPool) -> Router {
+    app_with_pool_and_settlement_token(pool, None)
+}
+
+pub fn app_with_pool_and_settlement_token(
+    pool: PgPool,
+    settlement_update_token: Option<String>,
+) -> Router {
     let state = Arc::new(AppState {
         pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
+        settlement_update_token,
     });
 
     Router::new()
@@ -728,8 +739,19 @@ async fn rollup_batch_validity_witness(
 async fn update_rollup_batch_settlement(
     State(state): State<Arc<AppState>>,
     Path(batch_number): Path<u64>,
+    headers: HeaderMap,
     Json(update): Json<SettlementStatusUpdate>,
 ) -> Result<Json<Value>, ApiError> {
+    if let Some(expected) = &state.settlement_update_token {
+        let provided = headers
+            .get("x-settlement-update-token")
+            .and_then(|value| value.to_str().ok());
+        if provided != Some(expected.as_str()) {
+            return Err(ApiError::Unauthorized(
+                "settlement status updates require a valid operator token".to_string(),
+            ));
+        }
+    }
     let updated = DbSource {
         pool: state.pool.clone(),
     }
@@ -1158,7 +1180,8 @@ impl DbSource {
             .map_err(database_error)?;
         }
 
-        let rollup_batch = rebuild_rollup_batch_tx(&mut tx, accounts_before).await?;
+        let rollup_batch =
+            append_rollup_batch_tx(&mut tx, accounts_before, &latest_block, &block).await?;
         tx.commit().await.map_err(database_error)?;
 
         let included_transactions = accepted
@@ -1768,68 +1791,26 @@ async fn replace_accounts_tx(
     Ok(())
 }
 
-async fn rebuild_rollup_batch_tx(
+async fn append_rollup_batch_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    accounts_before_latest_block: BTreeMap<String, Account>,
+    accounts_before: BTreeMap<String, Account>,
+    previous_block: &Block,
+    block: &Block,
 ) -> Result<Option<RollupBatchSummary>, ApiError> {
-    let existing_witness = sqlx::query_scalar::<_, Option<Value>>(
-        "SELECT validity_witness FROM rollup_batches WHERE batch_number = 0",
-    )
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?
-    .flatten()
-    .map(|value| {
-        serde_json::from_value::<BatchValidityWitness>(value).map_err(|error| {
-            ApiError::InvalidIndexedData(format!("invalid persisted validity witness: {error}"))
-        })
-    })
-    .transpose()?;
-
-    sqlx::query("DELETE FROM rollup_batch_transactions")
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-    sqlx::query("DELETE FROM rollup_batches")
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-
-    let rows = sqlx::query(
-        r#"
-        SELECT raw_block
-        FROM blocks
-        ORDER BY height ASC
-        "#,
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    let blocks = rows
-        .into_iter()
-        .map(|row| parse_json_value::<Block>(row.get("raw_block"), "block"))
-        .collect::<Result<Vec<_>, _>>()?;
-    if blocks.len() <= 1 {
-        return Ok(None);
-    }
-
-    let previous_block = &blocks[0];
-    let post_genesis_blocks = &blocks[1..];
-    let commitment = rollup_batch_commitment_from_blocks(0, previous_block, post_genesis_blocks)
-        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
+    let next_batch_number: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(batch_number) + 1, 0) FROM rollup_batches")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    let batch_number = from_i64(next_batch_number, "next rollup batch number")?;
+    let commitment =
+        rollup_batch_commitment_from_blocks(batch_number, previous_block, &[block.clone()])
+            .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
     let witness = BatchValidityWitness {
-        batch_number: 0,
-        accounts_before: existing_witness
-            .map(|witness| witness.accounts_before)
-            .map(Ok)
-            .unwrap_or_else(|| {
-                reconstruct_pre_batch_accounts(
-                    accounts_before_latest_block,
-                    &post_genesis_blocks[..post_genesis_blocks.len() - 1],
-                )
-            })?,
+        batch_number,
+        accounts_before,
         previous_block: previous_block.clone(),
-        blocks: post_genesis_blocks.to_vec(),
+        blocks: vec![block.clone()],
     };
     let public_values = verify_batch_witness(&witness)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
@@ -1840,31 +1821,29 @@ async fn rebuild_rollup_batch_tx(
     }
 
     insert_rollup_batch_tx(tx, &commitment, "built", &witness).await?;
-    for block in post_genesis_blocks {
-        for (transaction_index, transaction) in block.transactions.iter().enumerate() {
-            let hash = transaction_hash(transaction);
-            sqlx::query(
-                r#"
+    for (transaction_index, transaction) in block.transactions.iter().enumerate() {
+        let hash = transaction_hash(transaction);
+        sqlx::query(
+            r#"
                 INSERT INTO rollup_batch_transactions (
                     batch_number, transaction_hash, block_height, transaction_index
                 )
                 VALUES ($1, $2, $3, $4)
                 "#,
-            )
-            .bind(to_i64(commitment.batch_number, "rollup batch number")?)
-            .bind(&hash)
-            .bind(to_i64(
-                block.height,
-                "rollup batch transaction block height",
-            )?)
-            .bind(to_i32_from_usize(
-                transaction_index,
-                "rollup batch transaction index",
-            )?)
-            .execute(&mut **tx)
-            .await
-            .map_err(database_error)?;
-        }
+        )
+        .bind(to_i64(commitment.batch_number, "rollup batch number")?)
+        .bind(&hash)
+        .bind(to_i64(
+            block.height,
+            "rollup batch transaction block height",
+        )?)
+        .bind(to_i32_from_usize(
+            transaction_index,
+            "rollup batch transaction index",
+        )?)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
     }
 
     Ok(Some(RollupBatchSummary {
@@ -1891,55 +1870,6 @@ async fn rebuild_rollup_batch_tx(
         l1_finalize_gas_used: None,
         l1_finalize_receipt: None,
     }))
-}
-
-fn reconstruct_pre_batch_accounts(
-    mut accounts: BTreeMap<String, Account>,
-    blocks: &[Block],
-) -> Result<BTreeMap<String, Account>, ApiError> {
-    for block in blocks.iter().rev() {
-        for transfer in block.transactions.iter().rev() {
-            if transfer.from == transfer.to {
-                let account = accounts.get_mut(&transfer.from).ok_or_else(|| {
-                    ApiError::InvalidIndexedData(format!(
-                        "cannot reconstruct missing account {}",
-                        transfer.from
-                    ))
-                })?;
-                account.nonce = account.nonce.checked_sub(1).ok_or_else(|| {
-                    ApiError::InvalidIndexedData("cannot reconstruct account nonce".to_string())
-                })?;
-                continue;
-            }
-
-            let receiver = accounts.get_mut(&transfer.to).ok_or_else(|| {
-                ApiError::InvalidIndexedData(format!(
-                    "cannot reconstruct missing account {}",
-                    transfer.to
-                ))
-            })?;
-            receiver.balance = receiver
-                .balance
-                .checked_sub(transfer.amount)
-                .ok_or_else(|| {
-                    ApiError::InvalidIndexedData("cannot reconstruct receiver balance".to_string())
-                })?;
-
-            let sender = accounts.get_mut(&transfer.from).ok_or_else(|| {
-                ApiError::InvalidIndexedData(format!(
-                    "cannot reconstruct missing account {}",
-                    transfer.from
-                ))
-            })?;
-            sender.balance = sender.balance.checked_add(transfer.amount).ok_or_else(|| {
-                ApiError::InvalidIndexedData("cannot reconstruct sender balance".to_string())
-            })?;
-            sender.nonce = sender.nonce.checked_sub(1).ok_or_else(|| {
-                ApiError::InvalidIndexedData("cannot reconstruct sender nonce".to_string())
-            })?;
-        }
-    }
-    Ok(accounts)
 }
 
 async fn insert_rollup_batch_tx(
@@ -2360,6 +2290,7 @@ impl IntoResponse for ApiError {
             ApiError::Database(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
             ApiError::InvalidIndexedData(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
             ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
+            ApiError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
         };
 
         (status, Json(json!({ "error": message }))).into_response()

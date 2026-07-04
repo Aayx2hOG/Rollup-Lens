@@ -114,11 +114,28 @@ model RollupBatch {
   l1FinalizeReceipt Json?                   @map("l1_finalize_receipt")
   rawCommitment   Json                      @map("raw_commitment")
   validityWitness Json?                     @map("validity_witness")
+  operatorStatus String                     @default("queued") @map("operator_status")
+  operatorAttempts Int                      @default(0) @map("operator_attempts")
+  operatorLastError String?                 @map("operator_last_error")
+  operatorProofStartedAt DateTime?          @map("operator_proof_started_at")
+  operatorProofCompletedAt DateTime?        @map("operator_proof_completed_at")
+  operatorBroadcastTxHash String?           @map("operator_broadcast_tx_hash")
+  operatorUpdatedAt DateTime                @default(now()) @map("operator_updated_at")
   transactions    RollupBatchTransaction[]
 
   @@index([startBlockHeight])
   @@index([endBlockHeight])
   @@map("rollup_batches")
+}
+
+model L1IndexerCheckpoint {
+  chainId         BigInt   @map("chain_id")
+  contractAddress String   @map("contract_address")
+  nextBlock       BigInt   @map("next_block")
+  updatedAt       DateTime @default(now()) @map("updated_at")
+
+  @@id([chainId, contractAddress])
+  @@map("l1_indexer_checkpoints")
 }
 
 model RollupBatchTransaction {
