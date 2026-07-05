@@ -249,7 +249,7 @@ service, use:
 ```text
 Build: cargo build --release -p explorer-api
 Migration: bun run db:migrate:deploy
-Start: ./target/release/explorer-api --bind 0.0.0.0:$PORT
+Start: ./target/release/explorer-api --bind 0.0.0.0:$PORT --auto-sequence
 Health check: /ready
 ```
 

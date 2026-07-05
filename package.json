@@ -7,7 +7,7 @@
     "db:migrate:neon": "bun scripts/migrate-deploy.mjs --neon",
     "db:status": "bunx prisma migrate status --schema prisma/schema.prisma",
     "genesis:init": "cargo run -p explorer-api -- --initialize-genesis",
-    "api:dev": "cargo run -p explorer-api -- --bind 127.0.0.1:3000",
+    "api:dev": "cargo run -p explorer-api -- --bind 127.0.0.1:3000 --auto-sequence",
     "operator:dev": "cargo run -p operator",
     "ui:dev": "bun run --cwd apps/explorer-ui dev",
     "dev": "bun run ui:dev"

@@ -73,7 +73,7 @@ try {
     console.log("Starting the Explorer API...");
     apiProcess = start(
       "cargo",
-      ["run", "-p", "explorer-api", "--", "--bind", "127.0.0.1:3000"],
+      ["run", "-p", "explorer-api", "--", "--bind", "127.0.0.1:3000", "--auto-sequence"],
       repositoryRoot,
     );
     await waitForApi(apiProcess);

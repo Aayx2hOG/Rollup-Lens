@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   ArrowRight,
-  ArrowUpRight,
   Blocks,
   CheckCircle2,
   Clock3,
@@ -12,7 +11,6 @@ import {
   Download,
   ExternalLink,
   Gauge,
-  Landmark,
   Layers3,
   PackageCheck,
   Play,
@@ -49,7 +47,7 @@ import {
 } from "./lib/wallet";
 import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
 
-const tabs = ["Overview", "Transactions", "Settlement", "Operate"] as const;
+const tabs = ["Overview", "Transactions", "Settlement", "Operate", "Send"] as const;
 type Tab = (typeof tabs)[number];
 
 type TransactionReferenceFile = {
@@ -76,7 +74,8 @@ const tabMeta: Record<Tab, { label: string; icon: React.ReactNode }> = {
   Overview: { label: "Overview", icon: <Gauge className="h-4 w-4" /> },
   Transactions: { label: "Transactions", icon: <Blocks className="h-4 w-4" /> },
   Settlement: { label: "Settlement", icon: <PackageCheck className="h-4 w-4" /> },
-  Operate: { label: "Operate", icon: <Send className="h-4 w-4" /> },
+  Operate: { label: "Operate", icon: <Gauge className="h-4 w-4" /> },
+  Send: { label: "Send", icon: <Send className="h-4 w-4" /> },
 };
 
 export function App() {
@@ -90,6 +89,8 @@ export function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [connectionSeconds, setConnectionSeconds] = useState(0);
   const [overviewBlockTarget, setOverviewBlockTarget] = useState<number | null>(null);
+  const [walletKeypair, setWalletKeypair] = useState<RollupKeypair | null>(null);
+  const [sendRecipient, setSendRecipient] = useState("");
 
   const readiness = useQuery({ queryKey: ["readiness"], queryFn: api.ready });
   const summary = useQuery({ queryKey: ["summary"], queryFn: api.summary });
@@ -284,25 +285,15 @@ export function App() {
           <HomeHero
             readStatus={readStatus}
             summary={summary.data}
-            latestBlock={blockItems[0]}
             latestBatch={batchItems[0]}
             pendingTransfers={summary.data?.pending_transaction_count ?? 0}
-            onOpenActivity={() => setActiveTab("Transactions")}
-            onOpenSettlement={() => setActiveTab("Settlement")}
-            onOpenOperate={() => setActiveTab("Operate")}
           />
           <Overview
-            summary={summary.data}
             blocks={blockItems}
             blockTotal={blockTotal}
-            selectedBlock={block.data}
             onSelectBlock={(height) => {
               setSelectedHeight(height);
               setOverviewBlockTarget(height);
-              setActiveTab("Transactions");
-            }}
-            onSelectAccount={(address) => {
-              setSelectedAccount(address);
               setActiveTab("Transactions");
             }}
           />
@@ -338,6 +329,10 @@ export function App() {
               setActiveTab("Transactions");
             }}
             onSelectTx={setSelectedTx}
+            onSendTo={(address) => {
+              setSendRecipient(address);
+              setActiveTab("Send");
+            }}
           />
         </div>
       )}
@@ -365,20 +360,38 @@ export function App() {
         </div>
       )}
 
+      {activeTab === "Send" && (
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<Send className="h-5 w-5" />}
+            title="Send funds"
+            description="Load your wallet, choose a recipient, and send a signed L2 transfer."
+          />
+          <SendTransferView
+            keypair={walletKeypair}
+            recipient={sendRecipient}
+            pool={transactionPool.data?.items ?? []}
+            onKeypairChange={setWalletKeypair}
+            onRecipientChange={setSendRecipient}
+            onSubmitted={async (hash) => {
+              setSelectedTx(hash);
+              await refreshAll();
+            }}
+          />
+        </div>
+      )}
+
       {activeTab === "Operate" && (
         <div className="grid gap-5">
           <PageIntro
             icon={<Send className="h-5 w-5" />}
             title="Operate"
-            description="Submit a signed transfer, build the next L2 block, and monitor service health."
+            description="Advanced controls for sequencing, queue inspection, and service health."
             meta={pluralize(summary.data?.pending_transaction_count ?? 0, "pending transfer")}
           />
-          <OperatorWorkflow />
           <SequencerView
             pool={transactionPool.data?.items ?? []}
-            health={health.data}
             errors={errors.data ?? []}
-            summary={summary.data}
             onRefresh={refreshAll}
             onOpenTransaction={(hash) => {
               setSelectedTx(hash);
@@ -472,55 +485,33 @@ function ConnectionState({
 
 function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (tab: Tab) => void }) {
   return (
-    <nav className="flex min-w-0 flex-wrap gap-1 rounded-xl border border-white/10 bg-white/[0.035] p-1">
+    <nav className="flex min-w-0 flex-wrap items-center gap-1 rounded-xl border border-white/10 bg-white/[0.035] p-1">
       {tabs.map((tab) => (
         <button
           key={tab}
           onClick={() => onSelectTab(tab)}
           className={cn(
             "relative inline-flex h-10 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-medium text-white/58 transition hover:text-white",
+            tab === "Send" && "ml-auto bg-mint text-ink shadow-glow hover:bg-mint/90 hover:text-ink",
             activeTab === tab && "text-white",
+            activeTab === "Send" && tab === "Send" && "text-ink",
           )}
         >
           {activeTab === tab && (
             <motion.span
               layoutId="active-header-tab"
-              className="absolute inset-0 rounded-lg border border-mint/25 bg-mint/10"
+              className={cn(
+                "absolute inset-0 rounded-lg border",
+                tab === "Send" ? "border-white/25 bg-white/10" : "border-mint/25 bg-mint/10",
+              )}
               transition={{ type: "spring", bounce: 0.18, duration: 0.45 }}
             />
           )}
-          <span className="relative text-mint/80">{tabMeta[tab].icon}</span>
+          <span className={cn("relative text-mint/80", tab === "Send" && "text-ink")}>{tabMeta[tab].icon}</span>
           <span className="relative">{tabMeta[tab].label}</span>
         </button>
       ))}
     </nav>
-  );
-}
-
-function OperatorWorkflow() {
-  const steps = [
-    { label: "Load funded wallet", detail: "Use a key whose address has a balance" },
-    { label: "Submit transfer", detail: "The signed transfer enters the pending queue" },
-    { label: "Build L2 block", detail: "Pending transfers are sequenced into the next block" },
-  ];
-
-  return (
-    <Panel className="p-4">
-      <div className="mb-3 text-xs font-medium uppercase tracking-[0.16em] text-white/38">Test a transfer</div>
-      <div className="grid gap-2 md:grid-cols-3">
-        {steps.map((step, index) => (
-          <div key={step.label} className="flex gap-3 rounded-lg border border-white/8 bg-white/[0.035] p-3">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-mint/10 text-xs font-semibold text-mint">
-              {index + 1}
-            </span>
-            <div>
-              <div className="text-sm font-semibold text-white">{step.label}</div>
-              <div className="mt-1 text-xs leading-5 text-white/46">{step.detail}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </Panel>
   );
 }
 
@@ -627,27 +618,19 @@ function summarizeResult(result: SearchResult | null) {
 function HomeHero({
   readStatus,
   summary,
-  latestBlock,
   latestBatch,
   pendingTransfers,
-  onOpenActivity,
-  onOpenSettlement,
-  onOpenOperate,
 }: {
   readStatus: string;
   summary?: { height: number | null; transaction_count: number; account_count: number; valid: boolean };
-  latestBlock?: BlockSummary;
   latestBatch?: RollupBatchSummary;
   pendingTransfers: number;
-  onOpenActivity: () => void;
-  onOpenSettlement: () => void;
-  onOpenOperate: () => void;
 }) {
   const live = readStatus === "ok";
   return (
     <section className="relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.025] p-5 shadow-xl shadow-black/20">
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent" />
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+      <div>
         <div>
           <div className="flex items-center gap-2 text-sm font-medium text-white/68">
             <span className={cn("h-2 w-2 rounded-full", live ? "bg-mint shadow-[0_0_18px_rgba(88,244,183,0.8)]" : "bg-amber")} />
@@ -660,29 +643,6 @@ function HomeHero({
             Current chain state, pending work, and settlement progress.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-            <button
-              onClick={onOpenActivity}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90"
-            >
-            Transactions
-              <ArrowUpRight className="h-4 w-4" />
-            </button>
-            <button
-              onClick={onOpenSettlement}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.045] px-3 text-sm font-semibold text-white/82 transition hover:border-amber/30 hover:text-amber"
-            >
-            Settlement
-              <Landmark className="h-4 w-4" />
-            </button>
-            <button
-              onClick={onOpenOperate}
-              className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.045] px-3 text-sm font-semibold text-white/82 transition hover:border-cyan/30 hover:text-cyan"
-            >
-              Operate
-              <Send className="h-4 w-4" />
-            </button>
-        </div>
       </div>
       <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <HeroMetric label="Latest block" value={summary?.height ?? "none"} />
@@ -693,7 +653,6 @@ function HomeHero({
       </div>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-white/42">
         <span>{formatNumber(summary?.account_count)} accounts indexed</span>
-        <span className="hash">{latestBlock ? shortHash(latestBlock.block_hash, 10, 8) : "No block indexed"}</span>
         <Badge tone={summary?.valid ? "good" : "warn"}>{summary?.valid ? "State valid" : "Check state"}</Badge>
       </div>
     </section>
@@ -710,31 +669,16 @@ function HeroMetric({ label, value }: { label: string; value: React.ReactNode })
 }
 
 function Overview({
-  summary,
   blocks,
   blockTotal,
-  selectedBlock,
   onSelectBlock,
-  onSelectAccount,
 }: {
-  summary?: { state_root: string; latest_block_hash: string | null; block_count: number };
   blocks: BlockSummary[];
   blockTotal: number;
-  selectedBlock?: Block;
   onSelectBlock: (height: number) => void;
-  onSelectAccount: (address: string) => void;
 }) {
-  const transferCount = selectedBlock?.transactions.length ?? 0;
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-      <div className="xl:col-span-2">
-        <WorkflowStrip
-          latestBlock={summary?.block_count ? summary.block_count - 1 : null}
-          transferCount={transferCount}
-          hasSettlement={false}
-        />
-      </div>
-      <Panel className="overflow-hidden">
+    <Panel className="overflow-hidden">
         <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Recent activity groups" action={`${blocks.length}/${blockTotal} loaded`} />
         <div className="divide-y divide-white/8">
           {blocks.map((block) => (
@@ -754,85 +698,6 @@ function Overview({
             </button>
           ))}
         </div>
-      </Panel>
-
-      <Panel className="p-4">
-        <SectionTitle icon={<Gauge className="h-4 w-4" />} title="Current snapshot" action="Canonical chain state" flush />
-        <div className="mt-4 space-y-4">
-          <HashLine label="State root" value={summary?.state_root} />
-          <HashLine label="Latest block hash" value={summary?.latest_block_hash} />
-          <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
-            <div className="text-xs uppercase tracking-[0.18em] text-white/38">Selected activity flow</div>
-            <div className="mt-3 flex items-center gap-2 text-sm">
-              <span className="hash min-w-0 flex-1 text-white/60">{shortHash(selectedBlock?.parent_hash, 8, 8)}</span>
-              <ArrowRight className="h-4 w-4 shrink-0 text-amber" />
-              <span className="hash min-w-0 flex-1 text-white">{shortHash(selectedBlock?.block_hash, 8, 8)}</span>
-            </div>
-          </div>
-          {selectedBlock?.transactions.map((tx, index) => (
-            <TransactionMini key={`${tx.signature_base64}-${index}`} tx={tx} onSelectAccount={onSelectAccount} />
-          ))}
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function WorkflowStrip({
-  latestBlock,
-  transferCount,
-  hasSettlement,
-}: {
-  latestBlock: number | null;
-  transferCount: number;
-  hasSettlement: boolean;
-}) {
-  const steps = [
-    {
-      icon: <Send className="h-4 w-4" />,
-      label: "Transfers arrive",
-      value: transferCount > 0 ? pluralize(transferCount, "transfer") : "none selected",
-      tone: transferCount > 0 ? "good" : "neutral",
-    },
-    {
-      icon: <Blocks className="h-4 w-4" />,
-      label: "Grouped into blocks",
-      value: latestBlock === null ? "waiting" : `latest ${latestBlock}`,
-      tone: latestBlock === null ? "neutral" : "good",
-    },
-    {
-      icon: <PackageCheck className="h-4 w-4" />,
-      label: "Packed for settlement",
-      value: hasSettlement ? "ready" : "see Settlement",
-      tone: hasSettlement ? "good" : "warn",
-    },
-    {
-      icon: <ShieldAlert className="h-4 w-4" />,
-      label: "Anchored on L1",
-      value: "tracked per batch",
-      tone: "neutral",
-    },
-  ] as const;
-
-  return (
-    <Panel className="p-4">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-        {steps.map((step, index) => (
-          <div key={step.label} className="flex min-w-0 items-center gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3">
-            <div className={cn(
-              "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
-              step.tone === "good" ? "bg-mint/10 text-mint" : step.tone === "warn" ? "bg-amber/10 text-amber" : "bg-white/[0.06] text-white/58",
-            )}>
-              {step.icon}
-            </div>
-            <div className="min-w-0">
-              <div className="text-xs text-white/42">Step {index + 1}</div>
-              <div className="text-sm font-semibold text-white">{step.label}</div>
-              <div className="mt-0.5 text-xs text-white/50">{step.value}</div>
-            </div>
-          </div>
-        ))}
-      </div>
     </Panel>
   );
 }
@@ -855,6 +720,7 @@ function BlocksView({
   onSelectBlock,
   onSelectAccount,
   onSelectTx,
+  onSendTo,
 }: {
   blocks: BlockSummary[];
   blockTotal: number;
@@ -873,6 +739,7 @@ function BlocksView({
   onSelectBlock: (height: number) => void;
   onSelectAccount: (address: string) => void;
   onSelectTx: (hash: string) => void;
+  onSendTo: (address: string) => void;
 }) {
   const [lookupHash, setLookupHash] = useState("");
   const [referenceError, setReferenceError] = useState<string | null>(null);
@@ -1063,6 +930,7 @@ function BlocksView({
           selectedAccount={selectedAccount}
           account={account}
           accountError={accountError}
+          onSendTo={onSendTo}
         />
       </div>
     </div>
@@ -1197,19 +1065,32 @@ function AccountDetail({
   selectedAccount,
   account,
   accountError,
+  onSendTo,
 }: {
   selectedAccount: string | null;
   account?: Account;
   accountError: string | null;
+  onSendTo: (address: string) => void;
 }) {
   return (
     <Panel className="p-4">
       <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Wallet detail" action={selectedAccount ? shortHash(selectedAccount) : "none"} flush />
       {account ? (
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
-          <HashLine label="Wallet address" value={account.address} />
-          <MetricLine label="Balance" value={account.balance} />
-          <MetricLine label="Next transfer #" value={account.nonce} />
+        <div className="mt-4 grid gap-3">
+          <div className="grid gap-3 md:grid-cols-3">
+            <HashLine label="Wallet address" value={account.address} />
+            <MetricLine label="Balance" value={account.balance} />
+            <MetricLine label="Next transfer #" value={account.nonce} />
+          </div>
+          <div>
+            <button
+              onClick={() => onSendTo(account.address)}
+              className="inline-flex h-10 items-center gap-2 rounded-lg bg-mint px-4 text-sm font-semibold text-ink transition hover:bg-mint/90"
+            >
+              <Send className="h-4 w-4" />
+              Send to this wallet
+            </button>
+          </div>
         </div>
       ) : accountError ? (
         <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{accountError}</div>
@@ -1220,33 +1101,23 @@ function AccountDetail({
   );
 }
 
-function SequencerView({
+function SendTransferView({
+  keypair,
+  recipient,
   pool,
-  health,
-  errors,
-  summary,
-  onRefresh,
-  onOpenTransaction,
+  onKeypairChange,
+  onRecipientChange,
   onSubmitted,
-  onSequenced,
 }: {
+  keypair: RollupKeypair | null;
+  recipient: string;
   pool: TransactionPoolEntry[];
-  health?: { status: string; latest_error: unknown };
-  errors: Array<{ id: number; severity: string; message: string; service: string; created_at: string; resolved_at: string | null }>;
-  summary?: { height: number | null; valid: boolean; block_count: number };
-  onRefresh: () => Promise<void>;
-  onOpenTransaction: (hash: string) => void;
+  onKeypairChange: (keypair: RollupKeypair | null) => void;
+  onRecipientChange: (recipient: string) => void;
   onSubmitted: (hash: string) => Promise<void>;
-  onSequenced: (height: number) => Promise<void>;
 }) {
-  const [transferJson, setTransferJson] = useState("");
-  const [keypair, setKeypair] = useState<RollupKeypair | null>(null);
-  const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState(1);
-  const [showSignedJson, setShowSignedJson] = useState(false);
-  const [limit, setLimit] = useState(100);
   const [submitting, setSubmitting] = useState(false);
-  const [sequencing, setSequencing] = useState(false);
   const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
   const walletAddress = keypair ? addressFromPublicKey(keypair.public_key_base64) : null;
   const walletAccount = useQuery({
@@ -1258,20 +1129,17 @@ function SequencerView({
   const pendingFromWallet = walletAddress
     ? pool.filter((entry) => entry.status === "pending" && entry.transfer.from === walletAddress).length
     : 0;
-  const pendingTotal = pool.filter((entry) => entry.status === "pending").length;
-  const pendingEntries = pool.filter((entry) => entry.status === "pending");
-  const recentIncluded = pool.filter((entry) => entry.status === "included").slice(0, 5);
   const nextNonce = (walletAccount.data?.nonce ?? 0) + pendingFromWallet;
 
-  async function createWallet() {
+  async function createWalletForSession() {
     setNotice(null);
     try {
       const created = await createKeypair();
       downloadKeypair(created);
-      setKeypair(created);
+      onKeypairChange(created);
       setNotice({
         tone: "neutral",
-        message: "Wallet created and key file exported. The private key remains in this browser session.",
+        message: "Wallet created and downloaded. Fund its address before sending.",
       });
     } catch (error) {
       setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet creation failed" });
@@ -1282,30 +1150,180 @@ function SequencerView({
     setNotice(null);
     try {
       const loaded = await importKeypair(await file.text());
-      setKeypair(loaded);
-      setNotice({ tone: "neutral", message: `Loaded wallet ${addressFromPublicKey(loaded.public_key_base64)} for this session.` });
+      onKeypairChange(loaded);
+      setNotice({ tone: "neutral", message: "Wallet connected for this browser session." });
     } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Key file import failed" });
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Could not load this wallet file" });
     }
   }
 
-  async function signAndSubmitTransfer() {
+  async function sendTransfer() {
     if (!keypair || !walletAccount.data) return;
     setSubmitting(true);
     setNotice(null);
     try {
       const transfer = await signTransfer(keypair, recipient.trim(), amount, nextNonce);
       const submitted = await api.submitTransaction(transfer);
-      setRecipient("");
-      setNotice({ tone: "good", message: `Signed transfer ${shortHash(submitted.hash, 10, 8)} is waiting to be grouped.` });
+      onRecipientChange("");
+      setNotice({
+        tone: "good",
+        message: `Transfer ${shortHash(submitted.hash, 10, 8)} submitted successfully.`,
+      });
       await onSubmitted(submitted.hash);
     } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Transaction submission failed" });
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Transfer failed" });
     } finally {
       setSubmitting(false);
     }
   }
 
+  return (
+    <Panel className="mx-auto w-full max-w-3xl overflow-hidden">
+      <div className="border-b border-white/8 bg-white/[0.025] p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-lg font-semibold text-white">Send L2 funds</div>
+            <div className="mt-1 text-sm text-white/48">Your key stays in this browser session.</div>
+          </div>
+          {keypair && <Badge tone="good">Wallet connected</Badge>}
+        </div>
+      </div>
+
+      <div className="grid gap-5 p-5">
+        {!keypair ? (
+          <div className="rounded-xl border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
+            <Wallet className="mx-auto h-7 w-7 text-mint" />
+            <div className="mt-3 font-semibold text-white">Connect your rollup wallet</div>
+            <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-white/50">
+              Load the JSON key file created by wallet-cli. It is read locally and is never uploaded.
+            </p>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-lg bg-mint px-4 text-sm font-semibold text-ink transition hover:bg-mint/90">
+                <Upload className="h-4 w-4" />
+                Load wallet
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) void loadWallet(file);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+              <button
+                onClick={createWalletForSession}
+                className="h-10 rounded-lg border border-white/12 px-4 text-sm font-medium text-white/70 hover:border-mint/30 hover:text-mint"
+              >
+                Create wallet
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-3 rounded-xl border border-white/10 bg-white/[0.035] p-4 sm:grid-cols-[1fr_auto] sm:items-center">
+              <div className="min-w-0">
+                <div className="text-xs uppercase tracking-[0.14em] text-white/38">From</div>
+                <div className="hash mt-1 text-sm text-white/78">{walletAddress}</div>
+              </div>
+              <div className="flex items-center gap-5">
+                <div>
+                  <div className="text-xs text-white/38">Balance</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{walletAccount.data?.balance ?? "—"}</div>
+                </div>
+                <button
+                  onClick={() => onKeypairChange(null)}
+                  className="text-sm text-white/46 hover:text-white"
+                >
+                  Disconnect
+                </button>
+              </div>
+            </div>
+
+            {walletAccount.error ? (
+              <div className="rounded-lg border border-amber/25 bg-amber/10 p-3 text-sm text-amber">
+                This wallet is not funded on the current rollup.
+              </div>
+            ) : (
+              <div className="grid gap-4">
+                <label className="grid gap-2 text-sm font-medium text-white/70">
+                  Recipient
+                  <input
+                    value={recipient}
+                    onChange={(event) => onRecipientChange(event.target.value)}
+                    placeholder="Paste recipient wallet address"
+                    className="h-12 rounded-lg border border-white/10 bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:border-mint/50 focus:ring-2 focus:ring-mint/10"
+                  />
+                </label>
+                <label className="grid gap-2 text-sm font-medium text-white/70">
+                  Amount
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={amount}
+                    onChange={(event) => setAmount(Number(event.target.value))}
+                    className="h-12 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-lg text-white outline-none focus:border-mint/50 focus:ring-2 focus:ring-mint/10"
+                  />
+                </label>
+                <button
+                  onClick={sendTransfer}
+                  disabled={submitting || recipient.trim().length === 0 || amount < 1}
+                  className="inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-mint px-5 text-base font-semibold text-ink shadow-glow transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <Send className="h-5 w-5" />
+                  {submitting ? "Sending…" : "Send transfer"}
+                </button>
+                <div className="text-center text-xs text-white/38">
+                  The next nonce ({nextNonce}) is selected automatically.
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {notice && (
+          <div className={cn(
+            "rounded-lg border p-3 text-sm",
+            notice.tone === "bad"
+              ? "border-rose/25 bg-rose/10 text-rose"
+              : notice.tone === "good"
+                ? "border-mint/25 bg-mint/10 text-mint"
+                : "border-white/10 bg-white/[0.04] text-white/64",
+          )}>
+            {notice.message}
+          </div>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function SequencerView({
+  pool,
+  errors,
+  onRefresh,
+  onOpenTransaction,
+  onSubmitted,
+  onSequenced,
+}: {
+  pool: TransactionPoolEntry[];
+  errors: Array<{ id: number; severity: string; message: string; service: string; created_at: string; resolved_at: string | null }>;
+  onRefresh: () => Promise<void>;
+  onOpenTransaction: (hash: string) => void;
+  onSubmitted: (hash: string) => Promise<void>;
+  onSequenced: (height: number) => Promise<void>;
+}) {
+  const [transferJson, setTransferJson] = useState("");
+  const [showSignedJson, setShowSignedJson] = useState(false);
+  const [limit, setLimit] = useState(100);
+  const [submitting, setSubmitting] = useState(false);
+  const [sequencing, setSequencing] = useState(false);
+  const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
+  const pendingTotal = pool.filter((entry) => entry.status === "pending").length;
+  const pendingEntries = pool.filter((entry) => entry.status === "pending");
+  const recentIncluded = pool.filter((entry) => entry.status === "included").slice(0, 5);
   async function submitTransfer() {
     setSubmitting(true);
     setNotice(null);
@@ -1352,69 +1370,11 @@ function SequencerView({
     <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[0.85fr_1.15fr]">
       <div className="grid gap-4">
         <Panel className="p-4">
-          <SectionTitle icon={<Wallet className="h-4 w-4" />} title="Browser wallet" action="keys stay local" flush />
-          {!keypair ? (
-            <div className="mt-4 grid gap-3">
-              <p className="text-sm leading-6 text-white/58">
-                Load a wallet created by wallet-cli, or create a new compatible keypair and retain the exported file.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90">
-                  <Wallet className="h-4 w-4" />
-                  Load key file
-                  <input
-                    type="file"
-                    accept="application/json,.json"
-                    className="hidden"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (file) void loadWallet(file);
-                      event.target.value = "";
-                    }}
-                  />
-                </label>
-                <button onClick={createWallet} className="rounded-lg border border-white/12 bg-white/[0.06] px-3 py-2 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint">
-                  Create and export
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-4 grid gap-3">
-              <HashLine label="Signing wallet" value={walletAddress} />
-              <div className="grid grid-cols-3 gap-2">
-                <MetricLine label="Balance" value={walletAccount.data?.balance ?? "not allocated"} />
-                <MetricLine label="Chain nonce" value={walletAccount.data?.nonce ?? "—"} />
-                <MetricLine label="Next nonce" value={nextNonce} />
-              </div>
-              {walletAccount.error && (
-                <div className="rounded-lg border border-amber/25 bg-amber/10 p-3 text-sm text-amber">
-                  This wallet has no genesis allocation or current account state.
-                </div>
-              )}
-              <label className="grid gap-2 text-sm text-white/62">
-                Recipient address
-                <input value={recipient} onChange={(event) => setRecipient(event.target.value)} className="h-10 rounded-lg border border-white/10 bg-white/[0.06] px-3 font-mono text-sm text-white outline-none focus:border-mint/40" />
-              </label>
-              <label className="grid gap-2 text-sm text-white/62">
-                Amount
-                <input type="number" min={1} step={1} value={amount} onChange={(event) => setAmount(Number(event.target.value))} className="h-10 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-white outline-none focus:border-mint/40" />
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  onClick={signAndSubmitTransfer}
-                  disabled={submitting || !walletAccount.data || recipient.trim().length === 0}
-                  className="inline-flex items-center gap-2 rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Send className="h-4 w-4" />
-                  Sign and submit
-                </button>
-                <button onClick={() => setKeypair(null)} className="rounded-lg border border-white/12 px-3 py-2 text-sm text-white/58 hover:text-white">
-                  Lock wallet
-                </button>
-              </div>
-            </div>
-          )}
-          <button onClick={() => setShowSignedJson((shown) => !shown)} className="mt-4 text-xs text-white/42 hover:text-white/70">
+          <SectionTitle icon={<Upload className="h-4 w-4" />} title="Advanced transaction submission" action="operators" flush />
+          <p className="mt-2 text-sm leading-6 text-white/48">
+            Submit an externally signed transfer payload. Most users should use Send instead.
+          </p>
+          <button onClick={() => setShowSignedJson((shown) => !shown)} className="mt-3 text-sm text-mint/80 hover:text-mint">
             {showSignedJson ? "Hide" : "Show"} advanced signed JSON submission
           </button>
           {showSignedJson && (
@@ -1473,7 +1433,6 @@ function SequencerView({
             <div className={cn("text-sm font-medium", notice.tone === "bad" ? "text-rose" : "text-mint")}>{notice.message}</div>
           </Panel>
         )}
-        <SystemStatusPanel health={health} summary={summary} />
       </div>
 
       <div className="grid content-start gap-4">
@@ -1550,26 +1509,6 @@ function TransferQueueRow({ entry }: { entry: TransactionPoolEntry }) {
         <span>amount {entry.transfer.amount} / transfer #{entry.transfer.nonce}</span>
       </div>
     </div>
-  );
-}
-
-function SystemStatusPanel({
-  health,
-  summary,
-}: {
-  health?: { status: string; latest_error: unknown };
-  summary?: { height: number | null; valid: boolean; block_count: number };
-}) {
-  return (
-    <Panel className="p-4">
-      <SectionTitle icon={<ShieldAlert className="h-4 w-4" />} title="System status" action={health?.status ?? "optional"} flush />
-      <div className="mt-4 grid gap-3">
-        <StatusLine label="API connection" ok={health?.status === "ok"} value={health?.status ?? "unavailable"} />
-        <StatusLine label="Data consistency" ok={Boolean(summary?.valid)} value={summary?.valid ? "healthy" : "needs review"} />
-        <StatusLine label="Latest activity group" ok value={summary?.height ?? "none"} />
-        <StatusLine label="Stored groups" ok value={summary?.block_count ?? 0} />
-      </div>
-    </Panel>
   );
 }
 
@@ -1686,14 +1625,13 @@ function RollupView({
                   Copy these only when comparing prover output, API responses, or settlement calldata.
                 </p>
               </div>
-              <span className="text-xs text-white/36">Use the copy icon to capture the complete value</span>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <HashLine label="Previous state root" value={selectedBatch.prev_state_root} />
               <HashLine label="New state root" value={selectedBatch.new_state_root} />
               <HashLine label="Transaction root" value={selectedBatch.transaction_root} />
               <HashLine label="Block hash root" value={selectedBatch.block_hash_root} />
-              <HashLine label="Batch commitment" value={selectedBatch.data_hash} />
+              <HashLine label="Batch data hash" value={selectedBatch.data_hash} />
             </div>
             {selectedBatch.status === "built" ? (
               <SettlementNextStep batchNumber={selectedBatch.batch_number} />
@@ -1956,18 +1894,6 @@ function MetricLine({ label, value }: { label: string; value: React.ReactNode })
   );
 }
 
-function StatusLine({ label, ok, value }: { label: string; ok: boolean; value: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.04] p-3">
-      <div className="flex items-center gap-2 text-sm text-white/68">
-        {ok ? <CheckCircle2 className="h-4 w-4 text-mint" /> : <XCircle className="h-4 w-4 text-rose" />}
-        {label}
-      </div>
-      <div className="text-sm font-medium text-white">{value}</div>
-    </div>
-  );
-}
-
 function CopyButton({ value, label = "value" }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -2027,41 +1953,6 @@ function downloadTransactionReference({
   anchor.download = `rolluplens-transaction-${hash.slice(0, 12)}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
-}
-
-function TransactionMini({ tx, onSelectAccount }: { tx: Transfer; onSelectAccount: (address: string) => void }) {
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
-      <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)] items-end gap-3">
-        <button
-          onClick={() => onSelectAccount(tx.from)}
-          title={tx.from}
-          className="min-w-0 text-center"
-        >
-          <span className="block text-xs uppercase tracking-[0.14em] text-white/36">Sender</span>
-          <span className="hash mt-1 block text-sm text-cyan hover:text-cyan/80">
-            {shortHash(tx.from, 10, 8)}
-          </span>
-        </button>
-        <div className="text-center">
-          <span className="block text-xs uppercase tracking-[0.14em] text-white/36">Amount</span>
-          <span className="mt-1 inline-block rounded-md bg-amber/10 px-2 py-1 text-xs font-semibold text-amber">
-            {tx.amount}
-          </span>
-        </div>
-        <button
-          onClick={() => onSelectAccount(tx.to)}
-          title={tx.to}
-          className="min-w-0 text-center"
-        >
-          <span className="block text-xs uppercase tracking-[0.14em] text-white/36">Receiver</span>
-          <span className="hash mt-1 block text-sm text-mint hover:text-mint/80">
-            {shortHash(tx.to, 10, 8)}
-          </span>
-        </button>
-      </div>
-    </div>
-  );
 }
 
 function TransactionRow({
