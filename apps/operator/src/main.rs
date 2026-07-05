@@ -5,17 +5,23 @@ use clap::Parser;
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{
+    postgres::{PgListener, PgPoolOptions},
+    PgPool, Row,
+};
 use tokio::{fs, process::Command, time::MissedTickBehavior};
 
 const BATCH_FINALIZED_TOPIC: &str =
     "0xdc34f737c6cca7c2bef391debb7d95fe9db2db57eb450c20b4ad265834a91e24";
+const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
 
 #[derive(Debug, Parser)]
 #[command(about = "Automate rollup sequencing, proving, submission, and L1 indexing")]
 struct Args {
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
+    #[arg(long, env = "DIRECT_DATABASE_URL")]
+    direct_database_url: Option<String>,
     #[arg(
         long,
         env = "SETTLEMENT_API_URL",
@@ -171,10 +177,21 @@ async fn main() -> Result<()> {
         chain_id,
     };
     fs::create_dir_all(&operator.artifact_dir).await?;
+    let listener_database_url = args
+        .direct_database_url
+        .as_deref()
+        .unwrap_or(&args.database_url);
+    let mut listener = PgListener::connect(listener_database_url)
+        .await
+        .context("failed to create Postgres pub-sub listener")?;
+    listener
+        .listen(TRANSACTION_PENDING_CHANNEL)
+        .await
+        .context("failed to subscribe to pending transaction notifications")?;
 
     println!(
-        "operator started for chain {} contract {} with {} confirmations",
-        operator.chain_id, operator.contract, operator.confirmations
+        "operator started for chain {} contract {} with {} confirmations; subscribed to {}",
+        operator.chain_id, operator.contract, operator.confirmations, TRANSACTION_PENDING_CHANNEL
     );
     let mut interval = tokio::time::interval(Duration::from_secs(args.poll_seconds));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -188,6 +205,26 @@ async fn main() -> Result<()> {
                 if let Err(error) = operator.tick().await {
                     eprintln!("operator tick failed: {error:#}");
                     operator.record_error(&error).await;
+                }
+            }
+            notification = listener.recv() => {
+                match notification {
+                    Ok(notification) => {
+                        println!(
+                            "received {} notification for transaction {}",
+                            notification.channel(),
+                            notification.payload()
+                        );
+                        if let Err(error) = operator.tick().await {
+                            eprintln!("operator notification tick failed: {error:#}");
+                            operator.record_error(&error).await;
+                        }
+                    }
+                    Err(error) => {
+                        // PgListener reconnects when possible. The polling branch
+                        // remains the durable recovery path if notifications fail.
+                        eprintln!("operator notification listener failed: {error}");
+                    }
                 }
             }
         }

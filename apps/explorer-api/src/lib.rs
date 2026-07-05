@@ -28,6 +28,7 @@ const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
 const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 100;
 const GENESIS_INITIALIZATION_LOCK: i64 = 8_739_912_441;
+const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1018,6 +1019,7 @@ impl DbSource {
         apply_transaction_to_state(&mut accounts, &transaction)
             .map_err(|error| ApiError::BadRequest(error.to_string()))?;
 
+        let mut tx = self.pool.begin().await.map_err(database_error)?;
         sqlx::query(
             r#"
             INSERT INTO transaction_pool (
@@ -1044,9 +1046,20 @@ impl DbSource {
         .bind(serde_json::to_value(&transaction).map_err(|error| {
             ApiError::InvalidIndexedData(format!("invalid transaction json: {error}"))
         })?)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(database_error)?;
+
+        // PostgreSQL delivers transactional notifications only after commit.
+        // The database row remains the durable source of truth; this is only
+        // a low-latency wake-up signal for operator subscribers.
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(TRANSACTION_PENDING_CHANNEL)
+            .bind(&hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
 
         Ok(SubmittedTransaction {
             hash,

@@ -16,6 +16,13 @@ proving job can be reclaimed after two hours, failed jobs retry up to
 `OPERATOR_MAX_ATTEMPTS`, and broadcast batches are not resubmitted while the
 indexer waits for confirmation.
 
+The explorer API publishes a PostgreSQL `NOTIFY` on
+`rollup_transaction_pending` after a submitted transaction commits. The
+operator uses `LISTEN` to wake immediately and start a lifecycle tick.
+Notifications are only wake-up signals: transaction and batch rows remain the
+durable source of truth, and `OPERATOR_POLL_SECONDS` polling remains enabled as
+a recovery path for disconnects, restarts, or missed notifications.
+
 ## Setup
 
 Apply migrations, then build the three binaries:
@@ -29,6 +36,7 @@ Configure and run:
 
 ```bash
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup
+export DIRECT_DATABASE_URL="$DATABASE_URL"
 export SETTLEMENT_API_URL=http://127.0.0.1:3000
 export EVM_RPC_URL=http://127.0.0.1:8545
 export ROLLUP_SETTLEMENT_CONTRACT=0x...
@@ -40,6 +48,11 @@ export SETTLEMENT_CLIENT_BIN="$PWD/target/release/settlement-client"
 
 ./target/release/operator
 ```
+
+When using Neon, set `DATABASE_URL` to the pooled URL for ordinary application
+queries and `DIRECT_DATABASE_URL` to the non-pooler URL. PostgreSQL
+`LISTEN` requires a persistent session and must not use Neon's transaction
+pooler.
 
 For Anvil, use `EVM_CONFIRMATIONS=0`. In production, set
 `EVM_DEPLOYMENT_BLOCK` to the contract's deployment block.

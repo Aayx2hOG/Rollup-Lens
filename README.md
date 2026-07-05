@@ -55,6 +55,26 @@ non-pooler connection string from Neon's Connect dialog for
 `DIRECT_DATABASE_URL`. Prisma migrations prefer the direct URL; the running API
 continues to use the pooled URL.
 
+`bun run db:up` and `bun run db:down` are only for the optional local Docker
+database. They are not needed when `prisma/.env` points to Neon. Check the
+configured database without changing it:
+
+```bash
+bun run db:status
+```
+
+Do not run integration tests against the deployed application's production
+branch. Create a separate Neon test branch, then pass its connection string
+only to the test process:
+
+```bash
+TEST_DATABASE_URL='postgresql://...neon.tech/neondb?sslmode=require&channel_binding=require' \
+cargo test -p settlement-client --test validity_settlement_e2e \
+  sequences_and_finalizes_a_batch_with_mock_verifier -- --ignored --nocapture
+```
+
+The test role must be allowed to create and drop schemas.
+
 Apply migrations:
 
 ```bash

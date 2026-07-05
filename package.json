@@ -4,6 +4,8 @@
     "db:down": "docker compose down",
     "db:migrate": "bunx prisma migrate dev",
     "db:migrate:deploy": "bun scripts/migrate-deploy.mjs",
+    "db:migrate:neon": "bun scripts/migrate-deploy.mjs --neon",
+    "db:status": "bunx prisma migrate status --schema prisma/schema.prisma",
     "genesis:init": "cargo run -p explorer-api -- --initialize-genesis",
     "api:dev": "cargo run -p explorer-api -- --bind 127.0.0.1:3000",
     "operator:dev": "cargo run -p operator",

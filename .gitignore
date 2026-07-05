@@ -7,6 +7,7 @@
 .env.*
 !.env.example
 prisma/.env
+prisma/env.txt
 *.pem
 *.key
 *.cert
