@@ -4,7 +4,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::Path,
-    process::Stdio,
+    process::{Output, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -31,50 +31,24 @@ const FINALIZED_TOPIC: &str = "0xdc34f737c6cca7c2bef391debb7d95fe9db2db57eb450c2
 #[derive(Clone)]
 struct MockState {
     emit_finalized: Arc<AtomicBool>,
+    invalid_finalized: Arc<AtomicBool>,
 }
 
 #[tokio::test]
 #[ignore = "requires local Docker DATABASE_URL"]
 async fn once_drives_broadcast_then_indexes_finality() -> Result<()> {
-    let database_url =
-        std::env::var("DATABASE_URL").context("set DATABASE_URL to local Docker Postgres")?;
-
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let schema = format!("operator_test_{}_{}", std::process::id(), nonce);
-    let admin = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&database_url)
-        .await
-        .context("connect local Docker DATABASE_URL")?;
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await?;
-    let cleanup = SchemaCleanup {
-        pool: admin.clone(),
-        schema: schema.clone(),
-    };
-    let isolated_url = schema_url(&database_url, &schema);
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&isolated_url)
-        .await?;
-    create_fixture_schema(&pool).await?;
+    let TestDatabase {
+        url: isolated_url,
+        pool,
+        cleanup,
+    } = test_database().await?;
     insert_queued_batch(&pool).await?;
 
     let state = MockState {
         emit_finalized: Arc::new(AtomicBool::new(false)),
+        invalid_finalized: Arc::new(AtomicBool::new(false)),
     };
-    let app = Router::new()
-        .route("/", post(rpc))
-        .route("/rollup/batches", post(no_pending_transactions))
-        .route(
-            "/rollup/batches/:batch/validity-witness",
-            get(validity_witness),
-        )
-        .with_state(state.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let (port, server) = start_mock_server(state.clone()).await?;
 
     let fixtures = TempDir::new()?;
     let prover = fixtures.path().join("fake-prover");
@@ -99,14 +73,7 @@ exit 2
         &format!("#!/bin/sh\nset -eu\nprintf '%s\\n' '{TX_HASH}'\n"),
     )?;
 
-    run_once(
-        &isolated_url,
-        address.port(),
-        fixtures.path(),
-        &prover,
-        &settlement,
-    )
-    .await?;
+    run_once(&isolated_url, port, fixtures.path(), &prover, &settlement).await?;
     let (status, attempts, hash): (String, i32, Option<String>) = sqlx::query_as(
         "SELECT operator_status, operator_attempts, operator_broadcast_tx_hash \
          FROM rollup_batches WHERE batch_number = 0",
@@ -118,14 +85,7 @@ exit 2
     assert_eq!(hash.as_deref(), Some(TX_HASH));
 
     state.emit_finalized.store(true, Ordering::SeqCst);
-    run_once(
-        &isolated_url,
-        address.port(),
-        fixtures.path(),
-        &prover,
-        &settlement,
-    )
-    .await?;
+    run_once(&isolated_url, port, fixtures.path(), &prover, &settlement).await?;
     let (batch_status, operator_status, finalize_hash): (String, String, Option<String>) =
         sqlx::query_as(
             "SELECT status, operator_status, l1_finalize_tx_hash \
@@ -141,6 +101,169 @@ exit 2
     drop(pool);
     cleanup.drop_schema().await?;
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Docker DATABASE_URL"]
+async fn prover_failure_retries_only_until_max_attempts() -> Result<()> {
+    let TestDatabase { url, pool, cleanup } = test_database().await?;
+    insert_queued_batch(&pool).await?;
+    let state = MockState {
+        emit_finalized: Arc::new(AtomicBool::new(false)),
+        invalid_finalized: Arc::new(AtomicBool::new(false)),
+    };
+    let (port, server) = start_mock_server(state).await?;
+    let fixtures = TempDir::new()?;
+    let prover = fixtures.path().join("failing-prover");
+    let settlement = fixtures.path().join("unused-settlement-client");
+    write_executable(
+        &prover,
+        "#!/bin/sh\nprintf '%s\\n' 'fixture prover failure' >&2\nexit 17\n",
+    )?;
+    write_executable(&settlement, "#!/bin/sh\nexit 99\n")?;
+
+    for expected_attempt in 1..=3 {
+        let output = run_once_output(&url, port, fixtures.path(), &prover, &settlement).await?;
+        assert!(
+            !output.status.success(),
+            "prover failure must fail operator attempt {expected_attempt}"
+        );
+        let (status, attempts, error): (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT operator_status, operator_attempts, operator_last_error \
+             FROM rollup_batches WHERE batch_number = 0",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(status, "retry");
+        assert_eq!(attempts, expected_attempt);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|message| message.contains("fixture prover failure")),
+            "prover stderr must be persisted"
+        );
+    }
+
+    let exhausted = run_once_output(&url, port, fixtures.path(), &prover, &settlement).await?;
+    assert!(
+        exhausted.status.success(),
+        "operator must leave an exhausted batch unclaimed: {}",
+        String::from_utf8_lossy(&exhausted.stderr)
+    );
+    let (status, attempts, broadcast_hash): (String, i32, Option<String>) = sqlx::query_as(
+        "SELECT operator_status, operator_attempts, operator_broadcast_tx_hash \
+         FROM rollup_batches WHERE batch_number = 0",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(status, "retry");
+    assert_eq!(attempts, 3);
+    assert!(broadcast_hash.is_none());
+
+    server.abort();
+    drop(pool);
+    cleanup.drop_schema().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Docker DATABASE_URL"]
+async fn invalid_finalized_event_never_updates_batch() -> Result<()> {
+    let TestDatabase { url, pool, cleanup } = test_database().await?;
+    insert_queued_batch(&pool).await?;
+    sqlx::query(
+        "UPDATE rollup_batches SET operator_status = 'broadcast', \
+         operator_broadcast_tx_hash = $1 WHERE batch_number = 0",
+    )
+    .bind(TX_HASH)
+    .execute(&pool)
+    .await?;
+    let state = MockState {
+        emit_finalized: Arc::new(AtomicBool::new(true)),
+        invalid_finalized: Arc::new(AtomicBool::new(true)),
+    };
+    let (port, server) = start_mock_server(state).await?;
+    let fixtures = TempDir::new()?;
+    let unused = fixtures.path().join("unused");
+    write_executable(&unused, "#!/bin/sh\nexit 99\n")?;
+
+    let output = run_once_output(&url, port, fixtures.path(), &unused, &unused).await?;
+    assert!(
+        !output.status.success(),
+        "invalid finalized roots must fail the operator tick"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not match the local commitment"));
+    let (batch_status, operator_status, finalize_hash, chain_id): (
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT status, operator_status, l1_finalize_tx_hash, l1_chain_id \
+         FROM rollup_batches WHERE batch_number = 0",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(batch_status, "built");
+    assert_eq!(operator_status, "broadcast");
+    assert!(finalize_hash.is_none());
+    assert!(chain_id.is_none());
+
+    server.abort();
+    drop(pool);
+    cleanup.drop_schema().await?;
+    Ok(())
+}
+
+struct TestDatabase {
+    url: String,
+    pool: PgPool,
+    cleanup: SchemaCleanup,
+}
+
+async fn test_database() -> Result<TestDatabase> {
+    let database_url =
+        std::env::var("DATABASE_URL").context("set DATABASE_URL to local Docker Postgres")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let schema = format!("operator_test_{}_{}", std::process::id(), nonce);
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .context("connect local Docker DATABASE_URL")?;
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await?;
+    let cleanup = SchemaCleanup {
+        pool: admin,
+        schema: schema.clone(),
+    };
+    let url = schema_url(&database_url, &schema);
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
+    create_fixture_schema(&pool).await?;
+    Ok(TestDatabase { url, pool, cleanup })
+}
+
+async fn start_mock_server(state: MockState) -> Result<(u16, tokio::task::JoinHandle<()>)> {
+    let app = Router::new()
+        .route("/", post(rpc))
+        .route("/rollup/batches", post(no_pending_transactions))
+        .route(
+            "/rollup/batches/:batch/validity-witness",
+            get(validity_witness),
+        )
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("mock server must remain available")
+    });
+    Ok((port, server))
 }
 
 struct SchemaCleanup {
@@ -240,6 +363,24 @@ async fn run_once(
     prover: &Path,
     settlement: &Path,
 ) -> Result<()> {
+    let output = run_once_output(database_url, port, artifact_dir, prover, settlement).await?;
+    if !output.status.success() {
+        bail!(
+            "operator --once failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+async fn run_once_output(
+    database_url: &str,
+    port: u16,
+    artifact_dir: &Path,
+    prover: &Path,
+    settlement: &Path,
+) -> Result<Output> {
     let base_url = format!("http://127.0.0.1:{port}");
     let output = Command::new(env!("CARGO_BIN_EXE_operator"))
         .arg("--once")
@@ -267,14 +408,7 @@ async fn run_once(
         .stderr(Stdio::piped())
         .output()
         .await?;
-    if !output.status.success() {
-        bail!(
-            "operator --once failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(())
+    Ok(output)
 }
 
 fn write_executable(path: &Path, contents: &str) -> Result<()> {
@@ -296,11 +430,12 @@ async fn validity_witness() -> Json<Value> {
 async fn rpc(State(state): State<MockState>, Json(request): Json<Value>) -> Json<Value> {
     let method = request["method"].as_str().unwrap_or_default();
     let finalized = state.emit_finalized.load(Ordering::SeqCst);
+    let invalid_finalized = state.invalid_finalized.load(Ordering::SeqCst);
     let result = match method {
         "eth_chainId" => json!("0x7a69"),
         "eth_blockNumber" => json!(if finalized { "0x10" } else { "0xf" }),
         "eth_call" => json!(word_u64(0)),
-        "eth_getLogs" if finalized => json!([finalized_log()]),
+        "eth_getLogs" if finalized => json!([finalized_log(invalid_finalized)]),
         "eth_getLogs" => json!([]),
         "eth_getTransactionReceipt" => json!({
             "transactionHash": TX_HASH,
@@ -320,7 +455,7 @@ async fn rpc(State(state): State<MockState>, Json(request): Json<Value>) -> Json
     Json(json!({"jsonrpc": "2.0", "id": 1, "result": result}))
 }
 
-fn finalized_log() -> Value {
+fn finalized_log(invalid: bool) -> Value {
     let data = [
         "33".repeat(32),
         "44".repeat(32),
@@ -335,7 +470,7 @@ fn finalized_log() -> Value {
             FINALIZED_TOPIC,
             word_u64(0),
             format!("0x{}", "11".repeat(32)),
-            format!("0x{}", "22".repeat(32))
+            format!("0x{}", if invalid { "99" } else { "22" }.repeat(32))
         ],
         "data": format!("0x{data}"),
         "blockNumber": "0x10",

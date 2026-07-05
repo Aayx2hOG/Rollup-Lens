@@ -50,6 +50,7 @@ Thumbs.db
 .agents/
 .plans/
 .designs/
+/docs/
 next_project.txt
 docs/system-design.md
 
