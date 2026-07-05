@@ -49,6 +49,19 @@ export SETTLEMENT_CLIENT_BIN="$PWD/target/release/settlement-client"
 ./target/release/operator
 ```
 
+For local Anvil testing, the repository can deploy and configure the complete
+settlement environment:
+
+```bash
+export EVM_PRIVATE_KEY='0x<private-key printed by anvil>'
+export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/zk_rollup'
+bun run settlement:deploy:local
+bun run operator:local
+```
+
+This writes the ignored, owner-readable `.env.operator.local` file used by
+`operator:local`. See the root README for prerequisites and generated values.
+
 When using Neon, set `DATABASE_URL` to the pooled URL for ordinary application
 queries and `DIRECT_DATABASE_URL` to the non-pooler URL. PostgreSQL
 `LISTEN` requires a persistent session and must not use Neon's transaction

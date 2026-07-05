@@ -32,6 +32,13 @@ Execute a witness without proving:
 cargo run --release -p validity-prover -- execute witness.json
 ```
 
+Print the verification-key commitment used when deploying the settlement
+contract:
+
+```bash
+cargo run --release -p validity-prover -- vkey
+```
+
 Generate and locally verify a core proof:
 
 ```bash

@@ -203,6 +203,30 @@ from confirmed `BatchFinalized` events whose commitments match Postgres.
 See [`apps/operator/README.md`](apps/operator/README.md) for configuration and
 failure semantics.
 
+### One-command local settlement deployment
+
+For a reproducible local validity-settlement environment, start Anvil and the
+explorer API, then provide one funded Anvil key and the application database:
+
+```bash
+export EVM_PRIVATE_KEY='0x<private-key printed by anvil>'
+export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/zk_rollup'
+bun run settlement:deploy:local
+bun run operator:local
+```
+
+The deployment command builds the required release binaries, reads the
+initialized genesis root from the API, derives the validity guest's SP1 program
+key, deploys the matching SP1 Groth16 verifier and
+`ValidityRollupSettlement`, configures the key's address as sequencer, and
+writes `.env.operator.local`. That generated file contains the private key and
+database URL, is ignored by Git, and is created with owner-only permissions.
+
+The API must be available at `http://127.0.0.1:3000` and Anvil at
+`http://127.0.0.1:8545` by default. Override those locations with
+`SETTLEMENT_API_URL` and `EVM_RPC_URL`. Re-running the deployment intentionally
+creates a fresh settlement chain and replaces the local operator configuration.
+
 ## Explorer UI
 
 Run the UI:

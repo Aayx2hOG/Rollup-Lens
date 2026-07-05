@@ -2,7 +2,7 @@
 /target/
 **/*.rs.bk
 
-# Local environment and secrets
+# Local environment and secrets (commit only explicit example templates)
 .env
 .env.*
 !.env.example
@@ -30,11 +30,12 @@ genesis.json
 *.proof.json
 *.batch.json
 
-# Logs and runtime files
+# Logs, generated proof material, and runtime files
 *.log
 logs/
 *.pid
 *.sock
+operator-artifacts/
 
 # Editor and OS files
 .DS_Store
@@ -82,4 +83,3 @@ tmp/
 temp/
 *.tmp
 *.bak
-operator-artifacts/

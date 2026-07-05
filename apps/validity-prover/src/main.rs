@@ -17,7 +17,7 @@ struct Args {
     #[arg(value_enum)]
     mode: Mode,
     #[arg(value_name = "WITNESS_JSON")]
-    witness: PathBuf,
+    witness: Option<PathBuf>,
     #[arg(long, value_name = "PROOF_FILE")]
     proof_out: Option<PathBuf>,
     #[arg(long, value_name = "ARTIFACT_JSON")]
@@ -29,6 +29,7 @@ enum Mode {
     Execute,
     Prove,
     Groth16,
+    Vkey,
 }
 
 #[derive(Serialize)]
@@ -41,13 +42,23 @@ struct EvmProofArtifact {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let client = ProverClient::from_env();
+    if matches!(args.mode, Mode::Vkey) {
+        let proving_key = client
+            .setup(VALIDITY_GUEST_ELF)
+            .context("failed to set up validity guest")?;
+        println!("{}", proving_key.verifying_key().bytes32());
+        return Ok(());
+    }
+    let witness = args
+        .witness
+        .as_ref()
+        .context("WITNESS_JSON is required unless vkey mode is used")?;
     let witness: BatchValidityWitness = serde_json::from_slice(
-        &fs::read(&args.witness)
-            .with_context(|| format!("failed to read {}", args.witness.display()))?,
+        &fs::read(witness).with_context(|| format!("failed to read {}", witness.display()))?,
     )
     .context("invalid batch witness JSON")?;
 
-    let client = ProverClient::from_env();
     let mut stdin = SP1Stdin::new();
     stdin.write(&witness);
 
@@ -127,6 +138,7 @@ fn main() -> Result<()> {
                 .with_context(|| format!("failed to write {}", artifact_out.display()))?;
             println!("wrote EVM proof artifact to {}", artifact_out.display());
         }
+        Mode::Vkey => unreachable!("vkey mode exits before reading a witness"),
     }
 
     Ok(())
