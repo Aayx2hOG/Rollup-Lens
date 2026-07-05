@@ -18,8 +18,14 @@ const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
 #[derive(Debug, Parser)]
 #[command(about = "Automate rollup sequencing, proving, submission, and L1 indexing")]
 struct Args {
+    /// Run one lifecycle tick and exit without starting the polling/listener loop.
+    #[arg(long, env = "OPERATOR_ONCE")]
+    once: bool,
     #[arg(long, env = "DATABASE_URL")]
-    database_url: String,
+    database_url: Option<String>,
+    /// Deployed Postgres URL used when DATABASE_URL is not set.
+    #[arg(long, env = "NEON_DATABASE_URL")]
+    neon_database_url: Option<String>,
     #[arg(long, env = "DIRECT_DATABASE_URL")]
     direct_database_url: Option<String>,
     #[arg(
@@ -148,10 +154,15 @@ async fn main() -> Result<()> {
     if args.poll_seconds == 0 || args.batch_limit == 0 || args.max_attempts < 1 {
         bail!("poll seconds, batch limit, and max attempts must be positive");
     }
+    let database_url = args
+        .database_url
+        .clone()
+        .or_else(|| args.neon_database_url.clone())
+        .context("set DATABASE_URL for local Docker or NEON_DATABASE_URL for deployment")?;
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
-        .connect(&args.database_url)
+        .connect(&database_url)
         .await
         .context("failed to connect to Postgres")?;
     let client = Client::new();
@@ -177,10 +188,13 @@ async fn main() -> Result<()> {
         chain_id,
     };
     fs::create_dir_all(&operator.artifact_dir).await?;
-    let listener_database_url = args
-        .direct_database_url
-        .as_deref()
-        .unwrap_or(&args.database_url);
+
+    if args.once {
+        operator.tick().await?;
+        return Ok(());
+    }
+
+    let listener_database_url = args.direct_database_url.as_deref().unwrap_or(&database_url);
     let mut listener = PgListener::connect(listener_database_url)
         .await
         .context("failed to create Postgres pub-sub listener")?;

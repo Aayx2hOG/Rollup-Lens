@@ -36,7 +36,6 @@ Configure and run:
 
 ```bash
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup
-export DIRECT_DATABASE_URL="$DATABASE_URL"
 export SETTLEMENT_API_URL=http://127.0.0.1:3000
 export EVM_RPC_URL=http://127.0.0.1:8545
 export ROLLUP_SETTLEMENT_CONTRACT=0x...
@@ -48,6 +47,17 @@ export SETTLEMENT_CLIENT_BIN="$PWD/target/release/settlement-client"
 
 ./target/release/operator
 ```
+
+Run exactly one lifecycle tick and exit with:
+
+```bash
+./target/release/operator --once
+```
+
+`--once` performs the same indexing, sequencing, proving, and submission path
+as the daemon. It skips PostgreSQL `LISTEN` and the polling loop, which makes it
+suitable for deterministic integration tests, one-shot jobs, and debugging.
+Any tick failure is returned as a non-zero process exit.
 
 For local Anvil testing, the repository can deploy and configure the complete
 settlement environment:
@@ -62,10 +72,11 @@ bun run operator:local
 This writes the ignored, owner-readable `.env.operator.local` file used by
 `operator:local`. See the root README for prerequisites and generated values.
 
-When using Neon, set `DATABASE_URL` to the pooled URL for ordinary application
-queries and `DIRECT_DATABASE_URL` to the non-pooler URL. PostgreSQL
-`LISTEN` requires a persistent session and must not use Neon's transaction
-pooler.
+Use `DATABASE_URL` for local Docker Postgres and `NEON_DATABASE_URL` for the
+deployed database. If the deployed URL uses a transaction pooler, also set
+`DIRECT_DATABASE_URL` to a direct endpoint because PostgreSQL `LISTEN` requires
+a persistent session. When both `DATABASE_URL` and `NEON_DATABASE_URL` are set,
+the operator deliberately prefers `DATABASE_URL`.
 
 For Anvil, use `EVM_CONFIRMATIONS=0`. In production, set
 `EVM_DEPLOYMENT_BLOCK` to the contract's deployment block.
@@ -91,3 +102,24 @@ The explorer's legacy settlement-update endpoint is disabled in the production
 binary unless `SETTLEMENT_UPDATE_TOKEN` is set. Manual `settlement-client`
 usage must provide the same variable. The automated operator does not use that
 endpoint.
+
+## Deterministic integration test
+
+`tests/operator_once.rs` runs the real operator binary against an isolated
+PostgreSQL schema, an in-process API/JSON-RPC server, and executable fake prover
+and settlement-client processes. It verifies:
+
+```text
+queued -> proving -> proved -> broadcast -> finalized
+```
+
+With the local Docker database running, use the existing `DATABASE_URL`:
+
+```bash
+source prisma/.env
+cargo test -p operator --test operator_once -- --ignored --nocapture
+```
+
+The test creates and drops its own uniquely named schema. It is marked ignored
+so a normal `cargo test` never connects to the database implicitly. It never
+falls back to `NEON_DATABASE_URL`.
