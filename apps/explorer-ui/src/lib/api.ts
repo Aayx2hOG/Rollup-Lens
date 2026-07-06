@@ -44,8 +44,7 @@ export type Transfer = {
   to: string;
   amount: number;
   nonce: number;
-  public_key_base64: string;
-  signature_base64: string;
+  signature: string;
 };
 
 export type Block = {

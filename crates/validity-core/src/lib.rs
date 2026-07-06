@@ -148,7 +148,7 @@ mod tests {
     use chain_core::{
         add_pending_transaction, finalize_genesis, new_chain, produce_block, sign_transfer, Account,
     };
-    use wallet_core::{address_from_public_key, create_keypair};
+    use wallet_core::create_keypair;
 
     use super::*;
 
@@ -156,8 +156,8 @@ mod tests {
     fn verifies_the_same_transition_committed_by_the_chain() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let genesis_accounts = vec![Account {
             address: alice_address,
             balance: 100,
@@ -169,7 +169,7 @@ mod tests {
             .collect();
         let mut chain = new_chain(genesis_accounts).unwrap();
         let previous_block = finalize_genesis(&mut chain).unwrap();
-        let transfer = sign_transfer(&alice.secret_key_base64, bob_address, 40, 0).unwrap();
+        let transfer = sign_transfer(&alice.secret_key_hex, bob_address, 40, 0).unwrap();
         add_pending_transaction(&mut chain, transfer).unwrap();
         let block = produce_block(&mut chain).unwrap();
 
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn rejects_a_forged_post_state_root() {
         let alice = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
         let genesis_accounts = vec![Account {
             address: alice_address,
             balance: 100,

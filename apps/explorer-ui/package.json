@@ -11,8 +11,6 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@noble/ed25519": "^3.1.0",
-    "@noble/hashes": "^2.2.0",
     "@tanstack/react-query": "^5.81.5",
     "clsx": "^2.1.1",
     "framer-motion": "^12.19.1",

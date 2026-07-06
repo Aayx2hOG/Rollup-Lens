@@ -26,8 +26,7 @@ model ChainTransaction {
   toAddress       String  @map("to_address")
   amount          BigInt
   nonce           BigInt
-  publicKeyBase64 String  @map("public_key_base64")
-  signatureBase64 String  @map("signature_base64")
+  signature       String
   rawTransfer     Json    @map("raw_transfer")
   block           Block?  @relation(fields: [blockHeight], references: [height], onDelete: Cascade)
   rollupBatches   RollupBatchTransaction[]
@@ -45,8 +44,7 @@ model TransactionPoolEntry {
   toAddress                String   @map("to_address")
   amount                   BigInt
   nonce                    BigInt
-  publicKeyBase64          String   @map("public_key_base64")
-  signatureBase64          String   @map("signature_base64")
+  signature                String
   status                   String
   failureReason            String?  @map("failure_reason")
   includedBlockHeight      BigInt?  @map("included_block_height")

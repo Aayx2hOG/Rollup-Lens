@@ -1028,12 +1028,11 @@ impl DbSource {
                 to_address,
                 amount,
                 nonce,
-                public_key_base64,
-                signature_base64,
+                signature,
                 status,
                 raw_transfer
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
             "#,
         )
         .bind(&hash)
@@ -1041,8 +1040,7 @@ impl DbSource {
         .bind(&transaction.to)
         .bind(to_i64(transaction.amount, "transaction amount")?)
         .bind(to_i64(transaction.nonce, "transaction nonce")?)
-        .bind(&transaction.public_key_base64)
-        .bind(&transaction.signature_base64)
+        .bind(&transaction.signature)
         .bind(serde_json::to_value(&transaction).map_err(|error| {
             ApiError::InvalidIndexedData(format!("invalid transaction json: {error}"))
         })?)
@@ -1753,11 +1751,10 @@ async fn insert_indexed_transaction_tx(
             to_address,
             amount,
             nonce,
-            public_key_base64,
-            signature_base64,
+            signature,
             raw_transfer
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(hash)
@@ -1767,8 +1764,7 @@ async fn insert_indexed_transaction_tx(
     .bind(&transaction.to)
     .bind(to_i64(transaction.amount, "transaction amount")?)
     .bind(to_i64(transaction.nonce, "transaction nonce")?)
-    .bind(&transaction.public_key_base64)
-    .bind(&transaction.signature_base64)
+    .bind(&transaction.signature)
     .bind(
         serde_json::to_value(transaction)
             .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?,

@@ -29,6 +29,43 @@ prisma/
 `chain-core` remains a pure deterministic execution library. Runtime state lives
 in Postgres, not in local JSON files.
 
+## System Design
+
+The production-shaped topology has four application/data server boundaries,
+plus the external L1 RPC/network:
+
+1. **Web server or CDN** serves the compiled explorer UI. An EVM wallet signs
+   EIP-712 transfers; private keys never reach the UI or a server.
+2. **Explorer API server** exposes the Axum HTTP API. It validates signed
+   transfers, persists the transaction pool, runs deterministic sequencing, and
+   exports immutable validity witnesses and settlement data.
+3. **PostgreSQL server** is the durable source of truth for accounts, blocks,
+   transactions, batches, operator claims, L1 receipts, checkpoints, and error
+   events. The API publishes `NOTIFY rollup_transaction_pending` after a pending
+   transaction commits.
+4. **Operator server** holds the long-running operator and launches
+   `validity-prover` and `settlement-client` as child processes. It connects
+   directly to PostgreSQL for claims, lifecycle state, and `LISTEN`; calls the
+   Explorer API for sequencing and immutable witness exports; and calls the EVM
+   RPC to read contract state, submit proofs, and index confirmed events.
+5. **External EVM RPC and L1 contracts** provide the authoritative settlement
+   state. `ValidityRollupSettlement` verifies each SP1 proof through its
+   configured verifier and emits `BatchFinalized`.
+
+`NOTIFY/LISTEN` is a low-latency wake-up path, not a queue. PostgreSQL rows are
+durable, and the operator's periodic poll runs the same lifecycle tick after a
+disconnect, restart, or missed notification. This makes delivery effectively
+at-least-once at the wake-up layer while database claims and on-chain batch
+numbers keep processing idempotent.
+
+The smallest practical deployment can co-locate the web server, API, and
+operator on one machine, but they remain separate processes and should scale or
+restart independently. PostgreSQL must provide a persistent direct connection
+for `LISTEN`; a transaction-pooler-only connection is insufficient.
+
+See the expanded
+[attachment and data-flow diagram](docs/system-design-flowchart.svg).
+
 ## Setup
 
 Start Postgres:
@@ -80,6 +117,26 @@ Apply migrations:
 ```bash
 bun run db:migrate
 ```
+
+Migration `0009_eip712_ethereum_accounts` changes account identity from the
+original Ed25519 format to Ethereum addresses. Existing addresses and
+signatures cannot be converted without their private keys, so this migration
+deliberately refuses to run against a database containing chain state. Create a
+fresh local database or Neon branch, apply migrations, and initialize a new
+genesis allocation with Ethereum addresses.
+
+If the existing Neon database must be reused, run the explicit one-time
+recovery command:
+
+```bash
+bun run db:migrate:eip712-reset:neon
+```
+
+It archives the existing chain tables under the
+`legacy_ed25519_archive` schema, clears active rollup state, resolves the failed
+`0009_eip712_ethereum_accounts` attempt, and deploys the migration. Reinitialize
+genesis afterward with Ethereum addresses. The ordinary
+`db:migrate:neon` command never clears data.
 
 ## Initialize Genesis
 
@@ -283,29 +340,30 @@ When the UI is hosted separately, set its build-time API origin:
 VITE_EXPLORER_API_BASE=https://your-api.onrender.com
 ```
 
-The Operate view can load the JSON key file produced by `wallet-cli`, or create
-and export a compatible keypair. Transfer signing happens in the browser and
-only the signed transfer is sent to the API. Private keys are held in memory
-for the current page session; they are never sent to or persisted by the API.
+The Send view connects to an injected EVM wallet and asks it to sign an EIP-712 L2
+transfer. The private key remains inside the wallet; the explorer receives only
+the Ethereum address and signature.
 
-Creating a browser wallet does not allocate funds. Its address must already be
+Connecting a wallet does not allocate funds. Its address must already be
 part of the explicit genesis allocation (or receive funds through a future
 deposit path) before it can submit transfers.
 
-## Wallet CLI
+## Development wallet CLI
 
-Create a development keypair:
+Create a development Ethereum keypair:
 
 ```bash
 cargo run -p wallet-cli -- create
 ```
 
-Sign a message:
+Sign an EIP-712 rollup transfer:
 
 ```bash
-cargo run -p wallet-cli -- sign \
+cargo run -p wallet-cli -- sign-transfer \
   --key-file dev-keypair.json \
-  --message "hello rollup"
+  --to 0x2222222222222222222222222222222222222222 \
+  --amount 10 \
+  --nonce 0
 ```
 
 ## Merkle CLI

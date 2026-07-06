@@ -3,10 +3,13 @@
 Runtime applications are Postgres-backed.
 
 ```text
-wallet-cli      development key generation, signing, and verification
+wallet-cli      development Ethereum keys and EIP-712 transfer signing
 merkle-cli      Merkle root and inclusion proof utilities
 explorer-api    rollup explorer API, transaction pool, and sequencer
 explorer-ui     React explorer and sequencer dashboard
+validity-prover SP1 batch execution, proving, and local verification
+settlement-client validity-proof submission to the EVM settlement contract
+operator        automated sequencing, proving, submission, and L1 indexing
 ```
 
 ## Setup

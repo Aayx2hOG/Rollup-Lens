@@ -17,7 +17,7 @@ use chain_core::{sign_transfer, Account};
 use explorer_api::{app_with_pool, initialize_genesis, GenesisConfig};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
-use wallet_core::{address_from_public_key, create_keypair};
+use wallet_core::create_keypair;
 
 const ANVIL_PRIVATE_KEY: &str =
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -82,8 +82,8 @@ async fn run_scenario(verifier_mode: VerifierMode) {
 
     let alice = create_keypair();
     let bob = create_keypair();
-    let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-    let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+    let alice_address = alice.address.clone();
+    let bob_address = bob.address.clone();
     let genesis = initialize_genesis(
         &pool,
         GenesisConfig {
@@ -112,7 +112,7 @@ async fn run_scenario(verifier_mode: VerifierMode) {
         tokio::spawn(axum::serve(api_listener, app_with_pool(pool.clone())).into_future());
 
     let client = reqwest::Client::new();
-    let transfer = sign_transfer(&alice.secret_key_base64, bob_address, 25, 0).unwrap();
+    let transfer = sign_transfer(&alice.secret_key_hex, bob_address, 25, 0).unwrap();
     post_ok(
         &client,
         &format!("{api_url}/rollup/transactions"),

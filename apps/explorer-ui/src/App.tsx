@@ -38,12 +38,9 @@ import {
 } from "./lib/api";
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
 import {
-  addressFromPublicKey,
-  createKeypair,
-  downloadKeypair,
-  importKeypair,
+  connectWallet,
+  hasWalletProvider,
   signTransfer,
-  type RollupKeypair,
 } from "./lib/wallet";
 import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
 
@@ -89,7 +86,7 @@ export function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [connectionSeconds, setConnectionSeconds] = useState(0);
   const [overviewBlockTarget, setOverviewBlockTarget] = useState<number | null>(null);
-  const [walletKeypair, setWalletKeypair] = useState<RollupKeypair | null>(null);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [sendRecipient, setSendRecipient] = useState("");
 
   const readiness = useQuery({ queryKey: ["readiness"], queryFn: api.ready });
@@ -365,13 +362,13 @@ export function App() {
           <PageIntro
             icon={<Send className="h-5 w-5" />}
             title="Send funds"
-            description="Load your wallet, choose a recipient, and send a signed L2 transfer."
+            description="Connect an Ethereum wallet, choose a recipient, and sign an EIP-712 L2 transfer."
           />
           <SendTransferView
-            keypair={walletKeypair}
+            wallet={walletAddress}
             recipient={sendRecipient}
             pool={transactionPool.data?.items ?? []}
-            onKeypairChange={setWalletKeypair}
+            onWalletChange={setWalletAddress}
             onRecipientChange={setSendRecipient}
             onSubmitted={async (hash) => {
               setSelectedTx(hash);
@@ -827,7 +824,7 @@ function BlocksView({
                 ) : (
                   selectedBlock.transactions.map((tx, index) => (
                     <TransactionRow
-                      key={`${tx.signature_base64}-${index}`}
+                      key={`${tx.signature}-${index}`}
                       tx={tx}
                       hash={selectedBlock.transaction_views[index]?.hash ?? null}
                       onSelectAccount={onSelectAccount}
@@ -1102,24 +1099,24 @@ function AccountDetail({
 }
 
 function SendTransferView({
-  keypair,
+  wallet,
   recipient,
   pool,
-  onKeypairChange,
+  onWalletChange,
   onRecipientChange,
   onSubmitted,
 }: {
-  keypair: RollupKeypair | null;
+  wallet: string | null;
   recipient: string;
   pool: TransactionPoolEntry[];
-  onKeypairChange: (keypair: RollupKeypair | null) => void;
+  onWalletChange: (wallet: string | null) => void;
   onRecipientChange: (recipient: string) => void;
   onSubmitted: (hash: string) => Promise<void>;
 }) {
   const [amount, setAmount] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
-  const walletAddress = keypair ? addressFromPublicKey(keypair.public_key_base64) : null;
+  const walletAddress = wallet;
   const walletAccount = useQuery({
     queryKey: ["account", walletAddress],
     queryFn: () => api.account(walletAddress!),
@@ -1131,38 +1128,26 @@ function SendTransferView({
     : 0;
   const nextNonce = (walletAccount.data?.nonce ?? 0) + pendingFromWallet;
 
-  async function createWalletForSession() {
+  async function connectEthereumWallet() {
     setNotice(null);
     try {
-      const created = await createKeypair();
-      downloadKeypair(created);
-      onKeypairChange(created);
+      const connected = await connectWallet();
+      onWalletChange(connected);
       setNotice({
         tone: "neutral",
-        message: "Wallet created and downloaded. Fund its address before sending.",
+        message: "Ethereum wallet connected. Transfer approval stays inside your wallet.",
       });
     } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet creation failed" });
-    }
-  }
-
-  async function loadWallet(file: File) {
-    setNotice(null);
-    try {
-      const loaded = await importKeypair(await file.text());
-      onKeypairChange(loaded);
-      setNotice({ tone: "neutral", message: "Wallet connected for this browser session." });
-    } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Could not load this wallet file" });
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet connection failed" });
     }
   }
 
   async function sendTransfer() {
-    if (!keypair || !walletAccount.data) return;
+    if (!wallet || !walletAccount.data) return;
     setSubmitting(true);
     setNotice(null);
     try {
-      const transfer = await signTransfer(keypair, recipient.trim(), amount, nextNonce);
+      const transfer = await signTransfer(wallet, recipient.trim(), amount, nextNonce);
       const submitted = await api.submitTransaction(transfer);
       onRecipientChange("");
       setNotice({
@@ -1183,40 +1168,26 @@ function SendTransferView({
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-lg font-semibold text-white">Send L2 funds</div>
-            <div className="mt-1 text-sm text-white/48">Your key stays in this browser session.</div>
+            <div className="mt-1 text-sm text-white/48">Your private key stays inside your wallet.</div>
           </div>
-          {keypair && <Badge tone="good">Wallet connected</Badge>}
+          {wallet && <Badge tone="good">Ethereum wallet connected</Badge>}
         </div>
       </div>
 
       <div className="grid gap-5 p-5">
-        {!keypair ? (
+        {!wallet ? (
           <div className="rounded-xl border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
             <Wallet className="mx-auto h-7 w-7 text-mint" />
-            <div className="mt-3 font-semibold text-white">Connect your rollup wallet</div>
+            <div className="mt-3 font-semibold text-white">Connect Ethereum wallet</div>
             <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-white/50">
-              Load the JSON key file created by wallet-cli. It is read locally and is never uploaded.
+              MetaMask, Rabby, or another injected EVM wallet signs the EIP-712 transfer.
             </p>
             <div className="mt-4 flex flex-wrap justify-center gap-2">
-              <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-lg bg-mint px-4 text-sm font-semibold text-ink transition hover:bg-mint/90">
-                <Upload className="h-4 w-4" />
-                Load wallet
-                <input
-                  type="file"
-                  accept="application/json,.json"
-                  className="hidden"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) void loadWallet(file);
-                    event.target.value = "";
-                  }}
-                />
-              </label>
               <button
-                onClick={createWalletForSession}
+                onClick={connectEthereumWallet}
                 className="h-10 rounded-lg border border-white/12 px-4 text-sm font-medium text-white/70 hover:border-mint/30 hover:text-mint"
               >
-                Create wallet
+                {hasWalletProvider() ? "Connect wallet" : "No EVM wallet found"}
               </button>
             </div>
           </div>
@@ -1233,7 +1204,7 @@ function SendTransferView({
                   <div className="mt-1 text-lg font-semibold text-white">{walletAccount.data?.balance ?? "—"}</div>
                 </div>
                 <button
-                  onClick={() => onKeypairChange(null)}
+                  onClick={() => onWalletChange(null)}
                   className="text-sm text-white/46 hover:text-white"
                 >
                   Disconnect
@@ -1382,7 +1353,7 @@ function SequencerView({
               <textarea
                 value={transferJson}
                 onChange={(event) => setTransferJson(event.target.value)}
-                placeholder='{"from":"...","to":"...","amount":5,"nonce":0,"public_key_base64":"...","signature_base64":"..."}'
+                placeholder='{"from":"0x...","to":"0x...","amount":5,"nonce":0,"signature":"0x..."}'
                 className="min-h-36 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
               />
               <button onClick={submitTransfer} disabled={submitting || transferJson.trim().length === 0} className="mt-3 rounded-lg border border-mint/30 px-3 py-2 text-sm font-medium text-mint disabled:opacity-50">

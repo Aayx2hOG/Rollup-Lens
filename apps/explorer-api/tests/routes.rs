@@ -17,7 +17,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use tower::ServiceExt;
-use wallet_core::{address_from_public_key, create_keypair};
+use wallet_core::create_keypair;
 
 #[tokio::test]
 async fn postgres_router_exposes_index_without_database_queries() {
@@ -55,12 +55,12 @@ async fn genesis_initialization_is_atomic_and_one_time() {
     let bob = create_keypair();
     let accounts = vec![
         Account {
-            address: address_from_public_key(&alice.public_key_base64).unwrap(),
+            address: alice.address.clone(),
             balance: 1_000,
             nonce: 0,
         },
         Account {
-            address: address_from_public_key(&bob.public_key_base64).unwrap(),
+            address: bob.address.clone(),
             balance: 0,
             nonce: 0,
         },
@@ -411,8 +411,8 @@ impl ChainFixture {
     fn with_transaction_blocks(count: usize) -> Self {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![
             Account {
                 address: alice_address.clone(),
@@ -433,13 +433,9 @@ impl ChainFixture {
         for index in 0..count {
             let alice_sends = index % 2 == 0;
             let (secret_key, from, to) = if alice_sends {
-                (
-                    &alice.secret_key_base64,
-                    &alice_address,
-                    bob_address.clone(),
-                )
+                (&alice.secret_key_hex, &alice_address, bob_address.clone())
             } else {
-                (&bob.secret_key_base64, &bob_address, alice_address.clone())
+                (&bob.secret_key_hex, &bob_address, alice_address.clone())
             };
             let nonce = next_nonce(&chain, from).unwrap();
             let transfer = sign_transfer(secret_key, to, 40, nonce).unwrap();
@@ -453,7 +449,7 @@ impl ChainFixture {
         Self {
             chain,
             alice_address,
-            alice_secret_key: alice.secret_key_base64,
+            alice_secret_key: alice.secret_key_hex,
             alice_nonce,
             bob_address,
             latest_block_hash,
@@ -556,11 +552,10 @@ async fn insert_indexed_chain(pool: &PgPool, chain: &Chain) {
                     to_address,
                     amount,
                     nonce,
-                    public_key_base64,
-                    signature_base64,
+                    signature,
                     raw_transfer
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 "#,
             )
             .bind(transaction_hash(transaction))
@@ -570,8 +565,7 @@ async fn insert_indexed_chain(pool: &PgPool, chain: &Chain) {
             .bind(&transaction.to)
             .bind(transaction.amount as i64)
             .bind(transaction.nonce as i64)
-            .bind(&transaction.public_key_base64)
-            .bind(&transaction.signature_base64)
+            .bind(&transaction.signature)
             .bind(serde_json::to_value(transaction).unwrap())
             .execute(pool)
             .await

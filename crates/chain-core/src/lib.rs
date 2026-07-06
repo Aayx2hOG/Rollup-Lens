@@ -4,16 +4,19 @@ use merkle_core::{encode_hex, root_hex, SparseMerkleProof, SparseMerkleTree};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use sha3::Keccak256;
 use wallet_core::{
-    address_from_public_key, public_key_from_secret, sign_message, verify_message, WalletError,
+    address_from_secret, normalize_address, recover_address, sign_digest, WalletError,
 };
 
 const NULL_PARENT_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const TRANSFER_PAYLOAD_DOMAIN: &str = "zk-rollup-transfer-v1";
+pub const EIP712_DOMAIN_NAME: &str = "ZK Rollup";
+pub const EIP712_DOMAIN_VERSION: &str = "1";
+pub const ROLLUP_ID: &str = "zk-rollup-local-v1";
 const TRANSACTION_HASH_DOMAIN: &str = "zk-rollup-transaction-v1";
 const BLOCK_HASH_DOMAIN: &str = "zk-rollup-block-v1";
 const BATCH_DATA_HASH_DOMAIN: &str = "zk-rollup-batch-data-v1";
-const LOCAL_CHAIN_ID: &str = "zk-rollup-local-v1";
+const LOCAL_CHAIN_ID: &str = ROLLUP_ID;
 const ACCOUNT_STATE_VALUE_DOMAIN: &[u8] = b"zk-rollup-account-state-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,8 +34,7 @@ pub struct Transfer {
     pub to: String,
     pub amount: u64,
     pub nonce: u64,
-    pub public_key_base64: String,
-    pub signature_base64: String,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,17 +90,6 @@ pub struct RollupBatchCommitment {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct UnsignedTransfer<'a> {
-    domain: &'static str,
-    chain_id: &'static str,
-    from: &'a str,
-    to: &'a str,
-    amount: u64,
-    nonce: u64,
-    public_key_base64: &'a str,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct BlockCommitment<'a> {
     domain: &'static str,
     chain_id: &'static str,
@@ -138,8 +129,8 @@ pub enum ChainError {
     ZeroAmount,
     #[error("sender account {0} does not exist")]
     MissingSender(String),
-    #[error("sender address does not match public key")]
-    SenderPublicKeyMismatch,
+    #[error("invalid account address {0}")]
+    InvalidAccountAddress(String),
     #[error("invalid transaction signature")]
     InvalidSignature,
     #[error("invalid nonce for {address}: expected {expected}, got {actual}")]
@@ -182,7 +173,11 @@ impl From<WalletError> for ChainError {
     }
 }
 
-pub fn new_chain(genesis_accounts: Vec<Account>) -> Result<Chain, ChainError> {
+pub fn new_chain(mut genesis_accounts: Vec<Account>) -> Result<Chain, ChainError> {
+    for account in &mut genesis_accounts {
+        account.address = normalize_address(&account.address)
+            .map_err(|_| ChainError::InvalidAccountAddress(account.address.clone()))?;
+    }
     let accounts = accounts_from_genesis(&genesis_accounts)?;
     let account_state_tree = account_state_tree(&accounts);
 
@@ -201,6 +196,8 @@ pub fn add_genesis_account(
     address: String,
     balance: u64,
 ) -> Result<(), ChainError> {
+    let address = normalize_address(&address)
+        .map_err(|_| ChainError::InvalidAccountAddress(address.clone()))?;
     if !chain.blocks.is_empty() {
         return Err(ChainError::GenesisLocked);
     }
@@ -243,23 +240,22 @@ pub fn finalize_genesis(chain: &mut Chain) -> Result<Block, ChainError> {
 }
 
 pub fn sign_transfer(
-    secret_key_base64: &str,
+    secret_key_hex: &str,
     to: String,
     amount: u64,
     nonce: u64,
 ) -> Result<Transfer, ChainError> {
-    let public_key_base64 = public_key_from_secret(secret_key_base64)?;
-    let from = address_from_public_key(&public_key_base64)?;
-    let payload = transfer_payload(&from, &to, amount, nonce, &public_key_base64);
-    let signed = sign_message(secret_key_base64, &payload)?;
+    let from = address_from_secret(secret_key_hex)?;
+    let to = normalize_address(&to)?;
+    let digest = transfer_eip712_digest(&from, &to, amount, nonce)?;
+    let signature = sign_digest(secret_key_hex, &digest)?;
 
     Ok(Transfer {
         from,
         to,
         amount,
         nonce,
-        public_key_base64,
-        signature_base64: signed.signature_base64,
+        signature,
     })
 }
 
@@ -655,23 +651,24 @@ pub fn validate_transaction(
         return Err(ChainError::ZeroAmount);
     }
 
-    let derived_address = address_from_public_key(&transaction.public_key_base64)?;
-    if derived_address != transaction.from {
-        return Err(ChainError::SenderPublicKeyMismatch);
+    let from = normalize_address(&transaction.from)?;
+    let to = normalize_address(&transaction.to)?;
+    if from != transaction.from || to != transaction.to {
+        return Err(ChainError::InvalidAccountAddress(
+            if from != transaction.from {
+                transaction.from.clone()
+            } else {
+                transaction.to.clone()
+            },
+        ));
     }
-
-    let payload = transfer_payload(
+    let digest = transfer_eip712_digest(
         &transaction.from,
         &transaction.to,
         transaction.amount,
         transaction.nonce,
-        &transaction.public_key_base64,
-    );
-    if !verify_message(
-        &transaction.public_key_base64,
-        &payload,
-        &transaction.signature_base64,
-    )? {
+    )?;
+    if recover_address(&digest, &transaction.signature)? != transaction.from {
         return Err(ChainError::InvalidSignature);
     }
 
@@ -763,23 +760,60 @@ fn block_by_height(chain: &Chain, height: u64) -> Result<&Block, ChainError> {
         .ok_or(ChainError::MissingBatchBlock { height })
 }
 
-fn transfer_payload(
+pub fn transfer_eip712_digest(
     from: &str,
     to: &str,
     amount: u64,
     nonce: u64,
-    public_key_base64: &str,
-) -> String {
-    serde_json::to_string(&UnsignedTransfer {
-        domain: TRANSFER_PAYLOAD_DOMAIN,
-        chain_id: LOCAL_CHAIN_ID,
-        from,
-        to,
-        amount,
-        nonce,
-        public_key_base64,
-    })
-    .expect("serializing an unsigned transfer should not fail")
+) -> Result<[u8; 32], ChainError> {
+    let domain_type = keccak(b"EIP712Domain(string name,string version)");
+    let transfer_type =
+        keccak(b"Transfer(address from,address to,uint256 amount,uint256 nonce,string rollupId)");
+    let domain_separator = keccak_words(&[
+        domain_type,
+        keccak(EIP712_DOMAIN_NAME.as_bytes()),
+        keccak(EIP712_DOMAIN_VERSION.as_bytes()),
+    ]);
+    let transfer_hash = keccak_words(&[
+        transfer_type,
+        address_word(from)?,
+        address_word(to)?,
+        uint_word(amount),
+        uint_word(nonce),
+        keccak(ROLLUP_ID.as_bytes()),
+    ]);
+    let mut encoded = Vec::with_capacity(66);
+    encoded.extend_from_slice(b"\x19\x01");
+    encoded.extend_from_slice(&domain_separator);
+    encoded.extend_from_slice(&transfer_hash);
+    Ok(keccak(&encoded))
+}
+
+fn keccak(value: &[u8]) -> [u8; 32] {
+    Keccak256::digest(value).into()
+}
+
+fn keccak_words(words: &[[u8; 32]]) -> [u8; 32] {
+    let mut encoded = Vec::with_capacity(words.len() * 32);
+    for word in words {
+        encoded.extend_from_slice(word);
+    }
+    keccak(&encoded)
+}
+
+fn address_word(address: &str) -> Result<[u8; 32], ChainError> {
+    let normalized = normalize_address(address)?;
+    let bytes = hex::decode(&normalized[2..])
+        .map_err(|_| ChainError::InvalidAccountAddress(address.to_owned()))?;
+    let mut word = [0u8; 32];
+    word[12..].copy_from_slice(&bytes);
+    Ok(word)
+}
+
+fn uint_word(value: u64) -> [u8; 32] {
+    let mut word = [0u8; 32];
+    word[24..].copy_from_slice(&value.to_be_bytes());
+    word
 }
 
 fn block_hash(
@@ -809,8 +843,8 @@ mod tests {
     fn produces_and_validates_block() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address.clone(),
             balance: 100,
@@ -819,8 +853,7 @@ mod tests {
         .unwrap();
         let genesis = finalize_genesis(&mut chain).unwrap();
 
-        let transaction =
-            sign_transfer(&alice.secret_key_base64, bob_address.clone(), 40, 0).unwrap();
+        let transaction = sign_transfer(&alice.secret_key_hex, bob_address.clone(), 40, 0).unwrap();
         add_pending_transaction(&mut chain, transaction).unwrap();
         let block = produce_block(&mut chain).unwrap();
 
@@ -839,8 +872,8 @@ mod tests {
     fn rejects_replayed_nonce() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address.clone(),
             balance: 100,
@@ -849,8 +882,8 @@ mod tests {
         .unwrap();
         finalize_genesis(&mut chain).unwrap();
 
-        let first = sign_transfer(&alice.secret_key_base64, bob_address.clone(), 10, 0).unwrap();
-        let replay = sign_transfer(&alice.secret_key_base64, bob_address, 10, 0).unwrap();
+        let first = sign_transfer(&alice.secret_key_hex, bob_address.clone(), 10, 0).unwrap();
+        let replay = sign_transfer(&alice.secret_key_hex, bob_address, 10, 0).unwrap();
 
         assert_eq!(add_pending_transaction(&mut chain, first), Ok(()));
         assert_eq!(
@@ -867,8 +900,8 @@ mod tests {
     fn rejects_signature_from_wrong_protocol_domain() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address.clone(),
             balance: 100,
@@ -877,25 +910,13 @@ mod tests {
         .unwrap();
         finalize_genesis(&mut chain).unwrap();
 
-        let public_key_base64 = public_key_from_secret(&alice.secret_key_base64).unwrap();
-        let wrong_payload = serde_json::to_string(&json!({
-            "domain": "different-protocol",
-            "chain_id": LOCAL_CHAIN_ID,
-            "from": alice_address,
-            "to": bob_address,
-            "amount": 10,
-            "nonce": 0,
-            "public_key_base64": public_key_base64,
-        }))
-        .unwrap();
-        let signed = sign_message(&alice.secret_key_base64, &wrong_payload).unwrap();
+        let wrong_digest: [u8; 32] = Keccak256::digest(b"different-protocol").into();
         let transaction = Transfer {
-            from: address_from_public_key(&signed.public_key_base64).unwrap(),
+            from: alice.address,
             to: bob_address,
             amount: 10,
             nonce: 0,
-            public_key_base64: signed.public_key_base64,
-            signature_base64: signed.signature_base64,
+            signature: wallet_core::sign_digest(&alice.secret_key_hex, &wrong_digest).unwrap(),
         };
 
         assert_eq!(
@@ -905,11 +926,35 @@ mod tests {
     }
 
     #[test]
+    fn verifies_eip712_signature_from_an_ethereum_wallet() {
+        let from = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+        let to = "0x2222222222222222222222222222222222222222";
+        let signature = "0x141c9f80090f93ff33a2a7a439c6f186277e37b245b0595d9a7e96cef8b83df279af32f70c663a4f7fc63ae49936066bd4f11f551a95559196910c3c005fc25c1c";
+        let transaction = Transfer {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            amount: 12,
+            nonce: 3,
+            signature: signature.to_owned(),
+        };
+        let accounts = BTreeMap::from([(
+            from.to_owned(),
+            Account {
+                address: from.to_owned(),
+                balance: 20,
+                nonce: 3,
+            },
+        )]);
+
+        assert_eq!(validate_transaction(&accounts, &transaction), Ok(()));
+    }
+
+    #[test]
     fn rejects_overspend() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address.clone(),
             balance: 25,
@@ -917,7 +962,7 @@ mod tests {
         }])
         .unwrap();
         finalize_genesis(&mut chain).unwrap();
-        let transaction = sign_transfer(&alice.secret_key_base64, bob_address, 26, 0).unwrap();
+        let transaction = sign_transfer(&alice.secret_key_hex, bob_address, 26, 0).unwrap();
 
         assert_eq!(
             add_pending_transaction(&mut chain, transaction),
@@ -933,8 +978,8 @@ mod tests {
     fn tampered_block_fails_validation() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address,
             balance: 100,
@@ -942,7 +987,7 @@ mod tests {
         }])
         .unwrap();
         finalize_genesis(&mut chain).unwrap();
-        let transaction = sign_transfer(&alice.secret_key_base64, bob_address, 40, 0).unwrap();
+        let transaction = sign_transfer(&alice.secret_key_hex, bob_address, 40, 0).unwrap();
         add_pending_transaction(&mut chain, transaction).unwrap();
         produce_block(&mut chain).unwrap();
 
@@ -959,8 +1004,8 @@ mod tests {
     fn tampered_account_snapshot_fails_validation() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address.clone(),
             balance: 100,
@@ -968,7 +1013,7 @@ mod tests {
         }])
         .unwrap();
         finalize_genesis(&mut chain).unwrap();
-        let transaction = sign_transfer(&alice.secret_key_base64, bob_address, 40, 0).unwrap();
+        let transaction = sign_transfer(&alice.secret_key_hex, bob_address, 40, 0).unwrap();
         add_pending_transaction(&mut chain, transaction).unwrap();
         produce_block(&mut chain).unwrap();
 
@@ -984,15 +1029,15 @@ mod tests {
     fn requires_finalized_genesis_before_transactions() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address,
             balance: 100,
             nonce: 0,
         }])
         .unwrap();
-        let transaction = sign_transfer(&alice.secret_key_base64, bob_address, 40, 0).unwrap();
+        let transaction = sign_transfer(&alice.secret_key_hex, bob_address, 40, 0).unwrap();
 
         assert_eq!(
             add_pending_transaction(&mut chain, transaction),
@@ -1021,8 +1066,8 @@ mod tests {
     fn loaded_chain_rebuilds_tree_once_then_updates_it_incrementally() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address.clone(),
             balance: 100,
@@ -1031,7 +1076,7 @@ mod tests {
         .unwrap();
         finalize_genesis(&mut chain).unwrap();
 
-        let first = sign_transfer(&alice.secret_key_base64, bob_address.clone(), 20, 0).unwrap();
+        let first = sign_transfer(&alice.secret_key_hex, bob_address.clone(), 20, 0).unwrap();
         add_pending_transaction(&mut chain, first).unwrap();
         produce_block(&mut chain).unwrap();
 
@@ -1039,7 +1084,7 @@ mod tests {
         assert!(!json.contains("account_state_tree"));
         let mut loaded: Chain = serde_json::from_str(&json).unwrap();
 
-        let second = sign_transfer(&alice.secret_key_base64, bob_address, 15, 1).unwrap();
+        let second = sign_transfer(&alice.secret_key_hex, bob_address, 15, 1).unwrap();
         add_pending_transaction(&mut loaded, second).unwrap();
         let block = produce_block(&mut loaded).unwrap();
 
@@ -1051,8 +1096,8 @@ mod tests {
     fn builds_rollup_batch_commitment_from_block_range() {
         let alice = create_keypair();
         let bob = create_keypair();
-        let alice_address = address_from_public_key(&alice.public_key_base64).unwrap();
-        let bob_address = address_from_public_key(&bob.public_key_base64).unwrap();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
         let mut chain = new_chain(vec![Account {
             address: alice_address,
             balance: 100,
@@ -1061,7 +1106,7 @@ mod tests {
         .unwrap();
         let genesis = finalize_genesis(&mut chain).unwrap();
 
-        let first = sign_transfer(&alice.secret_key_base64, bob_address.clone(), 25, 0).unwrap();
+        let first = sign_transfer(&alice.secret_key_hex, bob_address.clone(), 25, 0).unwrap();
         add_pending_transaction(&mut chain, first).unwrap();
         let block = produce_block(&mut chain).unwrap();
 

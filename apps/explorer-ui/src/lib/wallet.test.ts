@@ -1,58 +1,53 @@
-import { describe, expect, test } from "bun:test";
-import { verifyAsync } from "@noble/ed25519";
-import {
-  addressFromPublicKey,
-  createKeypair,
-  importKeypair,
-  signTransfer,
-} from "./wallet";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { connectWallet, signTransfer } from "./wallet";
 
-function fromBase64(value: string) {
-  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
-}
+beforeEach(() => {
+  Object.assign(globalThis, { window: {} });
+});
 
-describe("browser rollup wallet", () => {
-  test("creates and reimports a CLI-compatible keypair", async () => {
-    const keypair = await createKeypair();
-    const imported = await importKeypair(JSON.stringify(keypair));
+afterEach(() => {
+  delete (globalThis as { window?: unknown }).window;
+});
 
-    expect(imported).toEqual(keypair);
-    expect(fromBase64(keypair.secret_key_base64)).toHaveLength(32);
-    expect(fromBase64(keypair.public_key_base64)).toHaveLength(32);
-    expect(fromBase64(addressFromPublicKey(keypair.public_key_base64))).toHaveLength(20);
+describe("Ethereum rollup wallet", () => {
+  test("connects to an injected EVM wallet", async () => {
+    window.ethereum = {
+      request: async ({ method }) => {
+        expect(method).toBe("eth_requestAccounts");
+        return ["0x1111111111111111111111111111111111111111"];
+      },
+    };
+    expect(await connectWallet()).toBe("0x1111111111111111111111111111111111111111");
   });
 
-  test("signs the exact chain-core transfer payload", async () => {
-    const keypair = await createKeypair();
-    const transfer = await signTransfer(keypair, "receiver", 12, 3);
-    const payload = JSON.stringify({
-      domain: "zk-rollup-transfer-v1",
-      chain_id: "zk-rollup-local-v1",
-      from: transfer.from,
-      to: transfer.to,
-      amount: 12,
-      nonce: 3,
-      public_key_base64: transfer.public_key_base64,
+  test("requests the canonical EIP-712 transfer", async () => {
+    let params: unknown[] | undefined;
+    window.ethereum = {
+      request: async (request) => {
+        params = request.params;
+        return `0x${"11".repeat(65)}`;
+      },
+    };
+    const transfer = await signTransfer(
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222",
+      12,
+      3,
+    );
+    const typedData = JSON.parse(String(params?.[1]));
+    expect(typedData.domain).toEqual({ name: "ZK Rollup", version: "1" });
+    expect(typedData.message).toMatchObject({
+      amount: "12",
+      nonce: "3",
+      rollupId: "zk-rollup-local-v1",
     });
-
-    expect(
-      await verifyAsync(
-        fromBase64(transfer.signature_base64),
-        new TextEncoder().encode(payload),
-        fromBase64(transfer.public_key_base64),
-      ),
-    ).toBe(true);
+    expect(transfer.signature).toHaveLength(132);
   });
 
-  test("rejects a mismatched key file", async () => {
-    const first = await createKeypair();
-    const second = await createKeypair();
-
+  test("rejects malformed recipient addresses before signing", async () => {
+    window.ethereum = { request: async () => `0x${"11".repeat(65)}` };
     await expect(
-      importKeypair(JSON.stringify({
-        secret_key_base64: first.secret_key_base64,
-        public_key_base64: second.public_key_base64,
-      })),
-    ).rejects.toThrow("does not match");
+      signTransfer("0x1111111111111111111111111111111111111111", "receiver", 1, 0),
+    ).rejects.toThrow("invalid Ethereum address");
   });
 });

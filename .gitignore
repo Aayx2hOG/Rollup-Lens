@@ -50,7 +50,8 @@ Thumbs.db
 .agents/
 .plans/
 .designs/
-/docs/
+/docs/*
+!/docs/system-design-flowchart.svg
 next_project.txt
 docs/system-design.md
 
