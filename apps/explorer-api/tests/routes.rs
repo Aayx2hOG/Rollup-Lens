@@ -12,7 +12,7 @@ use chain_core::{
     rollup_batch_commitment, sign_transfer, transaction_hash, Account, Chain,
     RollupBatchCommitment,
 };
-use explorer_api::{app_with_pool, initialize_genesis, GenesisConfig};
+use explorer_api::{app_with_pool, app_with_pool_and_tokens, initialize_genesis, GenesisConfig};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
@@ -386,6 +386,68 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
     assert_eq!(sequenced_summary["transaction_count"], json!(4));
     assert_eq!(sequenced_summary["pending_transaction_count"], json!(0));
 
+    let l2_recipient = format!("0x{}", "1".repeat(40));
+    let deposit = json!({
+        "chain_id": 31337,
+        "inbox_address": format!("0x{}", "2".repeat(40)),
+        "deposit_id": 0,
+        "l1_tx_hash": format!("0x{}", "3".repeat(64)),
+        "l1_block_number": 12,
+        "l1_block_hash": format!("0x{}", "4".repeat(64)),
+        "l1_log_index": 0,
+        "depositor_l1_address": format!("0x{}", "5".repeat(40)),
+        "recipient_l2_address": l2_recipient,
+        "amount": 25,
+        "rolling_commitment": format!("0x{}", "6".repeat(64)),
+        "confirmations": 2
+    });
+    let observed = post_json(app.clone(), "/l1/deposits", &deposit).await;
+    assert_eq!(observed.status(), StatusCode::OK);
+    let observed = response_json(observed).await;
+    assert_eq!(observed["deposit_id"], json!(0));
+    assert_eq!(observed["status"], json!("confirmed"));
+    assert_eq!(observed["confirmations"], json!(2));
+
+    let repeated = post_json(app.clone(), "/l1/deposits", &deposit).await;
+    assert_eq!(repeated.status(), StatusCode::OK);
+    let deposits = get_json(app.clone(), "/l1/deposits").await;
+    assert_eq!(deposits["total"], json!(1));
+
+    let reorged_deposit = json!({
+        "chain_id": 31337,
+        "inbox_address": format!("0x{}", "2".repeat(40)),
+        "deposit_id": 0,
+        "l1_tx_hash": format!("0x{}", "7".repeat(64)),
+        "l1_block_number": 12,
+        "l1_block_hash": format!("0x{}", "8".repeat(64)),
+        "l1_log_index": 1,
+        "depositor_l1_address": format!("0x{}", "5".repeat(40)),
+        "recipient_l2_address": l2_recipient,
+        "amount": 25,
+        "rolling_commitment": format!("0x{}", "9".repeat(64)),
+        "confirmations": 0
+    });
+    let reobserved = post_json(app.clone(), "/l1/deposits", &reorged_deposit).await;
+    assert_eq!(reobserved.status(), StatusCode::OK);
+    let deposits = get_json(app.clone(), "/l1/deposits").await;
+    assert_eq!(deposits["total"], json!(2));
+    assert_eq!(deposits["items"][0]["status"], json!("observed"));
+    assert_eq!(deposits["items"][1]["status"], json!("orphaned"));
+
+    let stale_repeat = post_json(app.clone(), "/l1/deposits", &deposit).await;
+    assert_eq!(stale_repeat.status(), StatusCode::OK);
+    let deposits = get_json(app.clone(), "/l1/deposits").await;
+    assert_eq!(deposits["total"], json!(2));
+    assert_eq!(deposits["items"][0]["status"], json!("observed"));
+    assert_eq!(deposits["items"][1]["status"], json!("orphaned"));
+
+    let recipient_deposits = get_json(
+        app.clone(),
+        &format!("/l1/deposits/recipient/{}", l2_recipient),
+    )
+    .await;
+    assert_eq!(recipient_deposits["total"], json!(2));
+
     insert_error_event(&pool).await;
     let health = get_json(app.clone(), "/health").await;
     assert_eq!(health["status"], json!("degraded"));
@@ -394,6 +456,28 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
     let errors = get_json(app, "/errors").await;
     assert_eq!(errors.as_array().unwrap().len(), 1);
     assert_eq!(errors[0]["severity"], json!("error"));
+    teardown_postgres_test_database(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn settlement_update_token_does_not_block_local_deposit_ingest() {
+    let Some(database_url) = optional_test_database_url() else {
+        eprintln!("skipping Postgres integration test; set TEST_DATABASE_URL or DATABASE_URL");
+        return;
+    };
+
+    let (pool, schema) = setup_postgres_test_database(&database_url).await;
+    let app = app_with_pool_and_tokens(
+        pool.clone(),
+        Some("__settlement_updates_disabled__".to_string()),
+        None,
+    );
+
+    let observed = post_json(app, "/l1/deposits", &deposit_payload()).await;
+
+    assert_eq!(observed.status(), StatusCode::OK);
+    let observed = response_json(observed).await;
+    assert_eq!(observed["status"], json!("confirmed"));
     teardown_postgres_test_database(&pool, &schema).await;
 }
 
@@ -458,6 +542,23 @@ impl ChainFixture {
     }
 }
 
+fn deposit_payload() -> Value {
+    json!({
+        "chain_id": 31337,
+        "inbox_address": format!("0x{}", "2".repeat(40)),
+        "deposit_id": 0,
+        "l1_tx_hash": format!("0x{}", "3".repeat(64)),
+        "l1_block_number": 12,
+        "l1_block_hash": format!("0x{}", "4".repeat(64)),
+        "l1_log_index": 0,
+        "depositor_l1_address": format!("0x{}", "5".repeat(40)),
+        "recipient_l2_address": format!("0x{}", "1".repeat(40)),
+        "amount": 25,
+        "rolling_commitment": format!("0x{}", "6".repeat(64)),
+        "confirmations": 2
+    })
+}
+
 const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0001_init/migration.sql"),
     include_str!("../../../prisma/migrations/0002_error_events/migration.sql"),
@@ -467,6 +568,8 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0006_l1_receipt_metadata/migration.sql"),
     include_str!("../../../prisma/migrations/0007_validity_witness/migration.sql"),
     include_str!("../../../prisma/migrations/0008_operator_and_l1_indexer/migration.sql"),
+    include_str!("../../../prisma/migrations/0009_eip712_ethereum_accounts/migration.sql"),
+    include_str!("../../../prisma/migrations/0010_l1_deposits/migration.sql"),
 ];
 
 fn optional_test_database_url() -> Option<String> {

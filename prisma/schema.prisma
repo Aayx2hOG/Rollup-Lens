@@ -136,6 +136,31 @@ model L1IndexerCheckpoint {
   @@map("l1_indexer_checkpoints")
 }
 
+model L1Deposit {
+  id                  BigInt   @id @default(autoincrement())
+  chainId             BigInt   @map("chain_id")
+  inboxAddress        String   @map("inbox_address")
+  depositId           BigInt   @map("deposit_id")
+  l1TxHash            String   @map("l1_tx_hash")
+  l1BlockNumber       BigInt   @map("l1_block_number")
+  l1BlockHash         String   @map("l1_block_hash")
+  l1LogIndex          Int      @map("l1_log_index")
+  depositorL1Address  String   @map("depositor_l1_address")
+  recipientL2Address  String   @map("recipient_l2_address")
+  amount              BigInt
+  rollingCommitment   String   @map("rolling_commitment")
+  status              String  @default("observed")
+  confirmations       Int     @default(0)
+  observedAt          DateTime @default(now()) @map("observed_at")
+  updatedAt           DateTime @default(now()) @map("updated_at")
+
+  @@unique([chainId, inboxAddress, depositId, l1BlockHash, l1LogIndex])
+  @@index([recipientL2Address, depositId])
+  @@index([status, depositId])
+  @@index([chainId, inboxAddress, l1BlockNumber, l1LogIndex])
+  @@map("l1_deposits")
+}
+
 model RollupBatchTransaction {
   batchNumber      BigInt           @map("batch_number")
   transactionHash  String           @map("transaction_hash")

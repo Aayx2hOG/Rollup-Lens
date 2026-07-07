@@ -108,6 +108,25 @@ export type RollupBatch = RollupBatchSummary & {
   transactions: TransactionView[];
 };
 
+export type L1Deposit = {
+  id: number;
+  chain_id: number;
+  inbox_address: string;
+  deposit_id: number;
+  l1_tx_hash: string;
+  l1_block_number: number;
+  l1_block_hash: string;
+  l1_log_index: number;
+  depositor_l1_address: string;
+  recipient_l2_address: string;
+  amount: number;
+  rolling_commitment: string;
+  status: "observed" | "confirmed" | "executed" | "finalized" | "orphaned" | string;
+  confirmations: number;
+  observed_at: string;
+  updated_at: string;
+};
+
 export type TransactionPoolEntry = {
   id: number;
   hash: string;
@@ -204,6 +223,9 @@ export const api = {
   errors: () => request<ErrorEvent[]>("/errors"),
   rollupBatches: (limit = 50, offset = 0) => request<Page<RollupBatchSummary>>(`/rollup/batches?limit=${limit}&offset=${offset}`),
   rollupBatch: (batchNumber: number) => request<RollupBatch>(`/rollup/batches/${batchNumber}`),
+  l1Deposits: (limit = 50, offset = 0) => request<Page<L1Deposit>>(`/l1/deposits?limit=${limit}&offset=${offset}`),
+  l1DepositsByRecipient: (address: string, limit = 50, offset = 0) =>
+    request<Page<L1Deposit>>(`/l1/deposits/recipient/${encodeURIComponent(address)}?limit=${limit}&offset=${offset}`),
   updateSettlement: (batchNumber: number, update: SettlementStatusUpdate) => request<RollupBatchSummary>(`/rollup/batches/${batchNumber}/settlement`, {
     method: "POST",
     headers: { "content-type": "application/json" },

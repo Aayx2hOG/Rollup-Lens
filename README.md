@@ -120,23 +120,9 @@ bun run db:migrate
 
 Migration `0009_eip712_ethereum_accounts` changes account identity from the
 original Ed25519 format to Ethereum addresses. Existing addresses and
-signatures cannot be converted without their private keys, so this migration
-deliberately refuses to run against a database containing chain state. Create a
-fresh local database or Neon branch, apply migrations, and initialize a new
-genesis allocation with Ethereum addresses.
-
-If the existing Neon database must be reused, run the explicit one-time
-recovery command:
-
-```bash
-bun run db:migrate:eip712-reset:neon
-```
-
-It archives the existing chain tables under the
-`legacy_ed25519_archive` schema, clears active rollup state, resolves the failed
-`0009_eip712_ethereum_accounts` attempt, and deploys the migration. Reinitialize
-genesis afterward with Ethereum addresses. The ordinary
-`db:migrate:neon` command never clears data.
+signatures cannot be converted without their private keys, so use a fresh local
+database or Neon branch, apply migrations, and initialize a new genesis
+allocation with Ethereum addresses.
 
 ## Initialize Genesis
 
@@ -144,11 +130,12 @@ Genesis is a one-time state allocation, not demo data. Create or import the
 wallets that should control the allocated balances:
 
 ```bash
-cargo run -p wallet-cli -- create --output alice-keypair.json
-cargo run -p wallet-cli -- address --key-file alice-keypair.json
+cargo run -p wallet-cli -- create --output alice-evm-keypair.json
+cargo run -p wallet-cli -- address --key-file alice-evm-keypair.json
 ```
 
-Create `genesis.json` using the printed address:
+Create `genesis.json` using the printed Ethereum address. After the EIP-712
+migration, old Ed25519/base64 addresses are invalid here.
 
 ```json
 {
@@ -165,7 +152,7 @@ Create `genesis.json` using the printed address:
 Initialize the database:
 
 ```bash
-bun run genesis:init genesis.json
+bun run genesis:init
 ```
 
 Or invoke the binary directly:

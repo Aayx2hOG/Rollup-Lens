@@ -15,7 +15,7 @@ wallet discovery and WalletConnect are the next connection-layer milestone.
 On a new database, initialize genesis once with funded Ethereum addresses:
 
 ```bash
-bun run genesis:init genesis.json
+bun run genesis:init
 ```
 
 Start the UI from `apps/explorer-ui`:

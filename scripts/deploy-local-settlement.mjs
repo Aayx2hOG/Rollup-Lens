@@ -16,7 +16,7 @@ if (!privateKey || !databaseUrl) {
 await requireJsonRpc();
 const summary = await fetchJson(`${apiUrl}/chain/summary`, "explorer API");
 if (!summary.genesis_finalized || !summary.state_root) {
-  fail("Genesis is not initialized. Run `bun run genesis:init genesis.json` first.");
+  fail("Genesis is not initialized. Run `bun run genesis:init` first.");
 }
 
 console.log("Building the prover, settlement client, and operator...");

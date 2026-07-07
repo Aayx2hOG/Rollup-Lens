@@ -30,6 +30,7 @@ import {
   type Account,
   type Block,
   type BlockSummary,
+  type L1Deposit,
   type RollupBatch,
   type RollupBatchSummary,
   type SearchResult,
@@ -44,7 +45,7 @@ import {
 } from "./lib/wallet";
 import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
 
-const tabs = ["Overview", "Transactions", "Settlement", "Operate", "Send"] as const;
+const tabs = ["Overview", "Transactions", "Deposits", "Settlement", "Operate", "Send"] as const;
 type Tab = (typeof tabs)[number];
 
 type TransactionReferenceFile = {
@@ -70,6 +71,7 @@ type TransactionReferenceFile = {
 const tabMeta: Record<Tab, { label: string; icon: React.ReactNode }> = {
   Overview: { label: "Overview", icon: <Gauge className="h-4 w-4" /> },
   Transactions: { label: "Transactions", icon: <Blocks className="h-4 w-4" /> },
+  Deposits: { label: "Deposits", icon: <Upload className="h-4 w-4" /> },
   Settlement: { label: "Settlement", icon: <PackageCheck className="h-4 w-4" /> },
   Operate: { label: "Operate", icon: <Gauge className="h-4 w-4" /> },
   Send: { label: "Send", icon: <Send className="h-4 w-4" /> },
@@ -95,6 +97,7 @@ export function App() {
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const errors = useQuery({ queryKey: ["errors"], queryFn: api.errors });
   const rollupBatches = useQuery({ queryKey: ["rollup-batches"], queryFn: () => api.rollupBatches() });
+  const l1Deposits = useQuery({ queryKey: ["l1-deposits"], queryFn: () => api.l1Deposits() });
   const transactionPool = useQuery({ queryKey: ["transaction-pool"], queryFn: () => api.transactionPool() });
   const block = useQuery({
     queryKey: ["block", selectedHeight],
@@ -354,6 +357,18 @@ export function App() {
               setActiveTab("Transactions");
             }}
           />
+        </div>
+      )}
+
+      {activeTab === "Deposits" && (
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<Upload className="h-5 w-5" />}
+            title="Deposits"
+            description="Track canonical L1 deposits observed for L2 recipients."
+            meta={pluralize(l1Deposits.data?.total ?? 0, "deposit")}
+          />
+          <DepositsView deposits={l1Deposits.data?.items ?? []} total={l1Deposits.data?.total ?? 0} />
         </div>
       )}
 
@@ -1513,6 +1528,57 @@ function SystemIssuesPanel({
   );
 }
 
+function DepositsView({ deposits, total }: { deposits: L1Deposit[]; total: number }) {
+  const canonical = deposits.filter((deposit) => deposit.status !== "orphaned").length;
+  const orphaned = deposits.length - canonical;
+
+  return (
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[20rem_1fr]">
+      <Panel className="p-4">
+        <SectionTitle icon={<Upload className="h-4 w-4" />} title="Deposit cache" action={`${deposits.length}/${total}`} flush />
+        <div className="mt-4 grid gap-3">
+          <MetricLine label="Canonical" value={canonical} />
+          <MetricLine label="Orphaned" value={orphaned} />
+          <MetricLine label="Total indexed" value={total} />
+        </div>
+      </Panel>
+
+      <Panel className="overflow-hidden">
+        <SectionTitle icon={<Database className="h-4 w-4" />} title="Observed L1 deposits" action="L1 to L2" />
+        {deposits.length === 0 ? (
+          <div className="px-4 py-10 text-sm text-white/48">No L1 deposits have been indexed yet.</div>
+        ) : (
+          <div className="overflow-auto">
+            <div className="min-w-[54rem]">
+              <div className="grid grid-cols-[5rem_7rem_8rem_1fr_1fr_8rem] gap-3 border-b border-white/10 bg-white/[0.045] px-4 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
+                <span>ID</span>
+                <span>Status</span>
+                <span>Amount</span>
+                <span>L1 depositor</span>
+                <span>L2 recipient</span>
+                <span>Block</span>
+              </div>
+              {deposits.map((deposit) => (
+                <div
+                  key={deposit.id}
+                  className="grid grid-cols-[5rem_7rem_8rem_1fr_1fr_8rem] items-center gap-3 border-b border-white/8 px-4 py-3 text-sm last:border-b-0"
+                >
+                  <span className="font-semibold text-white">#{deposit.deposit_id}</span>
+                  <Badge tone={depositStatusTone(deposit.status)}>{depositStatusLabel(deposit.status)}</Badge>
+                  <span className="text-white/72">{formatNumber(deposit.amount)}</span>
+                  <span className="hash min-w-0 text-white/64">{shortHash(deposit.depositor_l1_address, 10, 8)}</span>
+                  <span className="hash min-w-0 text-white/64">{shortHash(deposit.recipient_l2_address, 10, 8)}</span>
+                  <span className="text-white/58">{deposit.l1_block_number}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
 function RollupView({
   batches,
   batchTotal,
@@ -1847,6 +1913,22 @@ function settlementStatusLabel(status: string) {
   if (status === "finalized") return "Final";
   if (status === "challenged") return "Under review";
   if (status === "rejected") return "Rejected";
+  return status;
+}
+
+function depositStatusTone(status: string): "neutral" | "good" | "warn" | "bad" {
+  if (status === "finalized" || status === "executed") return "good";
+  if (status === "confirmed") return "warn";
+  if (status === "orphaned") return "bad";
+  return "neutral";
+}
+
+function depositStatusLabel(status: string) {
+  if (status === "observed") return "Observed";
+  if (status === "confirmed") return "Confirmed";
+  if (status === "executed") return "Executed";
+  if (status === "finalized") return "Final";
+  if (status === "orphaned") return "Orphaned";
   return status;
 }
 

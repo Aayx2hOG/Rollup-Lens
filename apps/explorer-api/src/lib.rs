@@ -127,6 +127,7 @@ struct AppState {
     pool: PgPool,
     cache: Arc<Mutex<ResponseCache>>,
     settlement_update_token: Option<String>,
+    l1_deposit_ingest_token: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +188,22 @@ struct SettlementStatusUpdate {
     block_number: u64,
     gas_used: u64,
     receipt: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct L1DepositObservation {
+    chain_id: u64,
+    inbox_address: String,
+    deposit_id: u64,
+    l1_tx_hash: String,
+    l1_block_number: u64,
+    l1_block_hash: String,
+    l1_log_index: u32,
+    depositor_l1_address: String,
+    recipient_l2_address: String,
+    amount: u64,
+    rolling_commitment: String,
+    confirmations: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -333,6 +350,26 @@ struct RollupBatchView {
 }
 
 #[derive(Debug, Serialize)]
+struct L1DepositView {
+    id: u64,
+    chain_id: u64,
+    inbox_address: String,
+    deposit_id: u64,
+    l1_tx_hash: String,
+    l1_block_number: u64,
+    l1_block_hash: String,
+    l1_log_index: u32,
+    depositor_l1_address: String,
+    recipient_l2_address: String,
+    amount: u64,
+    rolling_commitment: String,
+    status: String,
+    confirmations: u32,
+    observed_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
 struct SettlementCalldata {
     contract_name: String,
     function: String,
@@ -391,10 +428,19 @@ pub fn app_with_pool_and_settlement_token(
     pool: PgPool,
     settlement_update_token: Option<String>,
 ) -> Router {
+    app_with_pool_and_tokens(pool, settlement_update_token, None)
+}
+
+pub fn app_with_pool_and_tokens(
+    pool: PgPool,
+    settlement_update_token: Option<String>,
+    l1_deposit_ingest_token: Option<String>,
+) -> Router {
     let state = Arc::new(AppState {
         pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
         settlement_update_token,
+        l1_deposit_ingest_token,
     });
 
     Router::new()
@@ -429,6 +475,11 @@ pub fn app_with_pool_and_settlement_token(
         .route(
             "/rollup/batches/:batch_number/settlement",
             post(update_rollup_batch_settlement),
+        )
+        .route("/l1/deposits", get(l1_deposits).post(observe_l1_deposit))
+        .route(
+            "/l1/deposits/recipient/:address",
+            get(l1_deposits_by_recipient),
         )
         .route("/search/:query", get(search))
         .layer(CorsLayer::permissive())
@@ -512,6 +563,9 @@ async fn index() -> Json<Value> {
             "GET /rollup/batches/:batch_number",
             "GET /rollup/batches/:batch_number/settlement-calldata",
             "POST /rollup/batches/:batch_number/settlement",
+            "GET /l1/deposits",
+            "POST /l1/deposits",
+            "GET /l1/deposits/recipient/:address",
             "GET /search/:query"
         ]
     }))
@@ -760,6 +814,60 @@ async fn update_rollup_batch_settlement(
     .await?;
     state.cache_clear();
     serde_json::to_value(updated)
+        .map(Json)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
+}
+
+async fn l1_deposits(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = query.page_params()?;
+    cached_json(state, format!("l1:deposits:{page}"), |source| async move {
+        source.l1_deposits(page, None).await
+    })
+    .await
+}
+
+async fn l1_deposits_by_recipient(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    validate_prefixed_hex(&address, 40, "L2 recipient address")?;
+    let page = query.page_params()?;
+    let normalized = address.to_ascii_lowercase();
+    cached_json(
+        state,
+        format!("l1:deposits:recipient:{normalized}:{page}"),
+        |source| async move { source.l1_deposits(page, Some(normalized)).await },
+    )
+    .await
+}
+
+async fn observe_l1_deposit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(observation): Json<L1DepositObservation>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(expected) = &state.l1_deposit_ingest_token {
+        let provided = headers
+            .get("x-l1-deposit-ingest-token")
+            .and_then(|value| value.to_str().ok());
+        if provided != Some(expected.as_str()) {
+            return Err(ApiError::Unauthorized(
+                "L1 deposit ingestion requires a valid ingest token".to_string(),
+            ));
+        }
+    }
+
+    let deposit = DbSource {
+        pool: state.pool.clone(),
+    }
+    .observe_l1_deposit(observation)
+    .await?;
+    state.cache_clear();
+    serde_json::to_value(deposit)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
 }
@@ -1379,6 +1487,219 @@ impl DbSource {
             summary,
             transactions,
         }))
+    }
+
+    async fn l1_deposits(
+        &self,
+        page: PageParams,
+        recipient: Option<String>,
+    ) -> Result<Page<L1DepositView>, ApiError> {
+        let total: i64 = if let Some(recipient) = &recipient {
+            sqlx::query_scalar("SELECT COUNT(*) FROM l1_deposits WHERE recipient_l2_address = $1")
+                .bind(recipient)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(database_error)?
+        } else {
+            sqlx::query_scalar("SELECT COUNT(*) FROM l1_deposits")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(database_error)?
+        };
+
+        let rows = if let Some(recipient) = recipient {
+            sqlx::query(
+                r#"
+                SELECT
+                    id,
+                    chain_id,
+                    inbox_address,
+                    deposit_id,
+                    l1_tx_hash,
+                    l1_block_number,
+                    l1_block_hash,
+                    l1_log_index,
+                    depositor_l1_address,
+                    recipient_l2_address,
+                    amount,
+                    rolling_commitment,
+                    status,
+                    confirmations,
+                    observed_at::text AS observed_at,
+                    updated_at::text AS updated_at
+                FROM l1_deposits
+                WHERE recipient_l2_address = $1
+                ORDER BY deposit_id DESC, id DESC
+                LIMIT $2 OFFSET $3
+                "#,
+            )
+            .bind(recipient)
+            .bind(to_i64_from_usize(page.limit, "page limit")?)
+            .bind(to_i64_from_usize(page.offset, "page offset")?)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(database_error)?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT
+                    id,
+                    chain_id,
+                    inbox_address,
+                    deposit_id,
+                    l1_tx_hash,
+                    l1_block_number,
+                    l1_block_hash,
+                    l1_log_index,
+                    depositor_l1_address,
+                    recipient_l2_address,
+                    amount,
+                    rolling_commitment,
+                    status,
+                    confirmations,
+                    observed_at::text AS observed_at,
+                    updated_at::text AS updated_at
+                FROM l1_deposits
+                ORDER BY deposit_id DESC, id DESC
+                LIMIT $1 OFFSET $2
+                "#,
+            )
+            .bind(to_i64_from_usize(page.limit, "page limit")?)
+            .bind(to_i64_from_usize(page.offset, "page offset")?)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(database_error)?
+        };
+
+        let items = rows
+            .into_iter()
+            .map(l1_deposit_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(page_from_items(
+            items,
+            usize_from_i64(total, "L1 deposit count")?,
+            page,
+        ))
+    }
+
+    async fn observe_l1_deposit(
+        &self,
+        observation: L1DepositObservation,
+    ) -> Result<L1DepositView, ApiError> {
+        validate_l1_deposit_observation(&observation)?;
+
+        let chain_id = to_i64(observation.chain_id, "L1 chain id")?;
+        let deposit_id = to_i64(observation.deposit_id, "L1 deposit id")?;
+        let l1_log_index = i32::try_from(observation.l1_log_index).map_err(|_| {
+            ApiError::InvalidIndexedData("L1 log index exceeds INTEGER range".to_string())
+        })?;
+        let confirmations =
+            i32::try_from(observation.confirmations.unwrap_or(0)).map_err(|_| {
+                ApiError::InvalidIndexedData("L1 confirmations exceeds INTEGER range".to_string())
+            })?;
+        let status = if confirmations > 0 {
+            "confirmed"
+        } else {
+            "observed"
+        };
+
+        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        sqlx::query(
+            r#"
+            UPDATE l1_deposits
+            SET status = 'orphaned', updated_at = now()
+            WHERE chain_id = $1
+              AND inbox_address = $2
+              AND deposit_id = $3
+              AND status <> 'orphaned'
+              AND (l1_block_hash <> $4 OR l1_tx_hash <> $5 OR l1_log_index <> $6)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM l1_deposits exact
+                  WHERE exact.chain_id = $1
+                    AND exact.inbox_address = $2
+                    AND exact.deposit_id = $3
+                    AND exact.l1_block_hash = $4
+                    AND exact.l1_tx_hash = $5
+                    AND exact.l1_log_index = $6
+              )
+            "#,
+        )
+        .bind(chain_id)
+        .bind(observation.inbox_address.to_ascii_lowercase())
+        .bind(deposit_id)
+        .bind(observation.l1_block_hash.to_ascii_lowercase())
+        .bind(observation.l1_tx_hash.to_ascii_lowercase())
+        .bind(l1_log_index)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO l1_deposits (
+                chain_id,
+                inbox_address,
+                deposit_id,
+                l1_tx_hash,
+                l1_block_number,
+                l1_block_hash,
+                l1_log_index,
+                depositor_l1_address,
+                recipient_l2_address,
+                amount,
+                rolling_commitment,
+                status,
+                confirmations
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (chain_id, inbox_address, deposit_id, l1_block_hash, l1_log_index)
+            DO UPDATE SET
+                confirmations = GREATEST(l1_deposits.confirmations, EXCLUDED.confirmations),
+                status = CASE
+                    WHEN l1_deposits.status = 'orphaned' THEN 'orphaned'
+                    WHEN EXCLUDED.status = 'confirmed' THEN 'confirmed'
+                    ELSE l1_deposits.status
+                END,
+                updated_at = now()
+            RETURNING
+                id,
+                chain_id,
+                inbox_address,
+                deposit_id,
+                l1_tx_hash,
+                l1_block_number,
+                l1_block_hash,
+                l1_log_index,
+                depositor_l1_address,
+                recipient_l2_address,
+                amount,
+                rolling_commitment,
+                status,
+                confirmations,
+                observed_at::text AS observed_at,
+                updated_at::text AS updated_at
+            "#,
+        )
+        .bind(chain_id)
+        .bind(observation.inbox_address.to_ascii_lowercase())
+        .bind(deposit_id)
+        .bind(observation.l1_tx_hash.to_ascii_lowercase())
+        .bind(to_i64(observation.l1_block_number, "L1 block number")?)
+        .bind(observation.l1_block_hash.to_ascii_lowercase())
+        .bind(l1_log_index)
+        .bind(observation.depositor_l1_address.to_ascii_lowercase())
+        .bind(observation.recipient_l2_address.to_ascii_lowercase())
+        .bind(to_i64(observation.amount, "L1 deposit amount")?)
+        .bind(observation.rolling_commitment.to_ascii_lowercase())
+        .bind(status)
+        .bind(confirmations)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+
+        l1_deposit_from_row(row)
     }
 
     async fn update_rollup_batch_settlement(
@@ -2102,6 +2423,30 @@ fn rollup_batch_summary_from_row(
     })
 }
 
+fn l1_deposit_from_row(row: sqlx::postgres::PgRow) -> Result<L1DepositView, ApiError> {
+    Ok(L1DepositView {
+        id: from_i64(row.get("id"), "L1 deposit row id")?,
+        chain_id: from_i64(row.get("chain_id"), "L1 chain id")?,
+        inbox_address: row.get("inbox_address"),
+        deposit_id: from_i64(row.get("deposit_id"), "L1 deposit id")?,
+        l1_tx_hash: row.get("l1_tx_hash"),
+        l1_block_number: from_i64(row.get("l1_block_number"), "L1 block number")?,
+        l1_block_hash: row.get("l1_block_hash"),
+        l1_log_index: u32::try_from(row.get::<i32, _>("l1_log_index"))
+            .map_err(|_| ApiError::InvalidIndexedData("L1 log index is negative".to_string()))?,
+        depositor_l1_address: row.get("depositor_l1_address"),
+        recipient_l2_address: row.get("recipient_l2_address"),
+        amount: from_i64(row.get("amount"), "L1 deposit amount")?,
+        rolling_commitment: row.get("rolling_commitment"),
+        status: row.get("status"),
+        confirmations: u32::try_from(row.get::<i32, _>("confirmations")).map_err(|_| {
+            ApiError::InvalidIndexedData("L1 confirmations is negative".to_string())
+        })?,
+        observed_at: row.get("observed_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
 fn settlement_calldata_from_batch(
     batch: &RollupBatchSummary,
 ) -> Result<SettlementCalldata, ApiError> {
@@ -2161,6 +2506,38 @@ fn validate_settlement_status(status: &str) -> Result<(), ApiError> {
     Err(ApiError::BadRequest(
         "settlement status must be submitted or finalized".to_string(),
     ))
+}
+
+fn validate_l1_deposit_observation(observation: &L1DepositObservation) -> Result<(), ApiError> {
+    validate_prefixed_hex(&observation.inbox_address, 40, "deposit inbox address")?;
+    validate_prefixed_hex(&observation.l1_tx_hash, 64, "L1 deposit transaction hash")?;
+    validate_prefixed_hex(&observation.l1_block_hash, 64, "L1 deposit block hash")?;
+    validate_prefixed_hex(
+        &observation.depositor_l1_address,
+        40,
+        "L1 depositor address",
+    )?;
+    validate_prefixed_hex(
+        &observation.recipient_l2_address,
+        40,
+        "L2 recipient address",
+    )?;
+    validate_prefixed_hex(
+        &observation.rolling_commitment,
+        64,
+        "rolling deposit commitment",
+    )?;
+    if observation.chain_id == 0 {
+        return Err(ApiError::BadRequest(
+            "L1 chain id must be greater than zero".to_string(),
+        ));
+    }
+    if observation.amount == 0 {
+        return Err(ApiError::BadRequest(
+            "L1 deposit amount must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_receipt(

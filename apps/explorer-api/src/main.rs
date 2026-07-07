@@ -3,8 +3,7 @@ use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use clap::Parser;
 use explorer_api::{
-    app_with_pool_and_settlement_token, initialize_genesis, sequence_pending_transactions,
-    GenesisConfig,
+    app_with_pool_and_tokens, initialize_genesis, sequence_pending_transactions, GenesisConfig,
 };
 use sqlx::postgres::PgPoolOptions;
 
@@ -71,7 +70,10 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|value| !value.is_empty())
         .or_else(|| Some("__settlement_updates_disabled__".to_string()));
-    let router = app_with_pool_and_settlement_token(pool, settlement_token);
+    let l1_deposit_ingest_token = env::var("L1_DEPOSIT_INGEST_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let router = app_with_pool_and_tokens(pool, settlement_token, l1_deposit_ingest_token);
 
     println!("serving Postgres-backed rollup API");
     println!("listening on http://{}", cli.bind);
