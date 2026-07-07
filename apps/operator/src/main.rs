@@ -13,6 +13,8 @@ use tokio::{fs, process::Command, time::MissedTickBehavior};
 
 const BATCH_FINALIZED_TOPIC: &str =
     "0xdc34f737c6cca7c2bef391debb7d95fe9db2db57eb450c20b4ad265834a91e24";
+const DEPOSIT_ACCEPTED_TOPIC: &str =
+    "0x68ae3cc39a6751f1e465dbc1b9daec09ddcfd3200f67d8b3e1cbf1166fa914d2";
 const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
 
 #[derive(Debug, Parser)]
@@ -38,6 +40,13 @@ struct Args {
     rpc_url: String,
     #[arg(long, env = "ROLLUP_SETTLEMENT_CONTRACT")]
     contract: String,
+    /// Optional L1DepositInbox contract to index into l1_deposits.
+    #[arg(long, env = "L1_DEPOSIT_INBOX")]
+    l1_deposit_inbox: Option<String>,
+    #[arg(long, env = "L1_DEPOSIT_DEPLOYMENT_BLOCK")]
+    l1_deposit_deployment_block: Option<u64>,
+    #[arg(long, env = "L1_DEPOSIT_REORG_LOOKBACK", default_value_t = 12)]
+    l1_deposit_reorg_lookback: u64,
     #[arg(long, env = "EVM_PRIVATE_KEY")]
     private_key: String,
     #[arg(long, env = "EVM_DEPLOYMENT_BLOCK", default_value_t = 0)]
@@ -75,6 +84,9 @@ struct Operator {
     api_url: String,
     rpc_url: String,
     contract: String,
+    l1_deposit_inbox: Option<String>,
+    l1_deposit_deployment_block: u64,
+    l1_deposit_reorg_lookback: u64,
     private_key: String,
     deployment_block: u64,
     confirmations: u64,
@@ -111,7 +123,9 @@ struct RpcLog {
     topics: Vec<String>,
     data: String,
     block_number: String,
+    block_hash: String,
     transaction_hash: String,
+    log_index: String,
     removed: Option<bool>,
 }
 
@@ -147,10 +161,26 @@ struct FinalizedEvent {
     tx_hash: String,
 }
 
+#[derive(Debug)]
+struct DepositEvent {
+    deposit_id: u64,
+    depositor_l1_address: String,
+    recipient_l2_address: String,
+    amount: u64,
+    rolling_commitment: String,
+    block_number: u64,
+    block_hash: String,
+    tx_hash: String,
+    log_index: u32,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     validate_address(&args.contract)?;
+    if let Some(inbox) = &args.l1_deposit_inbox {
+        validate_address(inbox)?;
+    }
     if args.poll_seconds == 0 || args.batch_limit == 0 || args.max_attempts < 1 {
         bail!("poll seconds, batch limit, and max attempts must be positive");
     }
@@ -176,6 +206,13 @@ async fn main() -> Result<()> {
         api_url: args.api_url.trim_end_matches('/').to_string(),
         rpc_url: args.rpc_url,
         contract: args.contract.to_ascii_lowercase(),
+        l1_deposit_inbox: args
+            .l1_deposit_inbox
+            .map(|address| address.to_ascii_lowercase()),
+        l1_deposit_deployment_block: args
+            .l1_deposit_deployment_block
+            .unwrap_or(args.deployment_block),
+        l1_deposit_reorg_lookback: args.l1_deposit_reorg_lookback,
         private_key: args.private_key,
         deployment_block: args.deployment_block,
         confirmations: args.confirmations,
@@ -248,6 +285,7 @@ async fn main() -> Result<()> {
 impl Operator {
     async fn tick(&self) -> Result<()> {
         self.index_finalized_events().await?;
+        self.index_deposit_events().await?;
         self.sequence_pending().await?;
         if let Some(batch) = self.proved_batch_ready_to_submit().await? {
             if let Err(error) = self.submit_proof(&batch).await {
@@ -493,6 +531,159 @@ impl Operator {
         Ok(())
     }
 
+    async fn index_deposit_events(&self) -> Result<()> {
+        let Some(inbox) = &self.l1_deposit_inbox else {
+            return Ok(());
+        };
+        let head = parse_hex_u64(
+            &rpc::<String>(&self.client, &self.rpc_url, "eth_blockNumber", json!([])).await?,
+            "head block",
+        )?;
+        let Some(confirmed_head) = head.checked_sub(self.confirmations) else {
+            return Ok(());
+        };
+        let next: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO l1_indexer_checkpoints (chain_id, contract_address, next_block)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (chain_id, contract_address) DO UPDATE
+            SET contract_address = EXCLUDED.contract_address
+            RETURNING next_block
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(inbox)
+        .bind(i64::try_from(self.l1_deposit_deployment_block)?)
+        .fetch_one(&self.pool)
+        .await?;
+        let checkpoint = u64::try_from(next)?;
+        let mut from = checkpoint
+            .saturating_sub(self.l1_deposit_reorg_lookback)
+            .max(self.l1_deposit_deployment_block);
+        while from <= confirmed_head {
+            let to = confirmed_head.min(from.saturating_add(999));
+            let logs: Vec<RpcLog> = rpc(
+                &self.client,
+                &self.rpc_url,
+                "eth_getLogs",
+                json!([{
+                    "address": inbox,
+                    "fromBlock": hex_u64(from),
+                    "toBlock": hex_u64(to),
+                    "topics": [DEPOSIT_ACCEPTED_TOPIC]
+                }]),
+            )
+            .await?;
+            for log in logs {
+                if log.removed.unwrap_or(false) {
+                    continue;
+                }
+                let event = decode_deposit_event(&log)?;
+                self.apply_deposit_event(inbox, event, head).await?;
+            }
+            sqlx::query(
+                "UPDATE l1_indexer_checkpoints SET next_block = $3, updated_at = now() WHERE chain_id = $1 AND contract_address = $2",
+            )
+            .bind(i64::try_from(self.chain_id)?)
+            .bind(inbox)
+            .bind(i64::try_from(to.saturating_add(1))?)
+            .execute(&self.pool)
+            .await?;
+            from = to.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    async fn apply_deposit_event(&self, inbox: &str, event: DepositEvent, head: u64) -> Result<()> {
+        let confirmations = head.saturating_sub(event.block_number).saturating_add(1);
+        let status = if confirmations >= self.confirmations.max(1) {
+            "confirmed"
+        } else {
+            "observed"
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            UPDATE l1_deposits
+            SET status = 'orphaned', updated_at = now()
+            WHERE chain_id = $1
+              AND inbox_address = $2
+              AND deposit_id = $3
+              AND status <> 'orphaned'
+              AND (l1_block_hash <> $4 OR l1_tx_hash <> $5 OR l1_log_index <> $6)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM l1_deposits exact
+                  WHERE exact.chain_id = $1
+                    AND exact.inbox_address = $2
+                    AND exact.deposit_id = $3
+                    AND exact.l1_block_hash = $4
+                    AND exact.l1_tx_hash = $5
+                    AND exact.l1_log_index = $6
+              )
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(inbox)
+        .bind(i64::try_from(event.deposit_id)?)
+        .bind(&event.block_hash)
+        .bind(&event.tx_hash)
+        .bind(i32::try_from(event.log_index)?)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO l1_deposits (
+                chain_id,
+                inbox_address,
+                deposit_id,
+                l1_tx_hash,
+                l1_block_number,
+                l1_block_hash,
+                l1_log_index,
+                depositor_l1_address,
+                recipient_l2_address,
+                amount,
+                rolling_commitment,
+                status,
+                confirmations
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (chain_id, inbox_address, deposit_id, l1_block_hash, l1_log_index)
+            DO UPDATE SET
+                confirmations = GREATEST(l1_deposits.confirmations, EXCLUDED.confirmations),
+                status = CASE
+                    WHEN l1_deposits.status = 'orphaned' THEN 'orphaned'
+                    WHEN EXCLUDED.status = 'confirmed' THEN 'confirmed'
+                    ELSE l1_deposits.status
+                END,
+                updated_at = now()
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(inbox)
+        .bind(i64::try_from(event.deposit_id)?)
+        .bind(&event.tx_hash)
+        .bind(i64::try_from(event.block_number)?)
+        .bind(&event.block_hash)
+        .bind(i32::try_from(event.log_index)?)
+        .bind(&event.depositor_l1_address)
+        .bind(&event.recipient_l2_address)
+        .bind(i64::try_from(event.amount)?)
+        .bind(&event.rolling_commitment)
+        .bind(status)
+        .bind(i32::try_from(confirmations)?)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        println!(
+            "indexed L1 deposit #{} for {} at block {} ({})",
+            event.deposit_id, event.recipient_l2_address, event.block_number, event.tx_hash
+        );
+        Ok(())
+    }
+
     async fn apply_finalized_event(&self, event: FinalizedEvent) -> Result<()> {
         let row = sqlx::query(
             r#"
@@ -678,6 +869,30 @@ fn decode_event(log: &RpcLog) -> Result<FinalizedEvent> {
     })
 }
 
+fn decode_deposit_event(log: &RpcLog) -> Result<DepositEvent> {
+    if log.address.to_ascii_lowercase().len() != 42
+        || log.topics.len() != 4
+        || log.topics[0].to_ascii_lowercase() != DEPOSIT_ACCEPTED_TOPIC
+    {
+        bail!("malformed DepositAccepted log");
+    }
+    let words = data_words(&log.data)?;
+    if words.len() != 3 {
+        bail!("DepositAccepted data must contain three ABI words");
+    }
+    Ok(DepositEvent {
+        deposit_id: word_u64(&log.topics[1], "deposit id")?,
+        depositor_l1_address: word_address(&log.topics[2], "depositor")?,
+        recipient_l2_address: word_address(&log.topics[3], "L2 recipient")?,
+        amount: word_u64(&words[0], "deposit amount")?,
+        rolling_commitment: normalize_root(&words[2]),
+        block_number: parse_hex_u64(&log.block_number, "deposit block")?,
+        block_hash: normalize_root(&log.block_hash),
+        tx_hash: log.transaction_hash.to_ascii_lowercase(),
+        log_index: u32::try_from(parse_hex_u64(&log.log_index, "deposit log index")?)?,
+    })
+}
+
 fn data_words(value: &str) -> Result<Vec<String>> {
     let hex = value.strip_prefix("0x").context("event data lacks 0x")?;
     if hex.len() % 64 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -688,6 +903,17 @@ fn data_words(value: &str) -> Result<Vec<String>> {
         .chunks(64)
         .map(|chunk| format!("0x{}", String::from_utf8_lossy(chunk).to_ascii_lowercase()))
         .collect())
+}
+
+fn word_address(value: &str, label: &str) -> Result<String> {
+    let hex = value.strip_prefix("0x").unwrap_or(value);
+    if hex.len() != 64 || !hex[..24].bytes().all(|byte| byte == b'0') {
+        bail!("{label} is not an ABI-encoded address");
+    }
+    if !hex[24..].bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} contains non-hex characters");
+    }
+    Ok(format!("0x{}", hex[24..].to_ascii_lowercase()))
 }
 
 fn word_u64(value: &str, label: &str) -> Result<u64> {
@@ -760,7 +986,9 @@ mod tests {
                 "66".repeat(32)
             ),
             block_number: "0xa".into(),
+            block_hash: format!("0x{}", "88".repeat(32)),
             transaction_hash: format!("0x{}", "77".repeat(32)),
+            log_index: "0x0".into(),
             removed: Some(false),
         };
         let event = decode_event(&log).unwrap();
@@ -768,6 +996,39 @@ mod tests {
         assert_eq!(event.transaction_count, 9);
         assert_eq!(event.block_number, 10);
         assert_eq!(event.data_hash, word("55"));
+    }
+
+    #[test]
+    fn decodes_l1_deposit_event() {
+        let topic_address = |hex: &str| format!("0x{}{}", "0".repeat(24), hex);
+        let depositor = "1111111111111111111111111111111111111111";
+        let recipient = "2222222222222222222222222222222222222222";
+        let amount = format!("0x{}2a", "0".repeat(62));
+        let rolling = format!("0x{}", "33".repeat(32));
+        let log = RpcLog {
+            address: format!("0x{}", "ab".repeat(20)),
+            topics: vec![
+                DEPOSIT_ACCEPTED_TOPIC.into(),
+                format!("0x{}05", "0".repeat(62)),
+                topic_address(depositor),
+                topic_address(recipient),
+            ],
+            data: format!("0x{}{}{}", &amount[2..], "00".repeat(32), &rolling[2..]),
+            block_number: "0xb".into(),
+            block_hash: format!("0x{}", "44".repeat(32)),
+            transaction_hash: format!("0x{}", "55".repeat(32)),
+            log_index: "0x7".into(),
+            removed: Some(false),
+        };
+
+        let event = decode_deposit_event(&log).unwrap();
+        assert_eq!(event.deposit_id, 5);
+        assert_eq!(event.depositor_l1_address, format!("0x{depositor}"));
+        assert_eq!(event.recipient_l2_address, format!("0x{recipient}"));
+        assert_eq!(event.amount, 42);
+        assert_eq!(event.rolling_commitment, rolling);
+        assert_eq!(event.block_number, 11);
+        assert_eq!(event.log_index, 7);
     }
 
     #[test]

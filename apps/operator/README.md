@@ -11,6 +11,12 @@ The operator closes the loop between the transaction pool and
 6. scan confirmed `BatchFinalized` logs and verify every root against Postgres
 7. persist finality and receipt metadata from the authoritative L1 event
 
+When `L1_DEPOSIT_INBOX` is configured, the same lifecycle tick also scans
+`DepositAccepted` logs from `L1DepositInbox` and persists canonical L1 deposits
+into `l1_deposits`. Deposit scans are idempotent across restarts and use a small
+lookback window so recent reorgs can replace older rows by marking the competing
+deposit as `orphaned`.
+
 Batch claims and lifecycle transitions are stored in Postgres. A crashed
 proving job can be reclaimed after two hours, failed jobs retry up to
 `OPERATOR_MAX_ATTEMPTS`, and broadcast batches are not resubmitted while the
@@ -42,6 +48,9 @@ export ROLLUP_SETTLEMENT_CONTRACT=0x...
 export EVM_PRIVATE_KEY=0x...
 export EVM_DEPLOYMENT_BLOCK=0
 export EVM_CONFIRMATIONS=6
+export L1_DEPOSIT_INBOX=0x...
+export L1_DEPOSIT_DEPLOYMENT_BLOCK=0
+export L1_DEPOSIT_REORG_LOOKBACK=12
 export VALIDITY_PROVER_BIN="$PWD/target/release/validity-prover"
 export SETTLEMENT_CLIENT_BIN="$PWD/target/release/settlement-client"
 
@@ -79,7 +88,9 @@ a persistent session. When both `DATABASE_URL` and `NEON_DATABASE_URL` are set,
 the operator deliberately prefers `DATABASE_URL`.
 
 For Anvil, use `EVM_CONFIRMATIONS=0`. In production, set
-`EVM_DEPLOYMENT_BLOCK` to the contract's deployment block.
+`EVM_DEPLOYMENT_BLOCK` to the settlement contract's deployment block and
+`L1_DEPOSIT_DEPLOYMENT_BLOCK` to the deposit inbox deployment block. Omit
+`L1_DEPOSIT_INBOX` when a deployment does not have an inbox yet.
 
 Proof artifacts are retained under `operator-artifacts/` by default. Move the
 directory with `OPERATOR_ARTIFACT_DIR`; it should not be committed.
@@ -97,6 +108,12 @@ and applied. Restarting resumes from that checkpoint. Confirmation depth
 protects against ordinary shallow reorgs; after a reorg deeper than
 `EVM_CONFIRMATIONS`, rewind the checkpoint manually and reconcile affected
 batch rows.
+
+Deposit indexing deliberately rescans the last `L1_DEPOSIT_REORG_LOOKBACK`
+blocks before the checkpoint on every tick. Exact repeats only update
+confirmations. A same-ID deposit observed with a different block hash,
+transaction hash, or log index orphans the older canonical row before inserting
+the replacement, preserving one non-orphaned deposit per inbox and deposit ID.
 
 The explorer's legacy settlement-update endpoint is disabled in the production
 binary unless `SETTLEMENT_UPDATE_TOKEN` is set. Manual `settlement-client`

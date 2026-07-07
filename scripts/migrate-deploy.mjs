@@ -4,11 +4,16 @@ import { resolve } from "node:path";
 const maxAttempts = 3;
 const useNeon = process.argv.includes("--neon");
 const migrationEnv = { ...Bun.env };
+let fallbackMigrationEnv;
 
 if (useNeon) {
   const neonDatabaseUrl =
     Bun.env.NEON_DATABASE_URL?.trim() ??
     databaseUrlFromPrismaEnv("NEON_DATABASE_URL");
+  const neonDirectDatabaseUrl =
+    Bun.env.NEON_DIRECT_DATABASE_URL?.trim() ??
+    databaseUrlFromPrismaEnv("NEON_DIRECT_DATABASE_URL") ??
+    directNeonUrlFromPooler(neonDatabaseUrl);
 
   if (!neonDatabaseUrl) {
     console.error(
@@ -16,18 +21,74 @@ if (useNeon) {
     );
     process.exit(1);
   }
+  if (!neonDirectDatabaseUrl) {
+    console.error(
+      "Set NEON_DIRECT_DATABASE_URL or use a NEON_DATABASE_URL host containing -pooler.",
+    );
+    process.exit(1);
+  }
 
-  // prisma.config.ts prefers DIRECT_DATABASE_URL. Override both variables so
-  // a local direct URL cannot accidentally redirect a Neon migration.
+  // Prisma migrations should use Neon's direct endpoint, not the pooler. Keep
+  // DATABASE_URL on the pooler for app-runtime parity, and override
+  // DIRECT_DATABASE_URL so prisma.config.ts does not select a local database.
   migrationEnv.DATABASE_URL = neonDatabaseUrl;
-  migrationEnv.DIRECT_DATABASE_URL = neonDatabaseUrl;
-  console.log("Deploying committed migrations to NEON_DATABASE_URL.");
+  migrationEnv.DIRECT_DATABASE_URL = neonDirectDatabaseUrl;
+  if (neonDirectDatabaseUrl !== neonDatabaseUrl) {
+    fallbackMigrationEnv = {
+      ...migrationEnv,
+      DIRECT_DATABASE_URL: neonDatabaseUrl,
+    };
+  }
+  console.log("Deploying committed migrations to Neon direct database URL.");
 }
 
-for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+const result = await deployWithRetries(migrationEnv);
+if (
+  result.exitCode !== 0 &&
+  fallbackMigrationEnv &&
+  result.stderr.includes("P1001")
+) {
+  console.warn(
+    "Neon direct endpoint was unreachable. Retrying migration through NEON_DATABASE_URL.",
+  );
+  const fallbackResult = await deployWithRetries(fallbackMigrationEnv);
+  process.exitCode = fallbackResult.exitCode;
+} else {
+  process.exitCode = result.exitCode;
+}
+
+async function deployWithRetries(env) {
+  let lastExitCode = 1;
+  let lastStderr = "";
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await runPrismaDeploy(env);
+    lastExitCode = result.exitCode;
+    lastStderr = result.stderr;
+
+    if (result.exitCode === 0) {
+      return result;
+    }
+
+    const lockTimedOut =
+      result.stderr.includes("P1002") || result.stderr.includes("advisory lock");
+    if (!lockTimedOut || attempt === maxAttempts) {
+      return result;
+    }
+
+    const delaySeconds = attempt * 12;
+    console.warn(
+      `Migration lock is busy. Retrying in ${delaySeconds} seconds (${attempt + 1}/${maxAttempts})...`,
+    );
+    await Bun.sleep(delaySeconds * 1000);
+  }
+
+  return { exitCode: lastExitCode, stderr: lastStderr };
+}
+
+async function runPrismaDeploy(env) {
   const child = Bun.spawn(["bunx", "prisma", "migrate", "deploy"], {
     cwd: import.meta.dir + "/..",
-    env: migrationEnv,
+    env,
     stdout: "inherit",
     stderr: "pipe",
   });
@@ -37,22 +98,7 @@ for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
   if (stderr) {
     await Bun.write(Bun.stderr, stderr);
   }
-  if (exitCode === 0) {
-    process.exitCode = 0;
-    break;
-  }
-
-  const lockTimedOut = stderr.includes("P1002") || stderr.includes("advisory lock");
-  if (!lockTimedOut || attempt === maxAttempts) {
-    process.exitCode = exitCode;
-    break;
-  }
-
-  const delaySeconds = attempt * 12;
-  console.warn(
-    `Migration lock is busy. Retrying in ${delaySeconds} seconds (${attempt + 1}/${maxAttempts})...`,
-  );
-  await Bun.sleep(delaySeconds * 1000);
+  return { exitCode, stderr };
 }
 
 function databaseUrlFromPrismaEnv(key) {
@@ -75,4 +121,21 @@ function databaseUrlFromPrismaEnv(key) {
     .slice(line.indexOf("=") + 1)
     .trim()
     .replace(/^['"]|['"]$/g, "");
+}
+
+function directNeonUrlFromPooler(databaseUrl) {
+  if (!databaseUrl) {
+    return undefined;
+  }
+  let url;
+  try {
+    url = new URL(databaseUrl);
+  } catch {
+    return undefined;
+  }
+  if (!url.hostname.includes("-pooler.")) {
+    return databaseUrl;
+  }
+  url.hostname = url.hostname.replace("-pooler.", ".");
+  return url.toString();
 }
