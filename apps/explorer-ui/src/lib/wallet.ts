@@ -2,6 +2,8 @@ import type { Transfer } from "./api";
 
 const DOMAIN = { name: "ZK Rollup", version: "1" } as const;
 const ROLLUP_ID = "zk-rollup-local-v1";
+const DEPOSIT_SELECTOR = "0xf340fa01";
+const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
 const TRANSFER_FIELDS = [
   { name: "from", type: "address" },
   { name: "to", type: "address" },
@@ -76,6 +78,59 @@ export async function signTransfer(
   return { from: normalizedFrom, to: normalizedTo, amount, nonce, signature };
 }
 
+export const l1DepositInboxAddress = normalizeOptionalAddress(
+  viteEnv?.VITE_L1_DEPOSIT_INBOX,
+);
+
+export async function depositToL2(
+  from: string,
+  recipient: string,
+  amountEth: string,
+  inboxAddress = l1DepositInboxAddress,
+) {
+  const inbox = normalizeOptionalAddress(inboxAddress);
+  if (!inbox) throw new Error("Deposit contract is not configured");
+  const normalizedFrom = normalizeAddress(from);
+  const normalizedRecipient = normalizeAddress(recipient);
+  const value = parseEthAmount(amountEth);
+  if (value <= 0n) throw new Error("Amount must be greater than 0 ETH");
+
+  const txHash = await provider().request({
+    method: "eth_sendTransaction",
+    params: [{
+      from: normalizedFrom,
+      to: inbox,
+      value: `0x${value.toString(16)}`,
+      data: encodeDepositCall(normalizedRecipient),
+    }],
+  });
+  if (typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+    throw new Error("Wallet returned an invalid transaction hash");
+  }
+  return txHash.toLowerCase();
+}
+
 export function hasWalletProvider() {
   return typeof window !== "undefined" && Boolean(window.ethereum);
+}
+
+function normalizeOptionalAddress(value: unknown) {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  return normalizeAddress(value.trim());
+}
+
+function encodeDepositCall(recipient: string) {
+  return `${DEPOSIT_SELECTOR}${"0".repeat(24)}${recipient.slice(2)}`;
+}
+
+function parseEthAmount(value: string) {
+  const trimmed = value.trim();
+  if (!/^(?:\d+|\d+\.\d+)$/.test(trimmed)) {
+    throw new Error("Enter a valid ETH amount");
+  }
+  const [whole, fraction = ""] = trimmed.split(".");
+  if (fraction.length > 18) {
+    throw new Error("ETH amount supports up to 18 decimal places");
+  }
+  return BigInt(whole) * 10n ** 18n + BigInt(fraction.padEnd(18, "0"));
 }

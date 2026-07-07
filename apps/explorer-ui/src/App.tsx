@@ -40,7 +40,9 @@ import {
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
 import {
   connectWallet,
+  depositToL2,
   hasWalletProvider,
+  l1DepositInboxAddress,
   signTransfer,
 } from "./lib/wallet";
 import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
@@ -368,7 +370,15 @@ export function App() {
             description="Track canonical L1 deposits observed for L2 recipients."
             meta={pluralize(l1Deposits.data?.total ?? 0, "deposit")}
           />
-          <DepositsView deposits={l1Deposits.data?.items ?? []} total={l1Deposits.data?.total ?? 0} />
+          <DepositsView
+            deposits={l1Deposits.data?.items ?? []}
+            total={l1Deposits.data?.total ?? 0}
+            wallet={walletAddress}
+            onWalletChange={setWalletAddress}
+            onDeposited={async () => {
+              await queryClient.invalidateQueries({ queryKey: ["l1-deposits"] });
+            }}
+          />
         </div>
       )}
 
@@ -1528,54 +1538,233 @@ function SystemIssuesPanel({
   );
 }
 
-function DepositsView({ deposits, total }: { deposits: L1Deposit[]; total: number }) {
+function DepositsView({
+  deposits,
+  total,
+  wallet,
+  onWalletChange,
+  onDeposited,
+}: {
+  deposits: L1Deposit[];
+  total: number;
+  wallet: string | null;
+  onWalletChange: (wallet: string | null) => void;
+  onDeposited: () => Promise<void>;
+}) {
   const canonical = deposits.filter((deposit) => deposit.status !== "orphaned").length;
   const orphaned = deposits.length - canonical;
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[20rem_1fr]">
-      <Panel className="p-4">
-        <SectionTitle icon={<Upload className="h-4 w-4" />} title="Deposit cache" action={`${deposits.length}/${total}`} flush />
-        <div className="mt-4 grid gap-3">
-          <MetricLine label="Canonical" value={canonical} />
-          <MetricLine label="Orphaned" value={orphaned} />
-          <MetricLine label="Total indexed" value={total} />
-        </div>
-      </Panel>
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(30rem,32rem)_minmax(0,1fr)]">
+      <div className="grid min-w-0 content-start gap-4">
+        <DepositActionPanel
+          wallet={wallet}
+          onWalletChange={onWalletChange}
+          onDeposited={onDeposited}
+        />
+        <Panel className="p-4">
+          <SectionTitle icon={<Upload className="h-4 w-4" />} title="Deposit status" action={`${deposits.length}/${total}`} flush />
+          <div className="mt-4 grid gap-3">
+            <MetricLine label="Active" value={canonical} />
+            <MetricLine label="Replaced" value={orphaned} />
+            <MetricLine label="Indexed" value={total} />
+          </div>
+        </Panel>
+      </div>
 
-      <Panel className="overflow-hidden">
-        <SectionTitle icon={<Database className="h-4 w-4" />} title="Observed L1 deposits" action="L1 to L2" />
+      <Panel className="min-w-0 overflow-hidden">
+        <SectionTitle icon={<Database className="h-4 w-4" />} title="Recent deposits" action="L1 to L2" />
         {deposits.length === 0 ? (
-          <div className="px-4 py-10 text-sm text-white/48">No L1 deposits have been indexed yet.</div>
+          <div className="px-4 py-10 text-sm text-white/48">No deposits have been indexed yet.</div>
         ) : (
-          <div className="overflow-auto">
-            <div className="min-w-[54rem]">
-              <div className="grid grid-cols-[5rem_7rem_8rem_1fr_1fr_8rem] gap-3 border-b border-white/10 bg-white/[0.045] px-4 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
-                <span>ID</span>
-                <span>Status</span>
-                <span>Amount</span>
-                <span>L1 depositor</span>
-                <span>L2 recipient</span>
-                <span>Block</span>
-              </div>
-              {deposits.map((deposit) => (
-                <div
-                  key={deposit.id}
-                  className="grid grid-cols-[5rem_7rem_8rem_1fr_1fr_8rem] items-center gap-3 border-b border-white/8 px-4 py-3 text-sm last:border-b-0"
-                >
-                  <span className="font-semibold text-white">#{deposit.deposit_id}</span>
-                  <Badge tone={depositStatusTone(deposit.status)}>{depositStatusLabel(deposit.status)}</Badge>
-                  <span className="text-white/72">{formatNumber(deposit.amount)}</span>
-                  <span className="hash min-w-0 text-white/64">{shortHash(deposit.depositor_l1_address, 10, 8)}</span>
-                  <span className="hash min-w-0 text-white/64">{shortHash(deposit.recipient_l2_address, 10, 8)}</span>
-                  <span className="text-white/58">{deposit.l1_block_number}</span>
-                </div>
-              ))}
-            </div>
+          <div className="divide-y divide-white/8">
+            {deposits.map((deposit) => (
+              <DepositRow key={deposit.id} deposit={deposit} />
+            ))}
           </div>
         )}
       </Panel>
     </div>
+  );
+}
+
+function DepositRow({ deposit }: { deposit: L1Deposit }) {
+  return (
+    <div className="grid gap-4 px-5 py-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="shrink-0 rounded-lg border border-white/10 bg-white/[0.05] px-2.5 py-1 text-sm font-semibold text-white">
+            #{deposit.deposit_id}
+          </span>
+          <Badge tone={depositStatusTone(deposit.status)}>{depositStatusLabel(deposit.status)}</Badge>
+        </div>
+        <div className="text-right">
+          <div className="text-sm font-semibold text-white">{formatDepositAmount(deposit.amount)}</div>
+          <div className="mt-0.5 text-xs text-white/38">block {deposit.l1_block_number}</div>
+        </div>
+      </div>
+      <div className="grid gap-4 rounded-lg border border-white/8 bg-white/[0.025] p-4 text-xs sm:grid-cols-2">
+        <AddressSummary label="L1 depositor" value={deposit.depositor_l1_address} />
+        <AddressSummary label="L2 recipient" value={deposit.recipient_l2_address} />
+      </div>
+      <div className="hash max-w-full text-xs text-white/38">tx {shortHash(deposit.l1_tx_hash, 12, 10)}</div>
+    </div>
+  );
+}
+
+function AddressSummary({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 text-[0.68rem] uppercase tracking-[0.14em] text-white/34">{label}</div>
+      <div className="hash max-w-full text-sm text-white/66" title={value}>{shortHash(value, 10, 8)}</div>
+    </div>
+  );
+}
+
+function DepositActionPanel({
+  wallet,
+  onWalletChange,
+  onDeposited,
+}: {
+  wallet: string | null;
+  onWalletChange: (wallet: string | null) => void;
+  onDeposited: () => Promise<void>;
+}) {
+  const [recipient, setRecipient] = useState("");
+  const [amount, setAmount] = useState("0.01");
+  const [submitting, setSubmitting] = useState(false);
+  const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
+  const configured = Boolean(l1DepositInboxAddress);
+
+  async function connectEthereumWallet() {
+    setNotice(null);
+    try {
+      const connected = await connectWallet();
+      onWalletChange(connected);
+      if (!recipient.trim()) setRecipient(connected);
+      setNotice({ tone: "neutral", message: "Wallet connected. Your deposit approval stays inside your wallet." });
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet connection failed" });
+    }
+  }
+
+  async function submitDeposit() {
+    if (!wallet) return;
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const txHash = await depositToL2(wallet, recipient.trim(), amount);
+      setNotice({
+        tone: "good",
+        message: `Deposit sent: ${shortHash(txHash, 10, 8)}. It will appear here after the operator indexes the L1 event.`,
+      });
+      await onDeposited();
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Deposit failed" });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Panel className="overflow-hidden">
+      <div className="border-b border-white/8 bg-white/[0.025] p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-lg font-semibold text-white">Add funds</div>
+            <div className="mt-1 text-sm text-white/48">Deposit ETH from your L1 wallet to an L2 recipient.</div>
+          </div>
+          {wallet && <Badge tone="good">Connected</Badge>}
+        </div>
+      </div>
+
+      <div className="grid gap-4 p-4">
+        {!configured && (
+          <div className="rounded-lg border border-amber/25 bg-amber/10 p-3 text-sm text-amber">
+            Deposit contract is not configured for this UI.
+          </div>
+        )}
+
+        {!wallet ? (
+          <div className="rounded-xl border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
+            <Wallet className="mx-auto h-7 w-7 text-mint" />
+            <div className="mt-3 font-semibold text-white">Connect wallet</div>
+            <p className="mx-auto mt-1 max-w-sm text-sm leading-6 text-white/50">
+              Choose the wallet that will send the L1 deposit transaction.
+            </p>
+            <button
+              onClick={connectEthereumWallet}
+              disabled={!configured || !hasWalletProvider()}
+              className="mt-4 h-10 rounded-lg border border-white/12 px-4 text-sm font-medium text-white/70 hover:border-mint/30 hover:text-mint disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              {hasWalletProvider() ? "Connect wallet" : "No EVM wallet found"}
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="rounded-xl border border-white/10 bg-white/[0.035] p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs uppercase tracking-[0.14em] text-white/38">From</div>
+                  <div className="hash mt-1 max-w-full text-xs text-white/78 sm:text-sm" title={wallet}>{wallet}</div>
+                </div>
+                <button
+                  onClick={() => onWalletChange(null)}
+                  className="shrink-0 text-sm text-white/46 hover:text-white"
+                >
+                  Disconnect
+                </button>
+              </div>
+            </div>
+
+            <label className="grid gap-2 text-sm font-medium text-white/70">
+              L2 recipient
+              <input
+                value={recipient}
+                onChange={(event) => setRecipient(event.target.value)}
+                placeholder="0x..."
+                className="h-11 rounded-lg border border-white/10 bg-white/[0.06] px-4 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:border-mint/50 focus:ring-2 focus:ring-mint/10"
+              />
+            </label>
+            <label className="grid gap-2 text-sm font-medium text-white/70">
+              Amount
+              <div className="grid grid-cols-[1fr_auto] overflow-hidden rounded-lg border border-white/10 bg-white/[0.06] focus-within:border-mint/50 focus-within:ring-2 focus-within:ring-mint/10">
+                <input
+                  inputMode="decimal"
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  placeholder="0.01"
+                  className="h-11 min-w-0 bg-transparent px-4 text-lg text-white outline-none placeholder:text-white/30"
+                />
+                <div className="flex h-11 items-center border-l border-white/10 px-4 text-sm text-white/48">ETH</div>
+              </div>
+            </label>
+
+            <button
+              onClick={submitDeposit}
+              disabled={!configured || submitting || recipient.trim().length === 0 || amount.trim().length === 0}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-mint px-5 text-sm font-semibold text-ink shadow-glow transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Upload className="h-4 w-4" />
+              {submitting ? "Depositing..." : "Deposit"}
+            </button>
+          </>
+        )}
+
+        {notice && (
+          <div className={cn(
+            "rounded-lg border p-3 text-sm",
+            notice.tone === "bad"
+              ? "border-rose/25 bg-rose/10 text-rose"
+              : notice.tone === "good"
+                ? "border-mint/25 bg-mint/10 text-mint"
+                : "border-white/10 bg-white/[0.04] text-white/64",
+          )}>
+            {notice.message}
+          </div>
+        )}
+      </div>
+    </Panel>
   );
 }
 
@@ -1930,6 +2119,17 @@ function depositStatusLabel(status: string) {
   if (status === "finalized") return "Final";
   if (status === "orphaned") return "Orphaned";
   return status;
+}
+
+function formatDepositAmount(amountWei: number) {
+  if (!Number.isFinite(amountWei) || amountWei <= 0) return "0 ETH";
+  const wei = BigInt(Math.trunc(amountWei));
+  const base = 10n ** 18n;
+  const whole = wei / base;
+  const fraction = wei % base;
+  if (fraction === 0n) return `${whole.toString()} ETH`;
+  const fractionText = fraction.toString().padStart(18, "0").replace(/0+$/, "").slice(0, 6);
+  return `${whole.toString()}.${fractionText} ETH`;
 }
 
 function settlementMilestoneText(batch: RollupBatchSummary) {
