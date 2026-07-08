@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct BatchValidityWitness {
     pub batch_number: u64,
+    #[serde(default = "default_l1_deposit_inbox")]
+    pub l1_deposit_inbox: String,
     pub accounts_before: BTreeMap<String, Account>,
     pub previous_block: Block,
     pub blocks: Vec<Block>,
@@ -35,13 +37,15 @@ pub struct BatchValidityPublicValues {
     pub first_deposit_id: Option<u64>,
     #[serde(default)]
     pub last_deposit_id: Option<u64>,
+    #[serde(default = "default_l1_deposit_inbox")]
+    pub l1_deposit_inbox: String,
 }
 
-pub const EVM_PUBLIC_VALUES_LENGTH: usize = 7 * 32;
+pub const EVM_PUBLIC_VALUES_LENGTH: usize = 12 * 32;
 
 impl BatchValidityPublicValues {
     /// Solidity ABI encoding of
-    /// `(uint256,bytes32,bytes32,bytes32,bytes32,bytes32,uint256)`.
+    /// `(uint256,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,address)`.
     pub fn encode_evm(&self) -> Result<[u8; EVM_PUBLIC_VALUES_LENGTH], ValidityError> {
         let mut encoded = [0u8; EVM_PUBLIC_VALUES_LENGTH];
         encoded[24..32].copy_from_slice(&self.batch_number.to_be_bytes());
@@ -51,16 +55,25 @@ impl BatchValidityPublicValues {
             &self.transaction_root,
             &self.block_hash_root,
             &self.data_hash,
+            &self.deposit_root,
         ]
         .into_iter()
         .enumerate()
         {
             encoded[(index + 1) * 32..(index + 2) * 32].copy_from_slice(&decode_root(value)?);
         }
+        let first_deposit_id = self.first_deposit_id.unwrap_or(0);
+        let last_deposit_id = self.last_deposit_id.unwrap_or(0);
+        encoded[7 * 32 + 24..8 * 32].copy_from_slice(&first_deposit_id.to_be_bytes());
+        encoded[8 * 32 + 24..9 * 32].copy_from_slice(&last_deposit_id.to_be_bytes());
+        let deposit_count = u64::try_from(self.deposit_count)
+            .map_err(|_| ValidityError::InvalidPublicValues("deposit count exceeds u64".into()))?;
+        encoded[9 * 32 + 24..10 * 32].copy_from_slice(&deposit_count.to_be_bytes());
         let count = u64::try_from(self.transaction_count).map_err(|_| {
             ValidityError::InvalidPublicValues("transaction count exceeds u64".into())
         })?;
-        encoded[6 * 32 + 24..7 * 32].copy_from_slice(&count.to_be_bytes());
+        encoded[10 * 32 + 24..11 * 32].copy_from_slice(&count.to_be_bytes());
+        encoded[11 * 32..12 * 32].copy_from_slice(&decode_address_word(&self.l1_deposit_inbox)?);
         Ok(encoded)
     }
 }
@@ -102,6 +115,12 @@ pub fn verify_batch_witness(
         let mut changed_addresses = BTreeSet::new();
         validate_deposit_sequence(&block.deposits).map_err(invalid_batch)?;
         for deposit in &block.deposits {
+            if deposit.inbox_address != witness.l1_deposit_inbox {
+                return Err(ValidityError::InvalidBatch(format!(
+                    "deposit {} came from unexpected inbox",
+                    deposit.deposit_id
+                )));
+            }
             apply_deposit_to_state(&mut accounts, deposit).map_err(invalid_batch)?;
             changed_addresses.insert(deposit.recipient_l2_address.as_str());
         }
@@ -123,10 +142,13 @@ pub fn verify_batch_witness(
         }
     }
 
-    Ok(public_values(commitment))
+    Ok(public_values(commitment, witness.l1_deposit_inbox.clone()))
 }
 
-fn public_values(commitment: RollupBatchCommitment) -> BatchValidityPublicValues {
+fn public_values(
+    commitment: RollupBatchCommitment,
+    l1_deposit_inbox: String,
+) -> BatchValidityPublicValues {
     BatchValidityPublicValues {
         batch_number: commitment.batch_number,
         prev_state_root: commitment.prev_state_root,
@@ -139,6 +161,7 @@ fn public_values(commitment: RollupBatchCommitment) -> BatchValidityPublicValues
         deposit_root: commitment.deposit_root,
         first_deposit_id: commitment.first_deposit_id,
         last_deposit_id: commitment.last_deposit_id,
+        l1_deposit_inbox,
     }
 }
 
@@ -161,6 +184,27 @@ fn decode_root(value: &str) -> Result<[u8; 32], ValidityError> {
     Ok(result)
 }
 
+fn decode_address_word(value: &str) -> Result<[u8; 32], ValidityError> {
+    let value = value
+        .strip_prefix("0x")
+        .ok_or_else(|| ValidityError::InvalidPublicValues("address must use 0x prefix".into()))?;
+    if value.len() != 40 {
+        return Err(ValidityError::InvalidPublicValues(
+            "address must contain exactly 20 bytes".into(),
+        ));
+    }
+    let mut result = [0u8; 32];
+    for index in 0..20 {
+        result[12 + index] = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| ValidityError::InvalidPublicValues("address is not hexadecimal".into()))?;
+    }
+    Ok(result)
+}
+
+fn default_l1_deposit_inbox() -> String {
+    "0x0000000000000000000000000000000000000000".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use chain_core::{
@@ -170,6 +214,7 @@ mod tests {
     use wallet_core::create_keypair;
 
     use super::*;
+    const L1_DEPOSIT_INBOX: &str = "0x2222222222222222222222222222222222222222";
 
     #[test]
     fn verifies_the_same_transition_committed_by_the_chain() {
@@ -200,6 +245,7 @@ mod tests {
 
         let values = verify_batch_witness(&BatchValidityWitness {
             batch_number: 0,
+            l1_deposit_inbox: L1_DEPOSIT_INBOX.to_string(),
             accounts_before,
             previous_block: previous_block.clone(),
             blocks: vec![block.clone()],
@@ -238,6 +284,7 @@ mod tests {
 
         let values = verify_batch_witness(&BatchValidityWitness {
             batch_number: 0,
+            l1_deposit_inbox: L1_DEPOSIT_INBOX.to_string(),
             accounts_before,
             previous_block: previous_block.clone(),
             blocks: vec![block.clone()],
@@ -272,6 +319,7 @@ mod tests {
 
         assert!(verify_batch_witness(&BatchValidityWitness {
             batch_number: 0,
+            l1_deposit_inbox: L1_DEPOSIT_INBOX.to_string(),
             accounts_before,
             previous_block,
             blocks: vec![forged_block],
@@ -293,12 +341,14 @@ mod tests {
             deposit_root: "00".repeat(32),
             first_deposit_id: None,
             last_deposit_id: None,
+            l1_deposit_inbox: L1_DEPOSIT_INBOX.to_string(),
         };
 
         let encoded = values.encode_evm().unwrap();
-        assert_eq!(encoded.len(), 224);
+        assert_eq!(encoded.len(), 384);
         assert_eq!(&encoded[24..32], &7u64.to_be_bytes());
         assert_eq!(&encoded[32..64], &[0x11; 32]);
-        assert_eq!(&encoded[192 + 24..224], &9u64.to_be_bytes());
+        assert_eq!(&encoded[10 * 32 + 24..11 * 32], &9u64.to_be_bytes());
+        assert_eq!(&encoded[11 * 32 + 12..12 * 32], &[0x22; 20]);
     }
 }

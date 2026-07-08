@@ -21,8 +21,8 @@ body {
   margin: 0;
   color: rgba(255, 255, 255, 0.92);
   background:
-    radial-gradient(circle at 12% -10%, rgba(88, 244, 183, 0.08), transparent 28rem),
-    linear-gradient(180deg, #0d1117 0%, #090b0f 100%);
+    linear-gradient(180deg, rgba(13, 17, 23, 0.98) 0%, #090b0f 100%),
+    #080a0d;
 }
 
 button,
@@ -37,12 +37,12 @@ input {
 
 .surface {
   position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: rgba(16, 20, 27, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(15, 19, 25, 0.94);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.055),
-    0 12px 32px rgba(0, 0, 0, 0.16);
-  backdrop-filter: blur(12px);
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 10px 24px rgba(0, 0, 0, 0.14);
+  backdrop-filter: blur(10px);
 }
 
 .surface::before {
@@ -51,7 +51,7 @@ input {
   pointer-events: none;
   content: "";
   border-radius: inherit;
-  background: linear-gradient(120deg, rgba(88, 244, 183, 0.035), transparent 32%);
+  background: linear-gradient(120deg, rgba(255, 255, 255, 0.028), transparent 34%);
 }
 
 .surface > * {
@@ -68,7 +68,7 @@ input {
 }
 
 .beam-field {
-  background: radial-gradient(circle at 90% 12%, rgba(98, 217, 255, 0.045), transparent 24rem);
+  background: linear-gradient(90deg, transparent 0%, rgba(98, 217, 255, 0.025) 52%, transparent 100%);
 }
 
 .hash {

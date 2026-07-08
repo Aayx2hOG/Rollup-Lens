@@ -31,12 +31,13 @@ contract ValidityRollupSettlementSP1Test {
             bytes32 transactionRoot,
             bytes32 blockHashRoot,
             bytes32 dataHash,
-            uint256 transactionCount
-        ) = abi.decode(publicValues, (uint256, bytes32, bytes32, bytes32, bytes32, bytes32, uint256));
+            uint256 transactionCount,
+            address l1DepositInbox
+        ) = decodeHeader(publicValues);
 
         SP1Groth16Verifier verifier = new SP1Groth16Verifier();
         ValidityRollupSettlement settlement =
-            new ValidityRollupSettlement(prevStateRoot, ISP1Verifier(address(verifier)), programVKey);
+            new ValidityRollupSettlement(prevStateRoot, ISP1Verifier(address(verifier)), programVKey, l1DepositInbox);
         settlement.setSequencer(address(this));
         settlement.submitBatchWithProof(
             batchNumber, prevStateRoot, newStateRoot, transactionRoot, blockHashRoot, dataHash, publicValues, proof
@@ -61,8 +62,9 @@ contract ValidityRollupSettlementSP1Test {
             bytes32 newStateRoot,
             bytes32 transactionRoot,
             bytes32 blockHashRoot,
-            bytes32 dataHash,
-        ) = abi.decode(publicValues, (uint256, bytes32, bytes32, bytes32, bytes32, bytes32, uint256));
+            bytes32 dataHash,,
+            address l1DepositInbox
+        ) = decodeHeader(publicValues);
 
         publicValues[63] ^= bytes1(uint8(1));
         assembly {
@@ -71,7 +73,7 @@ contract ValidityRollupSettlementSP1Test {
 
         SP1Groth16Verifier verifier = new SP1Groth16Verifier();
         ValidityRollupSettlement settlement =
-            new ValidityRollupSettlement(prevStateRoot, ISP1Verifier(address(verifier)), programVKey);
+            new ValidityRollupSettlement(prevStateRoot, ISP1Verifier(address(verifier)), programVKey, l1DepositInbox);
         settlement.setSequencer(address(this));
 
         vm.expectRevert();
@@ -93,14 +95,15 @@ contract ValidityRollupSettlementSP1Test {
             bytes32 newStateRoot,
             bytes32 transactionRoot,
             bytes32 blockHashRoot,
-            bytes32 dataHash,
-        ) = abi.decode(publicValues, (uint256, bytes32, bytes32, bytes32, bytes32, bytes32, uint256));
+            bytes32 dataHash,,
+            address l1DepositInbox
+        ) = decodeHeader(publicValues);
 
         proof[proof.length - 1] ^= bytes1(uint8(1));
 
         SP1Groth16Verifier verifier = new SP1Groth16Verifier();
         ValidityRollupSettlement settlement =
-            new ValidityRollupSettlement(prevStateRoot, ISP1Verifier(address(verifier)), programVKey);
+            new ValidityRollupSettlement(prevStateRoot, ISP1Verifier(address(verifier)), programVKey, l1DepositInbox);
         settlement.setSequencer(address(this));
 
         vm.expectRevert();
@@ -115,7 +118,50 @@ contract ValidityRollupSettlementSP1Test {
         proof = vm.envOr("SP1_PROOF", bytes(""));
         if (proof.length != 0) {
             require(programVKey != bytes32(0), "missing SP1_PROGRAM_VKEY");
-            require(publicValues.length == 224, "invalid SP1_PUBLIC_VALUES");
+            require(publicValues.length == 384, "invalid SP1_PUBLIC_VALUES");
         }
+    }
+
+    function decodeHeader(bytes memory publicValues)
+        private
+        pure
+        returns (
+            uint256 batchNumber,
+            bytes32 prevStateRoot,
+            bytes32 newStateRoot,
+            bytes32 transactionRoot,
+            bytes32 blockHashRoot,
+            bytes32 dataHash,
+            uint256 transactionCount,
+            address l1DepositInbox
+        )
+    {
+        (
+            batchNumber,
+            prevStateRoot,
+            newStateRoot,
+            transactionRoot,
+            blockHashRoot,
+            dataHash,,,,,
+            transactionCount,
+            l1DepositInbox
+        ) =
+            abi.decode(
+                publicValues,
+                (
+                    uint256,
+                    bytes32,
+                    bytes32,
+                    bytes32,
+                    bytes32,
+                    bytes32,
+                    bytes32,
+                    uint256,
+                    uint256,
+                    uint256,
+                    uint256,
+                    address
+                )
+            );
     }
 }

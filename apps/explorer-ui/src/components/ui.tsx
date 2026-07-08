@@ -15,7 +15,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
 export function Panel({ className, children, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <section className={cn("surface rounded-2xl", className)} {...props}>
+    <section className={cn("surface rounded-lg", className)} {...props}>
       {children}
     </section>
   );
@@ -40,13 +40,13 @@ export function Stat({
   };
 
   return (
-    <Panel className="relative min-h-28 overflow-hidden p-4">
+    <Panel className="relative min-h-24 overflow-hidden p-4">
       <div className={cn("absolute inset-x-0 top-0 h-px bg-gradient-to-r to-transparent", accents[accent])} />
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs font-medium uppercase tracking-[0.18em] text-white/44">{label}</div>
         <div className={cn("h-2 w-2 rounded-full bg-current", accents[accent])} />
       </div>
-      <div className="mt-3 text-3xl font-semibold leading-none text-white">{value}</div>
+      <div className="mt-3 text-2xl font-semibold leading-none text-white sm:text-3xl">{value}</div>
       <div className="mt-2 text-sm leading-5 text-white/52">{detail}</div>
     </Panel>
   );
@@ -60,7 +60,7 @@ export function IconButton({
   return (
     <button
       className={cn(
-        "inline-flex h-10 w-10 items-center justify-center rounded-lg border border-white/10 bg-white/[0.05] text-white/75 shadow-sm transition hover:border-mint/40 hover:bg-mint/10 hover:text-mint focus:outline-none focus:ring-2 focus:ring-mint/50",
+        "inline-flex h-10 w-10 items-center justify-center rounded-md border border-white/10 bg-white/[0.05] text-white/75 shadow-sm transition hover:border-mint/40 hover:bg-mint/10 hover:text-mint focus:outline-none focus:ring-2 focus:ring-mint/50",
         className,
       )}
       {...props}

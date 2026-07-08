@@ -51,6 +51,7 @@ export type Block = {
   height: number;
   parent_hash: string;
   transactions: Transfer[];
+  deposits: L1Deposit[];
   state_root: string;
   block_hash: string;
   transaction_views: TransactionView[];
@@ -87,8 +88,12 @@ export type RollupBatchSummary = {
   new_state_root: string;
   transaction_root: string;
   block_hash_root: string;
+  deposit_root: string;
   data_hash: string;
   transaction_count: number;
+  deposit_count: number;
+  first_deposit_id: number | null;
+  last_deposit_id: number | null;
   status: string;
   l1_chain_id: number | null;
   l1_contract_address: string | null;
@@ -106,6 +111,7 @@ export type RollupBatchSummary = {
 
 export type RollupBatch = RollupBatchSummary & {
   transactions: TransactionView[];
+  deposits?: L1Deposit[];
 };
 
 export type L1Deposit = {
@@ -149,6 +155,7 @@ export type SequencedBatch = {
   block: Block;
   rollup_batch: RollupBatchSummary | null;
   included_transactions: TransactionPoolEntry[];
+  included_deposits: L1Deposit[];
   failed_transactions: TransactionPoolEntry[];
 };
 

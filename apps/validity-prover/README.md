@@ -64,16 +64,17 @@ curl http://127.0.0.1:3000/rollup/batches/0/validity-witness \
 The JSON artifact contains:
 
 - `program_vkey`: the verification-key commitment that must equal the
-  `programVKey` configured in `RollupSettlement`
-- `public_values`: 224 bytes containing the ABI encoding of batch number, five
-  roots/commitments, and transaction count
+  `programVKey` configured in `ValidityRollupSettlement`
+- `public_values`: 384 bytes containing the ABI encoding of batch number, five
+  roots/commitments, deposit root, processed deposit range/count, transaction
+  count, and the L1 deposit inbox
 - `proof`: the selector-prefixed Groth16 proof bytes expected by SP1's
   version-matched Solidity verifier
 - `decoded`: a human-readable copy for inspection
 
-The contract binds the first six public values to the batch arguments before
-calling the SP1 verifier. Consequently, a proof generated for one batch cannot
-be submitted with another batch number or another set of roots.
+The contract binds the first six public values to the batch arguments and checks
+the encoded L1 deposit inbox before calling the SP1 verifier. Consequently, a
+proof generated for one batch or deposit inbox cannot be submitted for another.
 
 Groth16 wrapping is substantially slower than `execute` or a core proof. Use
 the Succinct prover network or a machine configured for SP1 proving for

@@ -372,9 +372,14 @@ export function App() {
           />
           <DepositsView
             deposits={l1Deposits.data?.items ?? []}
+            batches={batchItems}
             total={l1Deposits.data?.total ?? 0}
             wallet={walletAddress}
             onWalletChange={setWalletAddress}
+            onSelectBatch={(batchNumber) => {
+              setSelectedBatch(batchNumber);
+              setActiveTab("Settlement");
+            }}
             onDeposited={async () => {
               await queryClient.invalidateQueries({ queryKey: ["l1-deposits"] });
             }}
@@ -507,7 +512,7 @@ function ConnectionState({
 
 function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (tab: Tab) => void }) {
   return (
-    <nav className="flex min-w-0 flex-wrap items-center gap-1 rounded-xl border border-white/10 bg-white/[0.035] p-1">
+    <nav className="flex min-w-0 flex-wrap items-center gap-1 rounded-lg border border-white/10 bg-white/[0.035] p-1">
       {tabs.map((tab) => (
         <button
           key={tab}
@@ -549,10 +554,10 @@ function PageIntro({
   meta?: React.ReactNode;
 }) {
   return (
-    <section className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
+    <section className="rounded-lg border border-white/10 bg-white/[0.025] p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-mint/20 bg-mint/10 text-mint">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-mint/20 bg-mint/10 text-mint">
             {icon}
           </div>
           <div>
@@ -650,7 +655,7 @@ function HomeHero({
 }) {
   const live = readStatus === "ok";
   return (
-    <section className="relative overflow-hidden rounded-xl border border-white/10 bg-white/[0.025] p-5 shadow-xl shadow-black/20">
+    <section className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.025] p-5 shadow-xl shadow-black/20">
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent" />
       <div>
         <div>
@@ -683,7 +688,7 @@ function HomeHero({
 
 function HeroMetric({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
+    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
       <div className="text-xs text-white/42">{label}</div>
       <div className="mt-2 text-xl font-semibold text-white">{value}</div>
     </div>
@@ -1201,7 +1206,7 @@ function SendTransferView({
 
       <div className="grid gap-5 p-5">
         {!wallet ? (
-          <div className="rounded-xl border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
+          <div className="rounded-lg border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
             <Wallet className="mx-auto h-7 w-7 text-mint" />
             <div className="mt-3 font-semibold text-white">Connect Ethereum wallet</div>
             <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-white/50">
@@ -1218,7 +1223,7 @@ function SendTransferView({
           </div>
         ) : (
           <>
-            <div className="grid gap-3 rounded-xl border border-white/10 bg-white/[0.035] p-4 sm:grid-cols-[1fr_auto] sm:items-center">
+            <div className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-4 sm:grid-cols-[1fr_auto] sm:items-center">
               <div className="min-w-0">
                 <div className="text-xs uppercase tracking-[0.14em] text-white/38">From</div>
                 <div className="hash mt-1 text-sm text-white/78">{walletAddress}</div>
@@ -1540,47 +1545,71 @@ function SystemIssuesPanel({
 
 function DepositsView({
   deposits,
+  batches,
   total,
   wallet,
   onWalletChange,
+  onSelectBatch,
   onDeposited,
 }: {
   deposits: L1Deposit[];
+  batches: RollupBatchSummary[];
   total: number;
   wallet: string | null;
   onWalletChange: (wallet: string | null) => void;
+  onSelectBatch: (batchNumber: number) => void;
   onDeposited: () => Promise<void>;
 }) {
-  const canonical = deposits.filter((deposit) => deposit.status !== "orphaned").length;
-  const orphaned = deposits.length - canonical;
+  const observed = deposits.filter((deposit) => deposit.status === "observed").length;
+  const confirmed = deposits.filter((deposit) => deposit.status === "confirmed").length;
+  const executed = deposits.filter((deposit) => deposit.status === "executed" || deposit.status === "finalized").length;
+  const finalized = deposits.filter((deposit) => deposit.status === "finalized").length;
+  const orphaned = deposits.filter((deposit) => deposit.status === "orphaned").length;
+  const latestDepositBatch = batches.find((batch) => batch.deposit_count > 0);
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(30rem,32rem)_minmax(0,1fr)]">
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(29rem,32rem)_minmax(0,1fr)]">
       <div className="grid min-w-0 content-start gap-4">
         <DepositActionPanel
           wallet={wallet}
           onWalletChange={onWalletChange}
           onDeposited={onDeposited}
         />
-        <Panel className="p-4">
-          <SectionTitle icon={<Upload className="h-4 w-4" />} title="Deposit status" action={`${deposits.length}/${total}`} flush />
-          <div className="mt-4 grid gap-3">
-            <MetricLine label="Active" value={canonical} />
-            <MetricLine label="Replaced" value={orphaned} />
-            <MetricLine label="Indexed" value={total} />
+        <Panel className="overflow-hidden">
+          <SectionTitle icon={<Activity className="h-4 w-4" />} title="Deposit pipeline" action={`${deposits.length}/${total} indexed`} />
+          <div className="grid gap-3 p-4">
+            <DepositStageRow label="Observed" value={observed} complete={deposits.length > 0} />
+            <DepositStageRow label="Confirmed" value={confirmed} complete={confirmed + executed > 0} />
+            <DepositStageRow label="Executed" value={executed} complete={executed > 0} />
+            <DepositStageRow label="Finalized" value={finalized} complete={finalized > 0} />
+          </div>
+          <div className="grid grid-cols-2 border-t border-white/8">
+            <DepositCompactMetric label="Orphaned" value={orphaned} />
+            <DepositCompactMetric
+              label="Latest range"
+              value={formatDepositRange(latestDepositBatch)}
+            />
           </div>
         </Panel>
       </div>
 
       <Panel className="min-w-0 overflow-hidden">
-        <SectionTitle icon={<Database className="h-4 w-4" />} title="Recent deposits" action="L1 to L2" />
+        <SectionTitle icon={<Database className="h-4 w-4" />} title="Canonical deposits" action="L1 to L2 state input" />
         {deposits.length === 0 ? (
           <div className="px-4 py-10 text-sm text-white/48">No deposits have been indexed yet.</div>
         ) : (
           <div className="divide-y divide-white/8">
-            {deposits.map((deposit) => (
-              <DepositRow key={deposit.id} deposit={deposit} />
-            ))}
+            {deposits.map((deposit) => {
+              const batch = batchForDeposit(deposit, batches);
+              return (
+                <DepositRow
+                  key={deposit.id}
+                  deposit={deposit}
+                  batch={batch}
+                  onSelectBatch={batch ? onSelectBatch : undefined}
+                />
+              );
+            })}
           </div>
         )}
       </Panel>
@@ -1588,26 +1617,75 @@ function DepositsView({
   );
 }
 
-function DepositRow({ deposit }: { deposit: L1Deposit }) {
+function DepositStageRow({ label, value, complete }: { label: string; value: number; complete: boolean }) {
   return (
-    <div className="grid gap-4 px-5 py-5">
+    <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-md border border-white/8 bg-white/[0.035] px-3 py-2.5">
+      <div className={cn(
+        "flex h-7 w-7 items-center justify-center rounded-full border",
+        complete ? "border-mint/30 bg-mint/10 text-mint" : "border-white/10 bg-white/[0.04] text-white/34",
+      )}>
+        {complete ? <CheckCircle2 className="h-4 w-4" /> : <Clock3 className="h-4 w-4" />}
+      </div>
+      <span className="text-sm font-medium text-white/76">{label}</span>
+      <span className="text-sm font-semibold text-white">{value}</span>
+    </div>
+  );
+}
+
+function DepositCompactMetric({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="min-w-0 border-r border-white/8 p-4 last:border-r-0">
+      <div className="text-xs uppercase tracking-[0.16em] text-white/36">{label}</div>
+      <div className="mt-2 truncate text-sm font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function DepositRow({
+  deposit,
+  batch,
+  onSelectBatch,
+}: {
+  deposit: L1Deposit;
+  batch?: RollupBatchSummary;
+  onSelectBatch?: (batchNumber: number) => void;
+}) {
+  return (
+    <div className="grid gap-3 px-4 py-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="shrink-0 rounded-lg border border-white/10 bg-white/[0.05] px-2.5 py-1 text-sm font-semibold text-white">
+          <span className="shrink-0 rounded-md border border-white/10 bg-white/[0.05] px-2.5 py-1 text-sm font-semibold text-white">
             #{deposit.deposit_id}
           </span>
           <Badge tone={depositStatusTone(deposit.status)}>{depositStatusLabel(deposit.status)}</Badge>
         </div>
-        <div className="text-right">
+        <div className="min-w-0 text-right">
           <div className="text-sm font-semibold text-white">{formatDepositAmount(deposit.amount)}</div>
-          <div className="mt-0.5 text-xs text-white/38">block {deposit.l1_block_number}</div>
+          <div className="mt-0.5 text-xs text-white/38">{deposit.confirmations} confirmations</div>
         </div>
       </div>
-      <div className="grid gap-4 rounded-lg border border-white/8 bg-white/[0.025] p-4 text-xs sm:grid-cols-2">
+      <div className="grid gap-3 rounded-md border border-white/8 bg-white/[0.025] p-3 text-xs lg:grid-cols-[1fr_1fr_auto]">
         <AddressSummary label="L1 depositor" value={deposit.depositor_l1_address} />
         <AddressSummary label="L2 recipient" value={deposit.recipient_l2_address} />
+        <div className="min-w-0">
+          <div className="mb-1 text-[0.68rem] uppercase tracking-[0.14em] text-white/34">Batch</div>
+          {batch ? (
+            <button
+              onClick={() => onSelectBatch?.(batch.batch_number)}
+              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-mint/20 bg-mint/10 px-2 text-xs font-medium text-mint transition hover:border-mint/40"
+            >
+              <PackageCheck className="h-3.5 w-3.5" />
+              {batch.batch_number}
+            </button>
+          ) : (
+            <span className="text-sm text-white/42">pending</span>
+          )}
+        </div>
       </div>
-      <div className="hash max-w-full text-xs text-white/38">tx {shortHash(deposit.l1_tx_hash, 12, 10)}</div>
+      <div className="grid gap-2 text-xs text-white/40 sm:grid-cols-[1fr_auto]">
+        <span className="hash max-w-full">tx {shortHash(deposit.l1_tx_hash, 12, 10)}</span>
+        <span>block {deposit.l1_block_number}</span>
+      </div>
     </div>
   );
 }
@@ -1686,7 +1764,7 @@ function DepositActionPanel({
         )}
 
         {!wallet ? (
-          <div className="rounded-xl border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
+          <div className="rounded-lg border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
             <Wallet className="mx-auto h-7 w-7 text-mint" />
             <div className="mt-3 font-semibold text-white">Connect wallet</div>
             <p className="mx-auto mt-1 max-w-sm text-sm leading-6 text-white/50">
@@ -1702,7 +1780,7 @@ function DepositActionPanel({
           </div>
         ) : (
           <>
-            <div className="rounded-xl border border-white/10 bg-white/[0.035] p-4">
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-xs uppercase tracking-[0.14em] text-white/38">From</div>
@@ -1807,7 +1885,7 @@ function RollupView({
                   <Badge tone={settlementStatusTone(batch.status)}>{settlementStatusLabel(batch.status)}</Badge>
                 </div>
                 <div className="mt-2 text-xs text-white/46">
-                  groups {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "transfer")}
+                  groups {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "transfer")} / {pluralize(batch.deposit_count, "deposit")}
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-white/48">
                   <span>{batch.l1_chain_id ? `chain ${batch.l1_chain_id}` : "L1 not selected"}</span>
@@ -1844,11 +1922,16 @@ function RollupView({
               <MetricLine label="Transfers" value={selectedBatch.transaction_count} />
             </div>
             <SettlementProgress batch={selectedBatch} />
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <MetricLine label="Deposits" value={selectedBatch.deposit_count} />
+              <MetricLine label="Deposit range" value={formatDepositRange(selectedBatch)} />
+              <MetricLine label="Proof input" value={selectedBatch.deposit_count > 0 ? "Bound" : "Empty"} />
+            </div>
             <div className="flex flex-col gap-2 border-b border-white/8 pb-3 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-white">Validity commitments</h3>
                 <p className="mt-1 text-xs leading-5 text-white/48">
-                  Copy these only when comparing prover output, API responses, or settlement calldata.
+                  These are the public inputs checked by the proof and settlement contract.
                 </p>
               </div>
             </div>
@@ -1857,6 +1940,7 @@ function RollupView({
               <HashLine label="New state root" value={selectedBatch.new_state_root} />
               <HashLine label="Transaction root" value={selectedBatch.transaction_root} />
               <HashLine label="Block hash root" value={selectedBatch.block_hash_root} />
+              <HashLine label="Deposit root" value={selectedBatch.deposit_root} />
               <HashLine label="Batch data hash" value={selectedBatch.data_hash} />
             </div>
             {selectedBatch.status === "built" ? (
@@ -1943,6 +2027,11 @@ function SettlementProgress({ batch }: { batch: RollupBatchSummary }) {
   const finalized = batch.status === "finalized";
   const steps = [
     { label: "Batch built", complete: true, detail: `Package ${batch.batch_number}` },
+    {
+      label: "Deposits bound",
+      complete: batch.deposit_count === 0 || batch.deposit_root !== zeroHash(),
+      detail: batch.deposit_count > 0 ? formatDepositRange(batch) : "Empty range",
+    },
     { label: "Proof submitted", complete: submitted, detail: submitted ? "Validity proof sent" : "Next action" },
     { label: "L1 finalized", complete: finalized, detail: finalized ? `Chain ${batch.l1_chain_id}` : "Waiting" },
   ];
@@ -1953,7 +2042,7 @@ function SettlementProgress({ batch }: { batch: RollupBatchSummary }) {
         <span className="text-xs font-medium uppercase tracking-[0.16em] text-white/38">Settlement progress</span>
         <Badge tone={settlementStatusTone(batch.status)}>{settlementStatusLabel(batch.status)}</Badge>
       </div>
-      <div className="grid gap-2 md:grid-cols-3">
+      <div className="grid gap-2 md:grid-cols-4">
         {steps.map((step, index) => (
           <div key={step.label} className="flex items-center gap-3 rounded-lg border border-white/8 bg-white/[0.035] p-3">
             <div className={cn(
@@ -2130,6 +2219,25 @@ function formatDepositAmount(amountWei: number) {
   if (fraction === 0n) return `${whole.toString()} ETH`;
   const fractionText = fraction.toString().padStart(18, "0").replace(/0+$/, "").slice(0, 6);
   return `${whole.toString()}.${fractionText} ETH`;
+}
+
+function batchForDeposit(deposit: L1Deposit, batches: RollupBatchSummary[]) {
+  return batches.find((batch) => {
+    if (batch.first_deposit_id === null || batch.last_deposit_id === null) return false;
+    return deposit.deposit_id >= batch.first_deposit_id && deposit.deposit_id <= batch.last_deposit_id;
+  });
+}
+
+function formatDepositRange(batch?: RollupBatchSummary | null) {
+  if (!batch || batch.deposit_count === 0 || batch.first_deposit_id === null || batch.last_deposit_id === null) {
+    return "none";
+  }
+  if (batch.first_deposit_id === batch.last_deposit_id) return `#${batch.first_deposit_id}`;
+  return `#${batch.first_deposit_id}-#${batch.last_deposit_id}`;
+}
+
+function zeroHash() {
+  return `0x${"0".repeat(64)}`;
 }
 
 function settlementMilestoneText(batch: RollupBatchSummary) {

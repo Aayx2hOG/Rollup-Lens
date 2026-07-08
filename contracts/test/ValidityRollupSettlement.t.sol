@@ -35,12 +35,14 @@ contract ValidityRollupSettlementTest {
     bytes32 private constant BLOCK_HASH_ROOT = bytes32(uint256(5));
     bytes32 private constant DATA_HASH = bytes32(uint256(6));
     bytes32 private constant PROGRAM_VKEY = bytes32(uint256(7));
+    bytes32 private constant DEPOSIT_ROOT = bytes32(uint256(8));
+    address private constant L1_DEPOSIT_INBOX = address(0x2222222222222222222222222222222222222222);
 
     ValidityRollupSettlement private settlement;
 
     function setUp() public {
         ValidityVerifierMock verifier = new ValidityVerifierMock(PROGRAM_VKEY);
-        settlement = new ValidityRollupSettlement(GENESIS_ROOT, verifier, PROGRAM_VKEY);
+        settlement = new ValidityRollupSettlement(GENESIS_ROOT, verifier, PROGRAM_VKEY, L1_DEPOSIT_INBOX);
         settlement.setSequencer(SEQUENCER);
     }
 
@@ -94,6 +96,62 @@ contract ValidityRollupSettlementTest {
         assertEq(settlement.finalizedStateRoot(), GENESIS_ROOT, "root unchanged");
     }
 
+    function testProofCannotAuthorizeDifferentDepositInbox() public {
+        vm.prank(SEQUENCER);
+        vm.expectRevert(ValidityRollupSettlement.InvalidPublicValues.selector);
+        settlement.submitBatchWithProof(
+            0,
+            GENESIS_ROOT,
+            NEW_ROOT,
+            TRANSACTION_ROOT,
+            BLOCK_HASH_ROOT,
+            DATA_HASH,
+            abi.encode(
+                uint256(0),
+                GENESIS_ROOT,
+                NEW_ROOT,
+                TRANSACTION_ROOT,
+                BLOCK_HASH_ROOT,
+                DATA_HASH,
+                DEPOSIT_ROOT,
+                uint256(0),
+                uint256(0),
+                uint256(1),
+                uint256(12),
+                address(0x3333333333333333333333333333333333333333)
+            ),
+            "proof"
+        );
+    }
+
+    function testInvalidDepositRangeIsRejected() public {
+        vm.prank(SEQUENCER);
+        vm.expectRevert(ValidityRollupSettlement.InvalidPublicValues.selector);
+        settlement.submitBatchWithProof(
+            0,
+            GENESIS_ROOT,
+            NEW_ROOT,
+            TRANSACTION_ROOT,
+            BLOCK_HASH_ROOT,
+            DATA_HASH,
+            abi.encode(
+                uint256(0),
+                GENESIS_ROOT,
+                NEW_ROOT,
+                TRANSACTION_ROOT,
+                BLOCK_HASH_ROOT,
+                DATA_HASH,
+                DEPOSIT_ROOT,
+                uint256(5),
+                uint256(4),
+                uint256(1),
+                uint256(12),
+                L1_DEPOSIT_INBOX
+            ),
+            "proof"
+        );
+    }
+
     function submit(uint256 batchNumber, bytes32 prevRoot, bytes32 newRoot, bytes memory values, bytes memory proof)
         private
     {
@@ -108,8 +166,20 @@ contract ValidityRollupSettlementTest {
         pure
         returns (bytes memory)
     {
-        return
-            abi.encode(batchNumber, prevRoot, newRoot, TRANSACTION_ROOT, BLOCK_HASH_ROOT, DATA_HASH, transactionCount);
+        return abi.encode(
+            batchNumber,
+            prevRoot,
+            newRoot,
+            TRANSACTION_ROOT,
+            BLOCK_HASH_ROOT,
+            DATA_HASH,
+            DEPOSIT_ROOT,
+            uint256(0),
+            uint256(0),
+            uint256(0),
+            transactionCount,
+            L1_DEPOSIT_INBOX
+        );
     }
 
     function assertEq(uint256 actual, uint256 expected, string memory label) private pure {

@@ -3,7 +3,8 @@ use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use clap::Parser;
 use explorer_api::{
-    app_with_pool_and_tokens, initialize_genesis, sequence_pending_transactions, GenesisConfig,
+    app_with_pool_and_tokens_and_deposit_inbox, initialize_genesis, sequence_pending_transactions,
+    GenesisConfig,
 };
 use sqlx::postgres::PgPoolOptions;
 
@@ -60,10 +61,6 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(cli.bind)
         .await
         .with_context(|| format!("failed to bind explorer API to {}", cli.bind))?;
-    if cli.auto_sequence {
-        spawn_auto_sequencer(pool.clone(), cli.auto_sequence_interval_seconds);
-    }
-
     // The legacy receipt-update endpoint is disabled unless an explicit shared
     // token is configured. The automated operator indexes L1 directly.
     let settlement_token = env::var("SETTLEMENT_UPDATE_TOKEN")
@@ -73,7 +70,23 @@ async fn main() -> Result<()> {
     let l1_deposit_ingest_token = env::var("L1_DEPOSIT_INGEST_TOKEN")
         .ok()
         .filter(|value| !value.is_empty());
-    let router = app_with_pool_and_tokens(pool, settlement_token, l1_deposit_ingest_token);
+    let l1_deposit_inbox = env::var("L1_DEPOSIT_INBOX")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000".to_string());
+    if cli.auto_sequence {
+        spawn_auto_sequencer(
+            pool.clone(),
+            cli.auto_sequence_interval_seconds,
+            l1_deposit_inbox.clone(),
+        );
+    }
+    let router = app_with_pool_and_tokens_and_deposit_inbox(
+        pool,
+        settlement_token,
+        l1_deposit_ingest_token,
+        l1_deposit_inbox,
+    );
 
     println!("serving Postgres-backed rollup API");
     println!("listening on http://{}", cli.bind);
@@ -82,7 +95,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn spawn_auto_sequencer(pool: sqlx::PgPool, interval_seconds: u64) {
+fn spawn_auto_sequencer(pool: sqlx::PgPool, interval_seconds: u64, l1_deposit_inbox: String) {
     let interval = Duration::from_secs(interval_seconds.max(1));
     tokio::spawn(async move {
         println!(
@@ -92,7 +105,7 @@ fn spawn_auto_sequencer(pool: sqlx::PgPool, interval_seconds: u64) {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            match sequence_pending_transactions(pool.clone(), 100).await {
+            match sequence_pending_transactions(pool.clone(), 100, l1_deposit_inbox.clone()).await {
                 Ok(true) => println!("automatic sequencer processed pending transactions"),
                 Ok(false) => {}
                 Err(error) => eprintln!("automatic sequencing failed: {error}"),

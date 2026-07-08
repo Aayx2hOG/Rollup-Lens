@@ -8,9 +8,10 @@ const rpcUrl = process.env.EVM_RPC_URL ?? "http://127.0.0.1:8545";
 const privateKey = process.env.EVM_PRIVATE_KEY;
 const databaseUrl = process.env.DATABASE_URL;
 const directDatabaseUrl = process.env.DIRECT_DATABASE_URL ?? databaseUrl;
+const l1DepositInbox = process.env.L1_DEPOSIT_INBOX;
 
-if (!privateKey || !databaseUrl) {
-  fail("Set EVM_PRIVATE_KEY and DATABASE_URL before running this command.");
+if (!privateKey || !databaseUrl || !l1DepositInbox) {
+  fail("Set EVM_PRIVATE_KEY, DATABASE_URL, and L1_DEPOSIT_INBOX before running this command.");
 }
 
 await requireJsonRpc();
@@ -35,7 +36,7 @@ const verifier = await deploy(
 console.log("Deploying ValidityRollupSettlement...");
 const settlement = await deploy(
   "contracts/ValidityRollupSettlement.sol:ValidityRollupSettlement",
-  [genesisRoot, verifier.address, programVkey],
+  [genesisRoot, verifier.address, programVkey, l1DepositInbox],
 );
 
 console.log(`Configuring ${sequencer} as the settlement sequencer...`);
@@ -58,6 +59,7 @@ const env = [
   `SETTLEMENT_API_URL=${quote(apiUrl)}`,
   `EVM_RPC_URL=${quote(rpcUrl)}`,
   `ROLLUP_SETTLEMENT_CONTRACT=${quote(settlement.address)}`,
+  `L1_DEPOSIT_INBOX=${quote(l1DepositInbox)}`,
   `EVM_PRIVATE_KEY=${quote(privateKey)}`,
   `EVM_DEPLOYMENT_BLOCK=${settlement.blockNumber}`,
   "EVM_CONFIRMATIONS=0",

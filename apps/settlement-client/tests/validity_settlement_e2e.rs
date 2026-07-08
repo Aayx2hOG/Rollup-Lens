@@ -14,7 +14,7 @@ use std::{
 };
 
 use chain_core::{sign_transfer, Account};
-use explorer_api::{app_with_pool, initialize_genesis, GenesisConfig};
+use explorer_api::{app_with_pool_and_tokens_and_deposit_inbox, initialize_genesis, GenesisConfig};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use wallet_core::create_keypair;
@@ -25,6 +25,7 @@ const ANVIL_ADDRESS: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 const MOCK_PROGRAM_VKEY: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000007";
 const MOCK_PROOF: &str = "0x70726f6f66";
+const L1_DEPOSIT_INBOX: &str = "0x2222222222222222222222222222222222222222";
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/0001_init/migration.sql"),
@@ -35,6 +36,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/0006_l1_receipt_metadata/migration.sql"),
     include_str!("../../../prisma/migrations/0007_validity_witness/migration.sql"),
     include_str!("../../../prisma/migrations/0008_operator_and_l1_indexer/migration.sql"),
+    include_str!("../../../prisma/migrations/0009_eip712_ethereum_accounts/migration.sql"),
+    include_str!("../../../prisma/migrations/0010_l1_deposits/migration.sql"),
+    include_str!("../../../prisma/migrations/0011_deterministic_deposit_execution/migration.sql"),
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -108,8 +112,18 @@ async fn run_scenario(verifier_mode: VerifierMode) {
         .await
         .expect("bind API");
     let api_url = format!("http://{}", api_listener.local_addr().unwrap());
-    let api_task =
-        tokio::spawn(axum::serve(api_listener, app_with_pool(pool.clone())).into_future());
+    let api_task = tokio::spawn(
+        axum::serve(
+            api_listener,
+            app_with_pool_and_tokens_and_deposit_inbox(
+                pool.clone(),
+                None,
+                None,
+                L1_DEPOSIT_INBOX.to_string(),
+            ),
+        )
+        .into_future(),
+    );
 
     let client = reqwest::Client::new();
     let transfer = sign_transfer(&alice.secret_key_hex, bob_address, 25, 0).unwrap();
@@ -196,7 +210,7 @@ async fn run_scenario(verifier_mode: VerifierMode) {
         &workspace,
         &rpc_url,
         "contracts/ValidityRollupSettlement.sol:ValidityRollupSettlement",
-        &[&genesis_root, &verifier, program_vkey],
+        &[&genesis_root, &verifier, program_vkey, L1_DEPOSIT_INBOX],
     );
 
     settlement_client(
@@ -260,11 +274,20 @@ fn mock_proof_artifact(calldata: &Value, batch: &Value) -> Value {
         assert_eq!(root.len(), 64, "root must be bytes32");
         public_values.push_str(root);
     }
+    public_values.push_str(strip_hex(
+        batch["deposit_root"].as_str().expect("deposit root"),
+    ));
+    public_values.push_str(&abi_u256(batch["first_deposit_id"].as_u64().unwrap_or(0)));
+    public_values.push_str(&abi_u256(batch["last_deposit_id"].as_u64().unwrap_or(0)));
+    public_values.push_str(&abi_u256(
+        batch["deposit_count"].as_u64().expect("deposit count"),
+    ));
     public_values.push_str(&abi_u256(
         batch["transaction_count"]
             .as_u64()
             .expect("transaction count"),
     ));
+    public_values.push_str(&abi_address(L1_DEPOSIT_INBOX));
 
     json!({
         "program_vkey": MOCK_PROGRAM_VKEY,
@@ -277,9 +300,20 @@ fn mock_proof_artifact(calldata: &Value, batch: &Value) -> Value {
             "transaction_root": args[3],
             "block_hash_root": args[4],
             "data_hash": args[5],
-            "transaction_count": batch["transaction_count"]
+            "deposit_root": batch["deposit_root"],
+            "first_deposit_id": batch["first_deposit_id"],
+            "last_deposit_id": batch["last_deposit_id"],
+            "deposit_count": batch["deposit_count"],
+            "transaction_count": batch["transaction_count"],
+            "l1_deposit_inbox": L1_DEPOSIT_INBOX
         }
     })
+}
+
+fn abi_address(value: &str) -> String {
+    let address = strip_hex(value);
+    assert_eq!(address.len(), 40, "address must be 20 bytes");
+    format!("{}{}", "0".repeat(24), address)
 }
 
 fn abi_u256(value: u64) -> String {

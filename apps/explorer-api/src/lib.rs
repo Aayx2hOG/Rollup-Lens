@@ -29,6 +29,7 @@ const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 100;
 const GENESIS_INITIALIZATION_LOCK: i64 = 8_739_912_441;
 const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
+const DEFAULT_L1_DEPOSIT_INBOX: &str = "0x0000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +129,7 @@ struct AppState {
     cache: Arc<Mutex<ResponseCache>>,
     settlement_update_token: Option<String>,
     l1_deposit_ingest_token: Option<String>,
+    l1_deposit_inbox: String,
 }
 
 #[derive(Debug, Default)]
@@ -144,6 +146,7 @@ struct CacheEntry {
 #[derive(Debug, Clone)]
 struct DbSource {
     pool: PgPool,
+    l1_deposit_inbox: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -449,11 +452,26 @@ pub fn app_with_pool_and_tokens(
     settlement_update_token: Option<String>,
     l1_deposit_ingest_token: Option<String>,
 ) -> Router {
+    app_with_pool_and_tokens_and_deposit_inbox(
+        pool,
+        settlement_update_token,
+        l1_deposit_ingest_token,
+        DEFAULT_L1_DEPOSIT_INBOX.to_string(),
+    )
+}
+
+pub fn app_with_pool_and_tokens_and_deposit_inbox(
+    pool: PgPool,
+    settlement_update_token: Option<String>,
+    l1_deposit_ingest_token: Option<String>,
+    l1_deposit_inbox: String,
+) -> Router {
     let state = Arc::new(AppState {
         pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
         settlement_update_token,
         l1_deposit_ingest_token,
+        l1_deposit_inbox,
     });
 
     Router::new()
@@ -499,24 +517,32 @@ pub fn app_with_pool_and_tokens(
         .with_state(state)
 }
 
-pub async fn sequence_pending_transactions(pool: PgPool, limit: usize) -> Result<bool, String> {
-    let summary = postgres_chain_summary(&pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    if summary.pending_transaction_count == 0 {
-        return Ok(false);
+pub async fn sequence_pending_transactions(
+    pool: PgPool,
+    limit: usize,
+    l1_deposit_inbox: String,
+) -> Result<bool, String> {
+    match (DbSource {
+        pool,
+        l1_deposit_inbox,
     }
-
-    DbSource { pool }
-        .sequence_rollup_batch(limit)
-        .await
-        .map(|_| true)
-        .map_err(|error| error.to_string())
+    .sequence_rollup_batch(limit)
+    .await)
+    {
+        Ok(_) => Ok(true),
+        Err(ApiError::BadRequest(message))
+            if message == "no pending transactions or confirmed deposits to sequence" =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
     let latest_error = DbSource {
         pool: state.pool.clone(),
+        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
     }
     .latest_error()
     .await?;
@@ -677,6 +703,7 @@ async fn submit_transaction(
 ) -> Result<Json<Value>, ApiError> {
     let submitted = DbSource {
         pool: state.pool.clone(),
+        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
     }
     .submit_transaction(transaction)
     .await?;
@@ -706,6 +733,7 @@ async fn sequence_rollup_batch(
 
     let sequenced = DbSource {
         pool: state.pool.clone(),
+        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
     }
     .sequence_rollup_batch(limit)
     .await?;
@@ -822,6 +850,7 @@ async fn update_rollup_batch_settlement(
     }
     let updated = DbSource {
         pool: state.pool.clone(),
+        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
     }
     .update_rollup_batch_settlement(batch_number, update)
     .await?;
@@ -876,6 +905,7 @@ async fn observe_l1_deposit(
 
     let deposit = DbSource {
         pool: state.pool.clone(),
+        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
     }
     .observe_l1_deposit(observation)
     .await?;
@@ -927,6 +957,7 @@ where
     let value = serde_json::to_value(
         load(DbSource {
             pool: state.pool.clone(),
+            l1_deposit_inbox: state.l1_deposit_inbox.clone(),
         })
         .await?,
     )
@@ -1329,6 +1360,7 @@ impl DbSource {
             &latest_block,
             &block,
             &executable_deposits,
+            &self.l1_deposit_inbox,
         )
         .await?;
         tx.commit().await.map_err(database_error)?;
@@ -2181,6 +2213,7 @@ async fn append_rollup_batch_tx(
     previous_block: &Block,
     block: &Block,
     deposits: &[ExecutableDeposit],
+    l1_deposit_inbox: &str,
 ) -> Result<Option<RollupBatchSummary>, ApiError> {
     let next_batch_number: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(batch_number) + 1, 0) FROM rollup_batches")
@@ -2193,6 +2226,7 @@ async fn append_rollup_batch_tx(
             .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
     let witness = BatchValidityWitness {
         batch_number,
+        l1_deposit_inbox: l1_deposit_inbox.to_string(),
         accounts_before,
         previous_block: previous_block.clone(),
         blocks: vec![block.clone()],
@@ -2209,6 +2243,11 @@ async fn append_rollup_batch_tx(
     {
         return Err(ApiError::InvalidIndexedData(
             "validity witness does not match rebuilt deposit commitment".to_string(),
+        ));
+    }
+    if public_values.l1_deposit_inbox != l1_deposit_inbox {
+        return Err(ApiError::InvalidIndexedData(
+            "validity witness does not match configured L1 deposit inbox".to_string(),
         ));
     }
 

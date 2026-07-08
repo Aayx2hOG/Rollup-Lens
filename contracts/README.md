@@ -18,9 +18,10 @@ The minimal contract persists only:
 - one `batchCommitments[batchNumber]` value per batch
 
 The batch commitment is `keccak256(publicValues)`, covering the batch number,
-five roots/commitments, and transaction count proved by SP1. Full historical
-fields are emitted in `BatchFinalized` for indexers instead of occupying
-permanent storage slots.
+five roots/commitments, deposit root, processed deposit range/count,
+transaction count, and configured L1 deposit inbox proved by SP1. Full
+historical fields are emitted in `BatchFinalized` for indexers instead of
+occupying permanent storage slots.
 
 The validity-only constructor is:
 
@@ -28,7 +29,8 @@ The validity-only constructor is:
 new ValidityRollupSettlement(
     genesisStateRoot,
     officialSp1Verifier,
-    programVKey
+    programVKey,
+    l1DepositInbox
 );
 ```
 
@@ -91,8 +93,9 @@ With `--proof`, it calls `submitBatchWithProof`.
 ## Deployment
 
 Deploy the official SP1 Groth16 verifier matching the exact SP1 SDK/circuit
-version used by the prover. Pass its address and the artifact's `program_vkey`
-to the `RollupSettlement` constructor. Both values are immutable because
+version used by the prover. Pass its address, the artifact's `program_vkey`,
+and the canonical `L1_DEPOSIT_INBOX` to the `ValidityRollupSettlement`
+constructor. These values are immutable because
 silently changing either would change what computation the settlement contract
 trusts.
 

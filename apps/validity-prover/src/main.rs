@@ -170,6 +170,7 @@ mod tests {
 
         let witness = BatchValidityWitness {
             batch_number: 0,
+            l1_deposit_inbox: "0x2222222222222222222222222222222222222222".to_string(),
             accounts_before: Default::default(),
             previous_block,
             blocks: vec![block],

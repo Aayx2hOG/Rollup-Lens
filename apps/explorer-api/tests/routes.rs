@@ -12,7 +12,10 @@ use chain_core::{
     rollup_batch_commitment, sign_transfer, transaction_hash, Account, Chain,
     RollupBatchCommitment,
 };
-use explorer_api::{app_with_pool, app_with_pool_and_tokens, initialize_genesis, GenesisConfig};
+use explorer_api::{
+    app_with_pool, app_with_pool_and_tokens, app_with_pool_and_tokens_and_deposit_inbox,
+    initialize_genesis, GenesisConfig,
+};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
@@ -471,7 +474,12 @@ async fn confirmed_deposit_sequences_into_l2_state() {
     initialize_genesis(&pool, GenesisConfig { accounts: vec![] })
         .await
         .unwrap();
-    let app = app_with_pool(pool.clone());
+    let app = app_with_pool_and_tokens_and_deposit_inbox(
+        pool.clone(),
+        None,
+        None,
+        format!("0x{}", "2".repeat(40)),
+    );
     let deposit = json!({
         "chain_id": 31337,
         "inbox_address": format!("0x{}", "2".repeat(40)),

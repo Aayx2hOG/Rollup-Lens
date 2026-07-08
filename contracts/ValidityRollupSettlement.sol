@@ -24,19 +24,25 @@ contract ValidityRollupSettlement {
         bytes32 transactionRoot,
         bytes32 blockHashRoot,
         bytes32 dataHash,
+        bytes32 depositRoot,
+        uint256 firstDepositId,
+        uint256 lastDepositId,
+        uint256 depositCount,
         uint256 transactionCount,
+        address l1DepositInbox,
         bytes32 batchCommitment
     );
 
     address public immutable owner;
     ISP1Verifier public immutable sp1Verifier;
     bytes32 public immutable programVKey;
+    address public immutable l1DepositInbox;
 
     address public sequencer;
     bytes32 public finalizedStateRoot;
     uint256 public nextBatchNumber;
 
-    /// @notice keccak256 of the complete 224-byte SP1 public-values payload.
+    /// @notice keccak256 of the complete 384-byte SP1 public-values payload.
     mapping(uint256 => bytes32) public batchCommitments;
 
     modifier onlyOwner() {
@@ -49,15 +55,16 @@ contract ValidityRollupSettlement {
         _;
     }
 
-    constructor(bytes32 genesisStateRoot, ISP1Verifier sp1Verifier_, bytes32 programVKey_) {
+    constructor(bytes32 genesisStateRoot, ISP1Verifier sp1Verifier_, bytes32 programVKey_, address l1DepositInbox_) {
         if (genesisStateRoot == bytes32(0)) revert InvalidRoot();
-        if (address(sp1Verifier_) == address(0) || programVKey_ == bytes32(0)) {
+        if (address(sp1Verifier_) == address(0) || programVKey_ == bytes32(0) || l1DepositInbox_ == address(0)) {
             revert InvalidVerifier();
         }
 
         owner = msg.sender;
         sp1Verifier = sp1Verifier_;
         programVKey = programVKey_;
+        l1DepositInbox = l1DepositInbox_;
         finalizedStateRoot = genesisStateRoot;
     }
 
@@ -85,7 +92,7 @@ contract ValidityRollupSettlement {
         ) {
             revert InvalidRoot();
         }
-        if (publicValues.length != 224) revert InvalidPublicValues();
+        if (publicValues.length != 384) revert InvalidPublicValues();
         if (
             keccak256(publicValues[:192])
                 != keccak256(
@@ -94,10 +101,21 @@ contract ValidityRollupSettlement {
         ) {
             revert InvalidPublicValues();
         }
+        bytes32 depositRoot = bytes32(publicValues[192:224]);
+        uint256 firstDepositId = uint256(bytes32(publicValues[224:256]));
+        uint256 lastDepositId = uint256(bytes32(publicValues[256:288]));
+        uint256 depositCount = uint256(bytes32(publicValues[288:320]));
+        uint256 transactionCount = uint256(bytes32(publicValues[320:352]));
+        address publicInbox = address(uint160(uint256(bytes32(publicValues[352:384]))));
+        if (publicInbox != l1DepositInbox) revert InvalidPublicValues();
+        if (depositCount == 0) {
+            if (firstDepositId != 0 || lastDepositId != 0) revert InvalidPublicValues();
+        } else if (lastDepositId < firstDepositId) {
+            revert InvalidPublicValues();
+        }
 
         sp1Verifier.verifyProof(programVKey, publicValues, proof);
 
-        uint256 transactionCount = uint256(bytes32(publicValues[192:224]));
         bytes32 batchCommitment = keccak256(publicValues);
         batchCommitments[batchNumber] = batchCommitment;
         finalizedStateRoot = newStateRoot;
@@ -110,7 +128,12 @@ contract ValidityRollupSettlement {
             transactionRoot,
             blockHashRoot,
             dataHash,
+            depositRoot,
+            firstDepositId,
+            lastDepositId,
+            depositCount,
             transactionCount,
+            publicInbox,
             batchCommitment
         );
     }
