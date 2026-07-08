@@ -43,7 +43,10 @@ import {
   depositToL2,
   hasWalletProvider,
   l1DepositInboxAddress,
+  parseProofArtifact,
+  settlementContractAddress,
   signTransfer,
+  submitBatchWithProof,
 } from "./lib/wallet";
 import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
 
@@ -353,10 +356,16 @@ export function App() {
             selectedBatchNumber={selectedBatch}
             selectedBatch={rollupBatch.data}
             batchLoading={rollupBatch.isLoading}
+            wallet={walletAddress}
+            onWalletChange={setWalletAddress}
             onSelectBatch={setSelectedBatch}
             onSelectTx={(hash) => {
               setSelectedTx(hash);
               setActiveTab("Transactions");
+            }}
+            onSubmitted={async () => {
+              await queryClient.invalidateQueries({ queryKey: ["rollup-batches"] });
+              await queryClient.invalidateQueries({ queryKey: ["rollup-batch", selectedBatch] });
             }}
           />
         </div>
@@ -414,10 +423,11 @@ export function App() {
             icon={<Send className="h-5 w-5" />}
             title="Operate"
             description="Advanced controls for sequencing, queue inspection, and service health."
-            meta={pluralize(summary.data?.pending_transaction_count ?? 0, "pending transfer")}
+            meta={`${pluralize(summary.data?.pending_transaction_count ?? 0, "pending transfer")} / ${pluralize(confirmedDepositCount(l1Deposits.data?.items ?? []), "confirmed deposit")}`}
           />
           <SequencerView
             pool={transactionPool.data?.items ?? []}
+            deposits={l1Deposits.data?.items ?? []}
             errors={errors.data ?? []}
             onRefresh={refreshAll}
             onOpenTransaction={(hash) => {
@@ -1303,6 +1313,7 @@ function SendTransferView({
 
 function SequencerView({
   pool,
+  deposits,
   errors,
   onRefresh,
   onOpenTransaction,
@@ -1310,6 +1321,7 @@ function SequencerView({
   onSequenced,
 }: {
   pool: TransactionPoolEntry[];
+  deposits: L1Deposit[];
   errors: Array<{ id: number; severity: string; message: string; service: string; created_at: string; resolved_at: string | null }>;
   onRefresh: () => Promise<void>;
   onOpenTransaction: (hash: string) => void;
@@ -1323,6 +1335,8 @@ function SequencerView({
   const [sequencing, setSequencing] = useState(false);
   const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
   const pendingTotal = pool.filter((entry) => entry.status === "pending").length;
+  const confirmedDeposits = deposits.filter((deposit) => deposit.status === "confirmed").length;
+  const sequenceableTotal = pendingTotal + confirmedDeposits;
   const pendingEntries = pool.filter((entry) => entry.status === "pending");
   const recentIncluded = pool.filter((entry) => entry.status === "included").slice(0, 5);
   async function submitTransfer() {
@@ -1348,7 +1362,7 @@ function SequencerView({
       const result = await api.sequenceBatch(limit);
       setNotice({
         tone: "good",
-        message: `Built activity group ${result.block.height} with ${pluralize(result.included_transactions.length, "transfer")}.`,
+        message: `Built activity group ${result.block.height} with ${pluralize(result.included_transactions.length, "transfer")} and ${pluralize(result.included_deposits.length, "deposit")}.`,
       });
       await onSequenced(result.block.height);
     } catch (error) {
@@ -1397,11 +1411,11 @@ function SequencerView({
           <SectionTitle
             icon={<Play className="h-4 w-4" />}
             title="Build the next L2 block"
-            action={pluralize(pendingTotal, "pending transfer")}
+            action={`${pluralize(pendingTotal, "pending transfer")} / ${pluralize(confirmedDeposits, "confirmed deposit")}`}
             flush
           />
           <p className="mt-2 text-sm leading-6 text-white/48">
-            Sequence pending transfers into a new block. Submit a transfer first when the queue is empty.
+            Sequence pending transfers and confirmed L1 deposits into the next block.
           </p>
           <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
             <label className="grid gap-2 text-sm text-white/62">
@@ -1417,7 +1431,7 @@ function SequencerView({
             </label>
             <button
               onClick={sequenceBatch}
-              disabled={sequencing || pendingTotal === 0}
+              disabled={sequencing || sequenceableTotal === 0}
               className="self-end inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan px-3 text-sm font-semibold text-ink transition hover:bg-cyan/90 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
             >
               <Play className="h-4 w-4" />
@@ -1425,7 +1439,9 @@ function SequencerView({
             </button>
           </div>
           {pendingTotal === 0 && (
-            <div className="mt-3 text-xs text-white/40">Waiting for a submitted transfer.</div>
+            <div className="mt-3 text-xs text-white/40">
+              {confirmedDeposits > 0 ? "Confirmed deposits are ready to sequence." : "Waiting for a submitted transfer or confirmed deposit."}
+            </div>
           )}
         </Panel>
 
@@ -1852,16 +1868,22 @@ function RollupView({
   selectedBatchNumber,
   selectedBatch,
   batchLoading,
+  wallet,
+  onWalletChange,
   onSelectBatch,
   onSelectTx,
+  onSubmitted,
 }: {
   batches: RollupBatchSummary[];
   batchTotal: number;
   selectedBatchNumber: number | null;
   selectedBatch?: RollupBatch;
   batchLoading: boolean;
+  wallet: string | null;
+  onWalletChange: (wallet: string | null) => void;
   onSelectBatch: (batchNumber: number) => void;
   onSelectTx: (hash: string) => void;
+  onSubmitted: () => Promise<void>;
 }) {
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[24rem_1fr]">
@@ -1944,7 +1966,12 @@ function RollupView({
               <HashLine label="Batch data hash" value={selectedBatch.data_hash} />
             </div>
             {selectedBatch.status === "built" ? (
-              <SettlementNextStep batchNumber={selectedBatch.batch_number} />
+              <SettlementNextStep
+                batch={selectedBatch}
+                wallet={wallet}
+                onWalletChange={onWalletChange}
+                onSubmitted={onSubmitted}
+              />
             ) : (
               <>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -2064,39 +2091,149 @@ function SettlementProgress({ batch }: { batch: RollupBatchSummary }) {
   );
 }
 
-function SettlementNextStep({ batchNumber }: { batchNumber: number }) {
-  const witnessUrl = `${API_BASE}/rollup/batches/${batchNumber}/validity-witness`;
-  const calldataUrl = `${API_BASE}/rollup/batches/${batchNumber}/settlement-calldata`;
+function SettlementNextStep({
+  batch,
+  wallet,
+  onWalletChange,
+  onSubmitted,
+}: {
+  batch: RollupBatchSummary;
+  wallet: string | null;
+  onWalletChange: (wallet: string | null) => void;
+  onSubmitted: () => Promise<void>;
+}) {
+  const [artifactText, setArtifactText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
+  const witnessUrl = `${API_BASE}/rollup/batches/${batch.batch_number}/validity-witness`;
+  const calldataUrl = `${API_BASE}/rollup/batches/${batch.batch_number}/settlement-calldata`;
+  const canSubmit = Boolean(wallet && settlementContractAddress && artifactText.trim().length > 0);
+
+  async function connectForSettlement() {
+    setNotice(null);
+    try {
+      onWalletChange(await connectWallet());
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet connection failed" });
+    }
+  }
+
+  async function loadArtifact(file: File | undefined) {
+    if (!file) return;
+    setArtifactText(await file.text());
+    setNotice({ tone: "neutral", message: `${file.name} loaded. Review it, then submit the proof transaction.` });
+  }
+
+  async function submitProof() {
+    if (!wallet) return;
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const artifact = parseProofArtifact(artifactText);
+      const txHash = await submitBatchWithProof(wallet, batch, artifact);
+      setNotice({ tone: "good", message: `Proof transaction sent: ${shortHash(txHash, 12, 10)}.` });
+      await onSubmitted();
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Proof submission failed" });
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <div className="rounded-lg border border-amber/25 bg-amber/10 p-4">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <div className="text-sm font-semibold text-amber">Next: prove and submit this batch</div>
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-white/58">
-            Export the witness for the prover, then use the generated settlement calldata when submitting the proof to L1.
-          </p>
+      <div className="grid gap-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="text-sm font-semibold text-amber">Next: submit the validity proof</div>
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-white/58">
+              Generate the proof from this package's witness, then load the artifact here to submit it from your wallet.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <a
+              href={witnessUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open witness
+            </a>
+            <a
+              href={calldataUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open calldata
+            </a>
+          </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <a
-            href={witnessUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint"
-          >
-            <ExternalLink className="h-4 w-4" />
-            Open witness
-          </a>
-          <a
-            href={calldataUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-amber px-3 text-sm font-semibold text-ink hover:bg-amber/90"
-          >
-            <ExternalLink className="h-4 w-4" />
-            Open calldata
-          </a>
+
+        <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
+          <label className="grid gap-2 text-sm text-white/62">
+            Proof artifact JSON
+            <textarea
+              value={artifactText}
+              onChange={(event) => setArtifactText(event.target.value)}
+              placeholder='{"public_values":"0x...","proof":"0x..."}'
+              className="min-h-32 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-xs leading-5 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
+            />
+          </label>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+            <label className="inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 transition hover:border-mint/30 hover:text-mint">
+              <Upload className="h-4 w-4" />
+              Load artifact
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(event) => void loadArtifact(event.target.files?.[0])}
+              />
+            </label>
+            {!wallet ? (
+              <button
+                onClick={connectForSettlement}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90"
+              >
+                <Wallet className="h-4 w-4" />
+                Connect wallet
+              </button>
+            ) : (
+              <button
+                onClick={submitProof}
+                disabled={submitting || !canSubmit}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-amber px-3 text-sm font-semibold text-ink transition hover:bg-amber/90 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
+              >
+                <ShieldAlert className="h-4 w-4" />
+                {submitting ? "Submitting" : "Submit proof"}
+              </button>
+            )}
+          </div>
         </div>
+
+        <div className="grid grid-cols-1 gap-3 text-xs text-white/46 md:grid-cols-3">
+          <span>{settlementContractAddress ? `contract ${shortHash(settlementContractAddress, 8, 6)}` : "set VITE_ROLLUP_SETTLEMENT_CONTRACT"}</span>
+          <span>{wallet ? `wallet ${shortHash(wallet, 8, 6)}` : "wallet not connected"}</span>
+          <span>{artifactText.trim() ? "artifact loaded" : "waiting for proof artifact"}</span>
+        </div>
+
+        {notice && (
+          <div
+            className={cn(
+              "rounded-lg border px-3 py-2 text-sm font-medium",
+              notice.tone === "bad"
+                ? "border-rose/25 bg-rose/10 text-rose"
+                : notice.tone === "good"
+                  ? "border-mint/25 bg-mint/10 text-mint"
+                  : "border-white/10 bg-white/[0.05] text-white/64",
+            )}
+          >
+            {notice.message}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2226,6 +2363,10 @@ function batchForDeposit(deposit: L1Deposit, batches: RollupBatchSummary[]) {
     if (batch.first_deposit_id === null || batch.last_deposit_id === null) return false;
     return deposit.deposit_id >= batch.first_deposit_id && deposit.deposit_id <= batch.last_deposit_id;
   });
+}
+
+function confirmedDepositCount(deposits: L1Deposit[]) {
+  return deposits.filter((deposit) => deposit.status === "confirmed").length;
 }
 
 function formatDepositRange(batch?: RollupBatchSummary | null) {

@@ -466,6 +466,7 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox(
     l1_deposit_ingest_token: Option<String>,
     l1_deposit_inbox: String,
 ) -> Router {
+    let l1_deposit_inbox = l1_deposit_inbox.to_ascii_lowercase();
     let state = Arc::new(AppState {
         pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
@@ -1244,7 +1245,8 @@ impl DbSource {
         .await
         .map_err(database_error)?;
 
-        let executable_deposits = load_executable_deposits_tx(&mut tx, limit).await?;
+        let executable_deposits =
+            load_executable_deposits_tx(&mut tx, limit, &self.l1_deposit_inbox).await?;
 
         if pending_rows.is_empty() && executable_deposits.is_empty() {
             return Err(ApiError::BadRequest(
@@ -2342,12 +2344,20 @@ async fn append_rollup_batch_tx(
 async fn load_executable_deposits_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     limit: usize,
+    l1_deposit_inbox: &str,
 ) -> Result<Vec<ExecutableDeposit>, ApiError> {
-    let next_deposit_id: i64 =
-        sqlx::query_scalar("SELECT COALESCE(MAX(deposit_id) + 1, 0) FROM rollup_batch_deposits")
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(database_error)?;
+    let next_deposit_id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(MAX(rbd.deposit_id) + 1, 0)
+        FROM rollup_batch_deposits rbd
+        JOIN l1_deposits deposit ON deposit.id = rbd.deposit_row_id
+        WHERE lower(deposit.inbox_address) = lower($1)
+        "#,
+    )
+    .bind(l1_deposit_inbox)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(database_error)?;
     let rows = sqlx::query(
         r#"
         SELECT
@@ -2369,16 +2379,18 @@ async fn load_executable_deposits_tx(
             updated_at::text AS updated_at
         FROM l1_deposits
         WHERE status = 'confirmed'
-          AND deposit_id >= $1
+          AND lower(inbox_address) = lower($1)
+          AND deposit_id >= $2
           AND NOT EXISTS (
               SELECT 1 FROM rollup_batch_deposits rbd
               WHERE rbd.deposit_row_id = l1_deposits.id
           )
         ORDER BY deposit_id ASC
-        LIMIT $2
+        LIMIT $3
         FOR UPDATE SKIP LOCKED
         "#,
     )
+    .bind(l1_deposit_inbox)
     .bind(next_deposit_id)
     .bind(to_i64_from_usize(limit, "deposit sequence limit")?)
     .fetch_all(&mut **tx)

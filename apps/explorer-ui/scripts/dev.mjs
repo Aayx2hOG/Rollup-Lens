@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -7,6 +8,15 @@ const repositoryRoot = path.resolve(uiRoot, "../..");
 const apiHealthUrl = "http://127.0.0.1:3000/health";
 const children = new Set();
 let shuttingDown = false;
+
+loadLocalEnv(path.resolve(repositoryRoot, "local_testing/state.env"));
+loadLocalEnv(path.resolve(repositoryRoot, ".env.operator.local"));
+if (!process.env.VITE_L1_DEPOSIT_INBOX && process.env.L1_DEPOSIT_INBOX) {
+  process.env.VITE_L1_DEPOSIT_INBOX = process.env.L1_DEPOSIT_INBOX;
+}
+if (!process.env.VITE_ROLLUP_SETTLEMENT_CONTRACT && process.env.ROLLUP_SETTLEMENT_CONTRACT) {
+  process.env.VITE_ROLLUP_SETTLEMENT_CONTRACT = process.env.ROLLUP_SETTLEMENT_CONTRACT;
+}
 
 function start(command, args, cwd) {
   const child = spawn(command, args, {
@@ -18,6 +28,30 @@ function start(command, args, cwd) {
   children.add(child);
   child.once("exit", () => children.delete(child));
   return child;
+}
+
+function loadLocalEnv(filePath) {
+  if (!existsSync(filePath)) return;
+  const content = readFileSync(filePath, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator === -1) continue;
+    const key = trimmed.slice(0, separator).trim();
+    if (!/^[A-Z0-9_]+$/.test(key) || process.env[key]) continue;
+    process.env[key] = unquoteEnvValue(trimmed.slice(separator + 1).trim());
+  }
+}
+
+function unquoteEnvValue(value) {
+  if (
+    (value.startsWith("'") && value.endsWith("'"))
+    || (value.startsWith('"') && value.endsWith('"'))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 function stop(child) {
@@ -67,9 +101,12 @@ let apiProcess;
 try {
   if (process.env.VITE_EXPLORER_API_BASE) {
     console.log("Using the API configured by VITE_EXPLORER_API_BASE.");
-  } else if (await apiIsReady()) {
-    console.log("Using the Explorer API already running on 127.0.0.1:3000.");
   } else {
+    if (await apiIsReady()) {
+      throw new Error(
+        "Explorer API is already running on 127.0.0.1:3000. Stop that process, then run `bun run dev` again.",
+      );
+    }
     console.log("Starting the Explorer API...");
     apiProcess = start(
       "cargo",

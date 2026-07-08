@@ -176,7 +176,7 @@ file or database.
 Run the Postgres-backed API:
 
 ```bash
-bun run api:dev
+cargo run -p explorer-api -- --bind 127.0.0.1:3000 --auto-sequence
 ```
 
 You can also pass the database URL explicitly:
@@ -273,31 +273,23 @@ creates a fresh settlement chain and replaces the local operator configuration.
 
 ## Explorer UI
 
-Run the UI:
+From the repository root, start the complete local application:
+
+```bash
+bun run dev
+```
+
+This starts the Explorer API automatically, waits for its health endpoint,
+and then starts Vite. `Ctrl+C` stops both.
+
+You can run the same integrated launcher from `apps/explorer-ui` when you are
+already working in that folder:
 
 ```bash
 cd apps/explorer-ui
 bun install
 bun run dev
 ```
-
-From the repository root, the same UI command is also available as:
-
-```bash
-bun run ui:dev
-```
-
-For day-to-day development after the database is configured and migrations are
-applied, start the complete application:
-
-```bash
-bun run dev
-```
-
-The UI launcher starts the API automatically, waits for its health endpoint,
-and then starts Vite. `Ctrl+C` stops both. The same integrated command is
-available inside `apps/explorer-ui` as `bun run dev`, so a separate backend
-terminal is not required.
 
 Vite proxies `/api/*` to `http://127.0.0.1:3000` during development. The UI
 includes overview, block, account, rollup batch, sequencer, and API health

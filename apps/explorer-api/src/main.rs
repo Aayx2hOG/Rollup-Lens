@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
     let l1_deposit_inbox = env::var("L1_DEPOSIT_INBOX")
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000".to_string());
+        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000".to_string())
+        .to_ascii_lowercase();
     if cli.auto_sequence {
         spawn_auto_sequencer(
             pool.clone(),

@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "dev": "bun scripts/dev.mjs",
-    "dev:ui-only": "vite --host 0.0.0.0",
     "build": "bunx tsc && bunx vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "bun test"

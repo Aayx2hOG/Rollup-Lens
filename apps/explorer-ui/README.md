@@ -32,6 +32,13 @@ point the UI at another API:
 VITE_EXPLORER_API_BASE=http://127.0.0.1:3000 bun run dev
 ```
 
+To submit validity proofs from the Settlement tab, also expose the deployed L1
+contracts to Vite:
+
+```bash
+VITE_L1_DEPOSIT_INBOX=0x... VITE_ROLLUP_SETTLEMENT_CONTRACT=0x... bun run dev
+```
+
 ## Checks
 
 ```bash

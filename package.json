@@ -7,12 +7,10 @@
     "db:migrate:neon": "bun scripts/migrate-deploy.mjs --neon",
     "db:status": "bunx prisma migrate status --schema prisma/schema.prisma",
     "genesis:init": "cargo run -p explorer-api -- --initialize-genesis genesis.json",
-    "api:dev": "cargo run -p explorer-api -- --bind 127.0.0.1:3000 --auto-sequence",
     "operator:dev": "cargo run -p operator",
     "settlement:deploy:local": "bun scripts/deploy-local-settlement.mjs",
     "operator:local": "bun --env-file=.env.operator.local run operator:dev",
-    "ui:dev": "bun run --cwd apps/explorer-ui dev",
-    "dev": "bun run ui:dev"
+    "dev": "bun run --cwd apps/explorer-ui dev"
   },
   "dependencies": {
     "@prisma/client": "^7.8.0"

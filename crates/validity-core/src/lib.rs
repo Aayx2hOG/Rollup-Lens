@@ -115,7 +115,10 @@ pub fn verify_batch_witness(
         let mut changed_addresses = BTreeSet::new();
         validate_deposit_sequence(&block.deposits).map_err(invalid_batch)?;
         for deposit in &block.deposits {
-            if deposit.inbox_address != witness.l1_deposit_inbox {
+            if !deposit
+                .inbox_address
+                .eq_ignore_ascii_case(&witness.l1_deposit_inbox)
+            {
                 return Err(ValidityError::InvalidBatch(format!(
                     "deposit {} came from unexpected inbox",
                     deposit.deposit_id
