@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chain_core::{
-    account_state_value, apply_transaction_to_state, rollup_batch_commitment_from_blocks, Account,
-    Block, ChainError, RollupBatchCommitment,
+    account_state_value, apply_deposit_to_state, apply_transaction_to_state,
+    rollup_batch_commitment_from_blocks, validate_deposit_sequence, Account, Block, ChainError,
+    RollupBatchCommitment,
 };
 use merkle_core::SparseMerkleTree;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,14 @@ pub struct BatchValidityPublicValues {
     pub block_hash_root: String,
     pub data_hash: String,
     pub transaction_count: usize,
+    #[serde(default)]
+    pub deposit_count: usize,
+    #[serde(default)]
+    pub deposit_root: String,
+    #[serde(default)]
+    pub first_deposit_id: Option<u64>,
+    #[serde(default)]
+    pub last_deposit_id: Option<u64>,
 }
 
 pub const EVM_PUBLIC_VALUES_LENGTH: usize = 7 * 32;
@@ -91,6 +100,11 @@ pub fn verify_batch_witness(
     let mut accounts = witness.accounts_before.clone();
     for block in &witness.blocks {
         let mut changed_addresses = BTreeSet::new();
+        validate_deposit_sequence(&block.deposits).map_err(invalid_batch)?;
+        for deposit in &block.deposits {
+            apply_deposit_to_state(&mut accounts, deposit).map_err(invalid_batch)?;
+            changed_addresses.insert(deposit.recipient_l2_address.as_str());
+        }
         for transaction in &block.transactions {
             apply_transaction_to_state(&mut accounts, transaction).map_err(invalid_batch)?;
             changed_addresses.insert(transaction.from.as_str());
@@ -121,6 +135,10 @@ fn public_values(commitment: RollupBatchCommitment) -> BatchValidityPublicValues
         block_hash_root: commitment.block_hash_root,
         data_hash: commitment.data_hash,
         transaction_count: commitment.transaction_count,
+        deposit_count: commitment.deposit_count,
+        deposit_root: commitment.deposit_root,
+        first_deposit_id: commitment.first_deposit_id,
+        last_deposit_id: commitment.last_deposit_id,
     }
 }
 
@@ -146,7 +164,8 @@ fn decode_root(value: &str) -> Result<[u8; 32], ValidityError> {
 #[cfg(test)]
 mod tests {
     use chain_core::{
-        add_pending_transaction, finalize_genesis, new_chain, produce_block, sign_transfer, Account,
+        finalize_genesis, new_chain, produce_block_from_indexed_state_with_deposits, sign_transfer,
+        Account, L1Deposit,
     };
     use wallet_core::create_keypair;
 
@@ -170,8 +189,14 @@ mod tests {
         let mut chain = new_chain(genesis_accounts).unwrap();
         let previous_block = finalize_genesis(&mut chain).unwrap();
         let transfer = sign_transfer(&alice.secret_key_hex, bob_address, 40, 0).unwrap();
-        add_pending_transaction(&mut chain, transfer).unwrap();
-        let block = produce_block(&mut chain).unwrap();
+        let mut accounts = chain.accounts.clone();
+        let block = produce_block_from_indexed_state_with_deposits(
+            &mut accounts,
+            &previous_block,
+            Vec::new(),
+            vec![transfer],
+        )
+        .unwrap();
 
         let values = verify_batch_witness(&BatchValidityWitness {
             batch_number: 0,
@@ -184,6 +209,45 @@ mod tests {
         assert_eq!(values.prev_state_root, previous_block.state_root);
         assert_eq!(values.new_state_root, block.state_root);
         assert_eq!(values.transaction_count, 1);
+    }
+
+    #[test]
+    fn verifies_deposit_credits_inside_the_witness() {
+        let alice = create_keypair();
+        let alice_address = alice.address.clone();
+        let accounts_before = BTreeMap::new();
+        let mut chain = new_chain(Vec::new()).unwrap();
+        let previous_block = finalize_genesis(&mut chain).unwrap();
+        let deposit = L1Deposit {
+            chain_id: 31337,
+            inbox_address: "0x2222222222222222222222222222222222222222".to_owned(),
+            deposit_id: 0,
+            depositor_l1_address: "0x3333333333333333333333333333333333333333".to_owned(),
+            recipient_l2_address: alice_address,
+            amount: 25,
+            rolling_commitment: format!("0x{}", "4".repeat(64)),
+        };
+        let mut accounts = BTreeMap::new();
+        let block = produce_block_from_indexed_state_with_deposits(
+            &mut accounts,
+            &previous_block,
+            vec![deposit],
+            Vec::new(),
+        )
+        .unwrap();
+
+        let values = verify_batch_witness(&BatchValidityWitness {
+            batch_number: 0,
+            accounts_before,
+            previous_block: previous_block.clone(),
+            blocks: vec![block.clone()],
+        })
+        .unwrap();
+
+        assert_eq!(values.new_state_root, block.state_root);
+        assert_eq!(values.deposit_count, 1);
+        assert_eq!(values.first_deposit_id, Some(0));
+        assert_eq!(values.last_deposit_id, Some(0));
     }
 
     #[test]
@@ -225,6 +289,10 @@ mod tests {
             block_hash_root: "44".repeat(32),
             data_hash: "55".repeat(32),
             transaction_count: 9,
+            deposit_count: 0,
+            deposit_root: "00".repeat(32),
+            first_deposit_id: None,
+            last_deposit_id: None,
         };
 
         let encoded = values.encode_evm().unwrap();

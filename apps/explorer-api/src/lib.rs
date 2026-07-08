@@ -14,9 +14,9 @@ use axum::{
     Json, Router,
 };
 use chain_core::{
-    apply_transaction_to_state, finalize_genesis, new_chain, produce_block_from_indexed_state,
-    rollup_batch_commitment_from_blocks, state_root, transaction_hash, Account, Block,
-    RollupBatchCommitment, Transfer,
+    apply_transaction_to_state, finalize_genesis, new_chain,
+    produce_block_from_indexed_state_with_deposits, rollup_batch_commitment_from_blocks,
+    state_root, transaction_hash, Account, Block, L1Deposit, RollupBatchCommitment, Transfer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -291,6 +291,7 @@ struct SubmittedTransaction {
 struct SequencedBatch {
     block: BlockView,
     rollup_batch: Option<RollupBatchSummary>,
+    included_deposits: Vec<L1DepositView>,
     included_transactions: Vec<TransactionPoolEntryView>,
     failed_transactions: Vec<TransactionPoolEntryView>,
 }
@@ -299,6 +300,7 @@ struct SequencedBatch {
 struct BlockView {
     height: u64,
     parent_hash: String,
+    deposits: Vec<L1Deposit>,
     transactions: Vec<Transfer>,
     state_root: String,
     block_hash: String,
@@ -327,6 +329,10 @@ struct RollupBatchSummary {
     block_hash_root: String,
     data_hash: String,
     transaction_count: usize,
+    deposit_count: usize,
+    deposit_root: String,
+    first_deposit_id: Option<u64>,
+    last_deposit_id: Option<u64>,
     status: String,
     l1_chain_id: Option<u64>,
     l1_contract_address: Option<String>,
@@ -349,7 +355,7 @@ struct RollupBatchView {
     transactions: Vec<TransactionView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct L1DepositView {
     id: u64,
     chain_id: u64,
@@ -367,6 +373,13 @@ struct L1DepositView {
     confirmations: u32,
     observed_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutableDeposit {
+    row_id: u64,
+    deposit: L1Deposit,
+    view: L1DepositView,
 }
 
 #[derive(Debug, Serialize)]
@@ -1200,9 +1213,11 @@ impl DbSource {
         .await
         .map_err(database_error)?;
 
-        if pending_rows.is_empty() {
+        let executable_deposits = load_executable_deposits_tx(&mut tx, limit).await?;
+
+        if pending_rows.is_empty() && executable_deposits.is_empty() {
             return Err(ApiError::BadRequest(
-                "no pending transactions to sequence".to_string(),
+                "no pending transactions or confirmed deposits to sequence".to_string(),
             ));
         }
 
@@ -1235,20 +1250,29 @@ impl DbSource {
             .map_err(database_error)?;
         }
 
-        if accepted.is_empty() {
+        if accepted.is_empty() && executable_deposits.is_empty() {
             tx.commit().await.map_err(database_error)?;
             return Err(ApiError::BadRequest(
                 "all pending transactions failed validation".to_string(),
             ));
         }
 
+        let deposits = executable_deposits
+            .iter()
+            .map(|deposit| deposit.deposit.clone())
+            .collect::<Vec<_>>();
         let transactions = accepted
             .iter()
             .map(|entry| entry.transfer.clone())
             .collect::<Vec<_>>();
         let accounts_before = accounts.clone();
-        let block = produce_block_from_indexed_state(&mut accounts, &latest_block, transactions)
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        let block = produce_block_from_indexed_state_with_deposits(
+            &mut accounts,
+            &latest_block,
+            deposits,
+            transactions,
+        )
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
 
         insert_block_tx(&mut tx, &block).await?;
         for (transaction_index, transaction) in block.transactions.iter().enumerate() {
@@ -1299,10 +1323,23 @@ impl DbSource {
             .map_err(database_error)?;
         }
 
-        let rollup_batch =
-            append_rollup_batch_tx(&mut tx, accounts_before, &latest_block, &block).await?;
+        let rollup_batch = append_rollup_batch_tx(
+            &mut tx,
+            accounts_before,
+            &latest_block,
+            &block,
+            &executable_deposits,
+        )
+        .await?;
         tx.commit().await.map_err(database_error)?;
 
+        let included_deposits = executable_deposits
+            .into_iter()
+            .map(|mut deposit| {
+                deposit.view.status = "executed".to_string();
+                deposit.view
+            })
+            .collect();
         let included_transactions = accepted
             .into_iter()
             .enumerate()
@@ -1319,6 +1356,7 @@ impl DbSource {
         Ok(SequencedBatch {
             block: block_view(&block),
             rollup_batch,
+            included_deposits,
             included_transactions,
             failed_transactions,
         })
@@ -1388,6 +1426,10 @@ impl DbSource {
                 block_hash_root,
                 data_hash,
                 transaction_count,
+                deposit_count,
+                deposit_root,
+                first_deposit_id,
+                last_deposit_id,
                 status,
                 l1_chain_id,
                 l1_contract_address,
@@ -1439,6 +1481,10 @@ impl DbSource {
                 block_hash_root,
                 data_hash,
                 transaction_count,
+                deposit_count,
+                deposit_root,
+                first_deposit_id,
+                last_deposit_id,
                 status,
                 l1_chain_id,
                 l1_contract_address,
@@ -1736,6 +1782,10 @@ impl DbSource {
                         block_hash_root,
                         data_hash,
                         transaction_count,
+                        deposit_count,
+                        deposit_root,
+                        first_deposit_id,
+                        last_deposit_id,
                         status,
                         l1_chain_id,
                         l1_contract_address,
@@ -1824,6 +1874,10 @@ impl DbSource {
                             block_hash_root,
                             data_hash,
                             transaction_count,
+                            deposit_count,
+                            deposit_root,
+                            first_deposit_id,
+                            last_deposit_id,
                             status,
                             l1_chain_id,
                             l1_contract_address,
@@ -2126,6 +2180,7 @@ async fn append_rollup_batch_tx(
     accounts_before: BTreeMap<String, Account>,
     previous_block: &Block,
     block: &Block,
+    deposits: &[ExecutableDeposit],
 ) -> Result<Option<RollupBatchSummary>, ApiError> {
     let next_batch_number: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(batch_number) + 1, 0) FROM rollup_batches")
@@ -2149,8 +2204,47 @@ async fn append_rollup_batch_tx(
             "validity witness does not match rebuilt batch commitment".to_string(),
         ));
     }
+    if public_values.deposit_count != commitment.deposit_count
+        || public_values.deposit_root != commitment.deposit_root
+    {
+        return Err(ApiError::InvalidIndexedData(
+            "validity witness does not match rebuilt deposit commitment".to_string(),
+        ));
+    }
 
     insert_rollup_batch_tx(tx, &commitment, "built", &witness).await?;
+    for (deposit_index, deposit) in deposits.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO rollup_batch_deposits (
+                batch_number, deposit_row_id, deposit_id, deposit_index
+            )
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(to_i64(commitment.batch_number, "rollup batch number")?)
+        .bind(to_i64(deposit.row_id, "L1 deposit row id")?)
+        .bind(to_i64(deposit.deposit.deposit_id, "L1 deposit id")?)
+        .bind(to_i32_from_usize(
+            deposit_index,
+            "rollup batch deposit index",
+        )?)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+
+        sqlx::query(
+            r#"
+            UPDATE l1_deposits
+            SET status = 'executed', updated_at = now()
+            WHERE id = $1 AND status = 'confirmed'
+            "#,
+        )
+        .bind(to_i64(deposit.row_id, "L1 deposit row id")?)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    }
     for (transaction_index, transaction) in block.transactions.iter().enumerate() {
         let hash = transaction_hash(transaction);
         sqlx::query(
@@ -2186,6 +2280,10 @@ async fn append_rollup_batch_tx(
         block_hash_root: commitment.block_hash_root,
         data_hash: commitment.data_hash,
         transaction_count: commitment.transaction_count,
+        deposit_count: commitment.deposit_count,
+        deposit_root: commitment.deposit_root,
+        first_deposit_id: commitment.first_deposit_id,
+        last_deposit_id: commitment.last_deposit_id,
         status: "built".to_string(),
         l1_chain_id: None,
         l1_contract_address: None,
@@ -2200,6 +2298,65 @@ async fn append_rollup_batch_tx(
         l1_finalize_gas_used: None,
         l1_finalize_receipt: None,
     }))
+}
+
+async fn load_executable_deposits_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    limit: usize,
+) -> Result<Vec<ExecutableDeposit>, ApiError> {
+    let next_deposit_id: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(deposit_id) + 1, 0) FROM rollup_batch_deposits")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            chain_id,
+            inbox_address,
+            deposit_id,
+            l1_tx_hash,
+            l1_block_number,
+            l1_block_hash,
+            l1_log_index,
+            depositor_l1_address,
+            recipient_l2_address,
+            amount,
+            rolling_commitment,
+            status,
+            confirmations,
+            observed_at::text AS observed_at,
+            updated_at::text AS updated_at
+        FROM l1_deposits
+        WHERE status = 'confirmed'
+          AND deposit_id >= $1
+          AND NOT EXISTS (
+              SELECT 1 FROM rollup_batch_deposits rbd
+              WHERE rbd.deposit_row_id = l1_deposits.id
+          )
+        ORDER BY deposit_id ASC
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+        "#,
+    )
+    .bind(next_deposit_id)
+    .bind(to_i64_from_usize(limit, "deposit sequence limit")?)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+
+    let mut deposits = Vec::new();
+    let mut expected = from_i64(next_deposit_id, "next deposit id")?;
+    for row in rows {
+        let view = l1_deposit_from_row(row)?;
+        if view.deposit_id != expected {
+            break;
+        }
+        deposits.push(executable_deposit_from_view(view)?);
+        expected += 1;
+    }
+    Ok(deposits)
 }
 
 async fn insert_rollup_batch_tx(
@@ -2220,11 +2377,15 @@ async fn insert_rollup_batch_tx(
             block_hash_root,
             data_hash,
             transaction_count,
+            deposit_count,
+            deposit_root,
+            first_deposit_id,
+            last_deposit_id,
             status,
             raw_commitment,
             validity_witness
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#,
     )
     .bind(to_i64(commitment.batch_number, "rollup batch number")?)
@@ -2245,6 +2406,23 @@ async fn insert_rollup_batch_tx(
         commitment.transaction_count,
         "rollup batch transaction count",
     )?)
+    .bind(to_i32_from_usize(
+        commitment.deposit_count,
+        "rollup batch deposit count",
+    )?)
+    .bind(&commitment.deposit_root)
+    .bind(
+        commitment
+            .first_deposit_id
+            .map(|deposit_id| to_i64(deposit_id, "first deposit id"))
+            .transpose()?,
+    )
+    .bind(
+        commitment
+            .last_deposit_id
+            .map(|deposit_id| to_i64(deposit_id, "last deposit id"))
+            .transpose()?,
+    )
     .bind(status)
     .bind(
         serde_json::to_value(commitment)
@@ -2295,6 +2473,7 @@ fn block_view(block: &Block) -> BlockView {
     BlockView {
         height: block.height,
         parent_hash: block.parent_hash.clone(),
+        deposits: block.deposits.clone(),
         transactions: block.transactions.clone(),
         state_root: block.state_root.clone(),
         block_hash: block.block_hash.clone(),
@@ -2392,6 +2571,16 @@ fn rollup_batch_summary_from_row(
         block_hash_root: row.get("block_hash_root"),
         data_hash: row.get("data_hash"),
         transaction_count: usize_from_i32(row.get("transaction_count"), "transaction count")?,
+        deposit_count: usize_from_i32(row.get("deposit_count"), "deposit count")?,
+        deposit_root: row.get("deposit_root"),
+        first_deposit_id: row
+            .get::<Option<i64>, _>("first_deposit_id")
+            .map(|deposit_id| from_i64(deposit_id, "first deposit id"))
+            .transpose()?,
+        last_deposit_id: row
+            .get::<Option<i64>, _>("last_deposit_id")
+            .map(|deposit_id| from_i64(deposit_id, "last deposit id"))
+            .transpose()?,
         status: row.get("status"),
         l1_chain_id: row
             .get::<Option<i64>, _>("l1_chain_id")
@@ -2444,6 +2633,22 @@ fn l1_deposit_from_row(row: sqlx::postgres::PgRow) -> Result<L1DepositView, ApiE
         })?,
         observed_at: row.get("observed_at"),
         updated_at: row.get("updated_at"),
+    })
+}
+
+fn executable_deposit_from_view(view: L1DepositView) -> Result<ExecutableDeposit, ApiError> {
+    Ok(ExecutableDeposit {
+        row_id: view.id,
+        deposit: L1Deposit {
+            chain_id: view.chain_id,
+            inbox_address: view.inbox_address.clone(),
+            deposit_id: view.deposit_id,
+            depositor_l1_address: view.depositor_l1_address.clone(),
+            recipient_l2_address: view.recipient_l2_address.clone(),
+            amount: view.amount,
+            rolling_commitment: view.rolling_commitment.clone(),
+        },
+        view,
     })
 }
 
@@ -2626,6 +2831,10 @@ mod tests {
             block_hash_root: "d".repeat(64),
             data_hash: "e".repeat(64),
             transaction_count: 4,
+            deposit_count: 0,
+            deposit_root: "0".repeat(64),
+            first_deposit_id: None,
+            last_deposit_id: None,
             status: "built".to_string(),
             l1_chain_id: None,
             l1_contract_address: None,

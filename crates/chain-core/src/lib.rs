@@ -39,9 +39,23 @@ pub struct Transfer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct L1Deposit {
+    pub chain_id: u64,
+    pub inbox_address: String,
+    pub deposit_id: u64,
+    pub depositor_l1_address: String,
+    pub recipient_l2_address: String,
+    pub amount: u64,
+    pub rolling_commitment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Block {
     pub height: u64,
     pub parent_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deposits: Vec<L1Deposit>,
     pub transactions: Vec<Transfer>,
     pub state_root: String,
     pub block_hash: String,
@@ -87,6 +101,14 @@ pub struct RollupBatchCommitment {
     pub block_hash_root: String,
     pub data_hash: String,
     pub transaction_count: usize,
+    #[serde(default)]
+    pub deposit_count: usize,
+    #[serde(default)]
+    pub deposit_root: String,
+    #[serde(default)]
+    pub first_deposit_id: Option<u64>,
+    #[serde(default)]
+    pub last_deposit_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -95,6 +117,8 @@ struct BlockCommitment<'a> {
     chain_id: &'static str,
     height: u64,
     parent_hash: &'a str,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    deposits: &'a [L1Deposit],
     transactions: &'a [Transfer],
     state_root: &'a str,
 }
@@ -127,10 +151,22 @@ pub enum ChainError {
     InvalidGenesisTransactions,
     #[error("transfer amount must be greater than zero")]
     ZeroAmount,
+    #[error("deposit amount must be greater than zero")]
+    ZeroDepositAmount,
     #[error("sender account {0} does not exist")]
     MissingSender(String),
     #[error("invalid account address {0}")]
     InvalidAccountAddress(String),
+    #[error("invalid deposit inbox address {0}")]
+    InvalidDepositInboxAddress(String),
+    #[error("invalid L1 depositor address {0}")]
+    InvalidL1DepositorAddress(String),
+    #[error("invalid rolling deposit commitment {0}")]
+    InvalidDepositCommitment(String),
+    #[error("duplicate deposit id {0}")]
+    DuplicateDeposit(u64),
+    #[error("deposit ids must be contiguous: expected {expected}, got {actual}")]
+    NonContiguousDeposit { expected: u64, actual: u64 },
     #[error("invalid transaction signature")]
     InvalidSignature,
     #[error("invalid nonce for {address}: expected {expected}, got {actual}")]
@@ -225,11 +261,13 @@ pub fn finalize_genesis(chain: &mut Chain) -> Result<Block, ChainError> {
 
     ensure_account_state_tree(chain);
     let state_root = chain.account_state_tree.root_hex();
+    let deposits = Vec::new();
     let transactions = Vec::new();
-    let block_hash = block_hash(0, NULL_PARENT_HASH, &transactions, &state_root);
+    let block_hash = block_hash(0, NULL_PARENT_HASH, &deposits, &transactions, &state_root);
     let block = Block {
         height: 0,
         parent_hash: NULL_PARENT_HASH.to_owned(),
+        deposits,
         transactions,
         state_root,
         block_hash,
@@ -280,6 +318,7 @@ pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
     ensure_genesis_finalized(chain)?;
     ensure_account_state_tree(chain);
     let mut next_accounts = chain.accounts.clone();
+    let deposits = Vec::new();
     for transaction in &chain.pending_transactions {
         apply_transaction_to_state(&mut next_accounts, transaction)?;
     }
@@ -298,11 +337,12 @@ pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
         .expect("genesis finalization ensures at least one block")
         .clone();
     let transactions = std::mem::take(&mut chain.pending_transactions);
-    let block_hash = block_hash(height, &parent_hash, &transactions, &state_root);
+    let block_hash = block_hash(height, &parent_hash, &deposits, &transactions, &state_root);
 
     let block = Block {
         height,
         parent_hash,
+        deposits,
         transactions,
         state_root,
         block_hash,
@@ -319,17 +359,37 @@ pub fn produce_block_from_indexed_state(
     parent_block: &Block,
     transactions: Vec<Transfer>,
 ) -> Result<Block, ChainError> {
+    produce_block_from_indexed_state_with_deposits(accounts, parent_block, Vec::new(), transactions)
+}
+
+pub fn produce_block_from_indexed_state_with_deposits(
+    accounts: &mut BTreeMap<String, Account>,
+    parent_block: &Block,
+    deposits: Vec<L1Deposit>,
+    transactions: Vec<Transfer>,
+) -> Result<Block, ChainError> {
     let mut next_accounts = accounts.clone();
+    validate_deposit_sequence(&deposits)?;
+    for deposit in &deposits {
+        apply_deposit_to_state(&mut next_accounts, deposit)?;
+    }
     for transaction in &transactions {
         apply_transaction_to_state(&mut next_accounts, transaction)?;
     }
 
     let state_root = state_root(&next_accounts);
     let height = parent_block.height + 1;
-    let block_hash = block_hash(height, &parent_block.block_hash, &transactions, &state_root);
+    let block_hash = block_hash(
+        height,
+        &parent_block.block_hash,
+        &deposits,
+        &transactions,
+        &state_root,
+    );
     let block = Block {
         height,
         parent_hash: parent_block.block_hash.clone(),
+        deposits,
         transactions,
         state_root,
         block_hash,
@@ -363,6 +423,10 @@ pub fn validate_chain(chain: &Chain) -> Result<(), ChainError> {
                 return Err(ChainError::InvalidGenesisTransactions);
             }
         } else {
+            validate_deposit_sequence(&block.deposits)?;
+            for deposit in &block.deposits {
+                apply_deposit_to_state(&mut accounts, deposit)?;
+            }
             for transaction in &block.transactions {
                 apply_transaction_to_state(&mut accounts, transaction)?;
             }
@@ -378,6 +442,7 @@ pub fn validate_chain(chain: &Chain) -> Result<(), ChainError> {
         let expected_block_hash = block_hash(
             block.height,
             &block.parent_hash,
+            &block.deposits,
             &block.transactions,
             &block.state_root,
         );
@@ -501,6 +566,7 @@ pub fn rollup_batch_commitment(
                 )
             })
             .collect::<Vec<_>>();
+    let deposit_leaves = deposit_leaves(&blocks);
     let block_hash_leaves = blocks
         .iter()
         .map(|block| {
@@ -534,6 +600,10 @@ pub fn rollup_batch_commitment(
         block_hash_root: root_hex(&block_hash_leaves),
         data_hash: encode_hex(&Sha256::digest(data_payload)),
         transaction_count: transaction_leaves.len(),
+        deposit_count: deposit_leaves.len(),
+        deposit_root: root_hex(&deposit_leaves),
+        first_deposit_id: first_deposit_id(&deposit_leaves),
+        last_deposit_id: last_deposit_id(&deposit_leaves),
     })
 }
 
@@ -577,6 +647,7 @@ pub fn rollup_batch_commitment_from_blocks(
         let expected_block_hash = block_hash(
             block.height,
             &block.parent_hash,
+            &block.deposits,
             &block.transactions,
             &block.state_root,
         );
@@ -607,6 +678,7 @@ pub fn rollup_batch_commitment_from_blocks(
                 )
             })
             .collect::<Vec<_>>();
+    let deposit_leaves = deposit_leaves(blocks);
     let block_hash_leaves = blocks
         .iter()
         .map(|block| {
@@ -640,6 +712,10 @@ pub fn rollup_batch_commitment_from_blocks(
         block_hash_root: root_hex(&block_hash_leaves),
         data_hash: encode_hex(&Sha256::digest(data_payload)),
         transaction_count: transaction_leaves.len(),
+        deposit_count: deposit_leaves.len(),
+        deposit_root: root_hex(&deposit_leaves),
+        first_deposit_id: first_deposit_id(&deposit_leaves),
+        last_deposit_id: last_deposit_id(&deposit_leaves),
     })
 }
 
@@ -693,6 +769,64 @@ pub fn validate_transaction(
     Ok(())
 }
 
+pub fn validate_deposit(deposit: &L1Deposit) -> Result<(), ChainError> {
+    let inbox = normalize_address(&deposit.inbox_address)
+        .map_err(|_| ChainError::InvalidDepositInboxAddress(deposit.inbox_address.clone()))?;
+    if inbox != deposit.inbox_address {
+        return Err(ChainError::InvalidDepositInboxAddress(
+            deposit.inbox_address.clone(),
+        ));
+    }
+    let depositor = normalize_address(&deposit.depositor_l1_address)
+        .map_err(|_| ChainError::InvalidL1DepositorAddress(deposit.depositor_l1_address.clone()))?;
+    if depositor != deposit.depositor_l1_address {
+        return Err(ChainError::InvalidL1DepositorAddress(
+            deposit.depositor_l1_address.clone(),
+        ));
+    }
+    let recipient = normalize_address(&deposit.recipient_l2_address)
+        .map_err(|_| ChainError::InvalidAccountAddress(deposit.recipient_l2_address.clone()))?;
+    if recipient != deposit.recipient_l2_address {
+        return Err(ChainError::InvalidAccountAddress(
+            deposit.recipient_l2_address.clone(),
+        ));
+    }
+    if deposit.amount == 0 {
+        return Err(ChainError::ZeroDepositAmount);
+    }
+    let commitment = deposit
+        .rolling_commitment
+        .strip_prefix("0x")
+        .ok_or_else(|| ChainError::InvalidDepositCommitment(deposit.rolling_commitment.clone()))?;
+    if commitment.len() != 64 || !commitment.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ChainError::InvalidDepositCommitment(
+            deposit.rolling_commitment.clone(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_deposit_sequence(deposits: &[L1Deposit]) -> Result<(), ChainError> {
+    let mut seen = BTreeSet::new();
+    let mut expected = deposits.first().map(|deposit| deposit.deposit_id);
+    for deposit in deposits {
+        validate_deposit(deposit)?;
+        if !seen.insert(deposit.deposit_id) {
+            return Err(ChainError::DuplicateDeposit(deposit.deposit_id));
+        }
+        if let Some(expected_id) = expected {
+            if deposit.deposit_id != expected_id {
+                return Err(ChainError::NonContiguousDeposit {
+                    expected: expected_id,
+                    actual: deposit.deposit_id,
+                });
+            }
+            expected = Some(expected_id + 1);
+        }
+    }
+    Ok(())
+}
+
 pub fn apply_transaction_to_state(
     accounts: &mut BTreeMap<String, Account>,
     transaction: &Transfer,
@@ -717,6 +851,25 @@ pub fn apply_transaction_to_state(
         .checked_add(transaction.amount)
         .ok_or_else(|| ChainError::BalanceOverflow(transaction.to.clone()))?;
 
+    Ok(())
+}
+
+pub fn apply_deposit_to_state(
+    accounts: &mut BTreeMap<String, Account>,
+    deposit: &L1Deposit,
+) -> Result<(), ChainError> {
+    validate_deposit(deposit)?;
+    let recipient = accounts
+        .entry(deposit.recipient_l2_address.clone())
+        .or_insert_with(|| Account {
+            address: deposit.recipient_l2_address.clone(),
+            balance: 0,
+            nonce: 0,
+        });
+    recipient.balance = recipient
+        .balance
+        .checked_add(deposit.amount)
+        .ok_or_else(|| ChainError::BalanceOverflow(deposit.recipient_l2_address.clone()))?;
     Ok(())
 }
 
@@ -816,9 +969,41 @@ fn uint_word(value: u64) -> [u8; 32] {
     word
 }
 
+fn deposit_leaves(blocks: &[Block]) -> Vec<serde_json::Value> {
+    blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .deposits
+                .iter()
+                .enumerate()
+                .map(move |(deposit_index, deposit)| {
+                    json!({
+                        "block_height": block.height,
+                        "deposit_index": deposit_index,
+                        "deposit": deposit,
+                    })
+                })
+        })
+        .collect()
+}
+
+fn first_deposit_id(deposit_leaves: &[serde_json::Value]) -> Option<u64> {
+    deposit_leaves
+        .first()
+        .and_then(|leaf| leaf["deposit"]["deposit_id"].as_u64())
+}
+
+fn last_deposit_id(deposit_leaves: &[serde_json::Value]) -> Option<u64> {
+    deposit_leaves
+        .last()
+        .and_then(|leaf| leaf["deposit"]["deposit_id"].as_u64())
+}
+
 fn block_hash(
     height: u64,
     parent_hash: &str,
+    deposits: &[L1Deposit],
     transactions: &[Transfer],
     state_root: &str,
 ) -> String {
@@ -827,6 +1012,7 @@ fn block_hash(
         chain_id: LOCAL_CHAIN_ID,
         height,
         parent_hash,
+        deposits,
         transactions,
         state_root,
     })
@@ -866,6 +1052,72 @@ mod tests {
         assert_eq!(chain.accounts[&alice_address].nonce, 1);
         assert_eq!(chain.accounts[&bob_address].balance, 40);
         assert_eq!(validate_chain(&chain), Ok(()));
+    }
+
+    #[test]
+    fn indexed_deposits_credit_l2_state_before_transfers() {
+        let alice = create_keypair();
+        let bob = create_keypair();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
+        let mut chain = new_chain(Vec::new()).unwrap();
+        let genesis = finalize_genesis(&mut chain).unwrap();
+        let mut accounts = chain.accounts.clone();
+        let deposit = L1Deposit {
+            chain_id: 31337,
+            inbox_address: "0x2222222222222222222222222222222222222222".to_owned(),
+            deposit_id: 0,
+            depositor_l1_address: "0x3333333333333333333333333333333333333333".to_owned(),
+            recipient_l2_address: alice_address.clone(),
+            amount: 100,
+            rolling_commitment: format!("0x{}", "4".repeat(64)),
+        };
+        let transfer = sign_transfer(&alice.secret_key_hex, bob_address.clone(), 40, 0).unwrap();
+
+        let block = produce_block_from_indexed_state_with_deposits(
+            &mut accounts,
+            &genesis,
+            vec![deposit.clone()],
+            vec![transfer],
+        )
+        .unwrap();
+
+        assert_eq!(block.deposits, vec![deposit]);
+        assert_eq!(accounts[&alice_address].balance, 60);
+        assert_eq!(accounts[&alice_address].nonce, 1);
+        assert_eq!(accounts[&bob_address].balance, 40);
+        assert_eq!(block.state_root, state_root(&accounts));
+    }
+
+    #[test]
+    fn rejects_non_contiguous_deposit_ids() {
+        let mut accounts = BTreeMap::new();
+        let deposit = L1Deposit {
+            chain_id: 31337,
+            inbox_address: "0x2222222222222222222222222222222222222222".to_owned(),
+            deposit_id: 2,
+            depositor_l1_address: "0x3333333333333333333333333333333333333333".to_owned(),
+            recipient_l2_address: "0x4444444444444444444444444444444444444444".to_owned(),
+            amount: 100,
+            rolling_commitment: format!("0x{}", "5".repeat(64)),
+        };
+        let mut skipped = deposit.clone();
+        skipped.deposit_id = 4;
+        let mut chain = new_chain(Vec::new()).unwrap();
+        let genesis = finalize_genesis(&mut chain).unwrap();
+
+        assert_eq!(
+            produce_block_from_indexed_state_with_deposits(
+                &mut accounts,
+                &genesis,
+                vec![deposit, skipped],
+                Vec::new(),
+            ),
+            Err(ChainError::NonContiguousDeposit {
+                expected: 3,
+                actual: 4
+            })
+        );
     }
 
     #[test]

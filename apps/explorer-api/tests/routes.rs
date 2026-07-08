@@ -460,6 +460,74 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
 }
 
 #[tokio::test]
+async fn confirmed_deposit_sequences_into_l2_state() {
+    let Some(database_url) = optional_test_database_url() else {
+        eprintln!("skipping Postgres integration test; set TEST_DATABASE_URL or DATABASE_URL");
+        return;
+    };
+
+    let recipient = format!("0x{}", "1".repeat(40));
+    let (pool, schema) = setup_postgres_test_database(&database_url).await;
+    initialize_genesis(&pool, GenesisConfig { accounts: vec![] })
+        .await
+        .unwrap();
+    let app = app_with_pool(pool.clone());
+    let deposit = json!({
+        "chain_id": 31337,
+        "inbox_address": format!("0x{}", "2".repeat(40)),
+        "deposit_id": 0,
+        "l1_tx_hash": format!("0x{}", "3".repeat(64)),
+        "l1_block_number": 12,
+        "l1_block_hash": format!("0x{}", "4".repeat(64)),
+        "l1_log_index": 0,
+        "depositor_l1_address": format!("0x{}", "5".repeat(40)),
+        "recipient_l2_address": recipient,
+        "amount": 25,
+        "rolling_commitment": format!("0x{}", "6".repeat(64)),
+        "confirmations": 2
+    });
+
+    let observed = post_json(app.clone(), "/l1/deposits", &deposit).await;
+    assert_eq!(observed.status(), StatusCode::OK);
+    let sequenced = post_json(app.clone(), "/rollup/batches", &json!({ "limit": 10 })).await;
+    assert_eq!(sequenced.status(), StatusCode::OK);
+    let sequenced = response_json(sequenced).await;
+
+    assert_eq!(sequenced["block"]["deposits"].as_array().unwrap().len(), 1);
+    assert_eq!(sequenced["included_deposits"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        sequenced["included_deposits"][0]["status"],
+        json!("executed")
+    );
+    assert_eq!(sequenced["rollup_batch"]["deposit_count"], json!(1));
+    assert_eq!(sequenced["rollup_batch"]["first_deposit_id"], json!(0));
+    assert_eq!(sequenced["rollup_batch"]["last_deposit_id"], json!(0));
+    assert_eq!(sequenced["rollup_batch"]["transaction_count"], json!(0));
+
+    let account = get_json(
+        app.clone(),
+        &format!(
+            "/accounts/{}",
+            path_segment(deposit["recipient_l2_address"].as_str().unwrap())
+        ),
+    )
+    .await;
+    assert_eq!(account["balance"], json!(25));
+    assert_eq!(account["nonce"], json!(0));
+
+    let witness = get_json(app.clone(), "/rollup/batches/0/validity-witness").await;
+    assert_eq!(
+        witness["blocks"][0]["deposits"].as_array().unwrap().len(),
+        1
+    );
+
+    let repeat_sequence = post_json(app, "/rollup/batches", &json!({ "limit": 10 })).await;
+    assert_eq!(repeat_sequence.status(), StatusCode::BAD_REQUEST);
+
+    teardown_postgres_test_database(&pool, &schema).await;
+}
+
+#[tokio::test]
 async fn settlement_update_token_does_not_block_local_deposit_ingest() {
     let Some(database_url) = optional_test_database_url() else {
         eprintln!("skipping Postgres integration test; set TEST_DATABASE_URL or DATABASE_URL");
@@ -570,6 +638,7 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0008_operator_and_l1_indexer/migration.sql"),
     include_str!("../../../prisma/migrations/0009_eip712_ethereum_accounts/migration.sql"),
     include_str!("../../../prisma/migrations/0010_l1_deposits/migration.sql"),
+    include_str!("../../../prisma/migrations/0011_deterministic_deposit_execution/migration.sql"),
 ];
 
 fn optional_test_database_url() -> Option<String> {

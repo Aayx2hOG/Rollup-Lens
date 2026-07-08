@@ -97,6 +97,10 @@ model RollupBatch {
   blockHashRoot   String                    @map("block_hash_root")
   dataHash        String                    @unique @map("data_hash")
   transactionCount Int                      @map("transaction_count")
+  depositCount   Int                       @default(0) @map("deposit_count")
+  depositRoot    String                    @default("0000000000000000000000000000000000000000000000000000000000000000") @map("deposit_root")
+  firstDepositId BigInt?                   @map("first_deposit_id")
+  lastDepositId  BigInt?                   @map("last_deposit_id")
   status          String
   l1ChainId       BigInt?                   @map("l1_chain_id")
   l1ContractAddress String?                 @map("l1_contract_address")
@@ -120,6 +124,7 @@ model RollupBatch {
   operatorBroadcastTxHash String?           @map("operator_broadcast_tx_hash")
   operatorUpdatedAt DateTime                @default(now()) @map("operator_updated_at")
   transactions    RollupBatchTransaction[]
+  deposits        RollupBatchDeposit[]
 
   @@index([startBlockHeight])
   @@index([endBlockHeight])
@@ -153,12 +158,27 @@ model L1Deposit {
   confirmations       Int     @default(0)
   observedAt          DateTime @default(now()) @map("observed_at")
   updatedAt           DateTime @default(now()) @map("updated_at")
+  batches             RollupBatchDeposit[]
 
   @@unique([chainId, inboxAddress, depositId, l1BlockHash, l1LogIndex])
   @@index([recipientL2Address, depositId])
   @@index([status, depositId])
   @@index([chainId, inboxAddress, l1BlockNumber, l1LogIndex])
   @@map("l1_deposits")
+}
+
+model RollupBatchDeposit {
+  batchNumber  BigInt      @map("batch_number")
+  depositRowId BigInt      @unique @map("deposit_row_id")
+  depositId    BigInt      @map("deposit_id")
+  depositIndex Int         @map("deposit_index")
+  batch        RollupBatch @relation(fields: [batchNumber], references: [batchNumber], onDelete: Cascade)
+  deposit      L1Deposit   @relation(fields: [depositRowId], references: [id], onDelete: Restrict)
+
+  @@id([batchNumber, depositRowId])
+  @@unique([batchNumber, depositIndex])
+  @@index([depositId])
+  @@map("rollup_batch_deposits")
 }
 
 model RollupBatchTransaction {
