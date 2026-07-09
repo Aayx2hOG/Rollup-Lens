@@ -50,7 +50,7 @@ import {
 } from "./lib/wallet";
 import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
 
-const tabs = ["Overview", "Transactions", "Deposits", "Settlement", "Operate", "Send"] as const;
+const tabs = ["Overview", "Transactions", "Deposits", "Settlement", "Prove", "Operate", "Send"] as const;
 type Tab = (typeof tabs)[number];
 
 type TransactionReferenceFile = {
@@ -73,15 +73,6 @@ type TransactionReferenceFile = {
   } | null;
 };
 
-const tabMeta: Record<Tab, { label: string; icon: React.ReactNode }> = {
-  Overview: { label: "Overview", icon: <Gauge className="h-4 w-4" /> },
-  Transactions: { label: "Transactions", icon: <Blocks className="h-4 w-4" /> },
-  Deposits: { label: "Deposits", icon: <Upload className="h-4 w-4" /> },
-  Settlement: { label: "Settlement", icon: <PackageCheck className="h-4 w-4" /> },
-  Operate: { label: "Operate", icon: <Gauge className="h-4 w-4" /> },
-  Send: { label: "Send", icon: <Send className="h-4 w-4" /> },
-};
-
 export function App() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
@@ -94,6 +85,7 @@ export function App() {
   const [connectionSeconds, setConnectionSeconds] = useState(0);
   const [overviewBlockTarget, setOverviewBlockTarget] = useState<number | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [walletError, setWalletError] = useState<string | null>(null);
   const [sendRecipient, setSendRecipient] = useState("");
 
   const readiness = useQuery({ queryKey: ["readiness"], queryFn: api.ready });
@@ -205,6 +197,15 @@ export function App() {
     await queryClient.invalidateQueries();
   }
 
+  async function connectGlobalWallet() {
+    setWalletError(null);
+    try {
+      setWalletAddress(await connectWallet());
+    } catch (error) {
+      setWalletError(error instanceof Error ? error.message : "Wallet connection failed");
+    }
+  }
+
   async function onSearch(query: string) {
     const trimmed = query.trim();
     if (!trimmed) return;
@@ -232,37 +233,55 @@ export function App() {
 
   return (
     <Shell>
-      <header className="sticky top-0 z-30 -mx-4 border-b border-white/10 bg-ink/82 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-        <div className="mx-auto grid max-w-[88rem] gap-3">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-mint/25 bg-mint/10 text-mint shadow-glow">
-                <Layers3 className="h-5 w-5" />
-              </div>
-              <div className="min-w-0">
-                <h1 className="truncate text-xl font-semibold leading-tight text-white sm:text-2xl">RollupLens</h1>
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-white/56 sm:text-sm">
-                  <Badge tone={readStatus === "ok" ? "good" : "warn"}>
-                    {readStatusLabel(readStatus)}
-                  </Badge>
-                  <span>See how L2 activity becomes a verified L1 state</span>
-                  <span className="hidden text-white/24 sm:inline">/</span>
-                  <span className="hash max-w-[12rem]">{shortHash(summary.data?.latest_block_hash)}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <SearchBox onSearch={onSearch} pending={false} />
-              <IconButton onClick={refreshAll} title="Refresh data" aria-label="Refresh data">
-                <RefreshCcw className="h-4 w-4" />
-              </IconButton>
-            </div>
-          </div>
+      <header className="sticky top-0 z-30 -mx-4 border-b border-white/10 bg-ink/90 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+        <div className="mx-auto flex max-w-[82rem] flex-wrap items-center gap-x-5 gap-y-3">
+          <button
+            onClick={() => setActiveTab("Overview")}
+            className="flex shrink-0 items-center gap-2.5 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-mint/50"
+            aria-label="Go to overview"
+          >
+            <span className="flex h-8 w-8 items-center justify-center rounded-md bg-mint text-ink shadow-glow">
+              <Layers3 className="h-4 w-4" />
+            </span>
+            <span className="text-base font-semibold tracking-tight text-white">RollupLens</span>
+            <span
+              className={cn(
+                "h-1.5 w-1.5 rounded-full",
+                readStatus === "ok" ? "bg-mint" : "bg-amber",
+              )}
+              title={readStatusLabel(readStatus)}
+            />
+          </button>
 
           <HeaderNav activeTab={activeTab} onSelectTab={setActiveTab} />
+
+          <div className="order-2 ml-auto flex min-w-0 flex-1 items-center justify-end gap-2 sm:flex-initial lg:order-none">
+            <div className="min-w-0 flex-1 sm:flex-initial">
+              <SearchBox onSearch={onSearch} pending={false} />
+            </div>
+            <WalletControl
+              wallet={walletAddress}
+              onConnect={connectGlobalWallet}
+              onDisconnect={() => {
+                setWalletAddress(null);
+                setWalletError(null);
+              }}
+            />
+            <IconButton onClick={refreshAll} title="Refresh data" aria-label="Refresh data" className="h-9 w-9">
+              <RefreshCcw className="h-4 w-4" />
+            </IconButton>
+          </div>
         </div>
       </header>
+
+      {walletError && (
+        <div className="-mt-2 flex items-center justify-between gap-3 rounded-md border border-rose/20 bg-rose/10 px-3 py-2 text-sm text-rose">
+          <span>{walletError}</span>
+          <button onClick={() => setWalletError(null)} className="shrink-0 text-rose/70 hover:text-rose" aria-label="Dismiss wallet error">
+            <XCircle className="h-4 w-4" />
+          </button>
+        </div>
+      )}
 
       {!hasCoreData && (
         <ConnectionState
@@ -356,16 +375,31 @@ export function App() {
             selectedBatchNumber={selectedBatch}
             selectedBatch={rollupBatch.data}
             batchLoading={rollupBatch.isLoading}
-            wallet={walletAddress}
-            onWalletChange={setWalletAddress}
             onSelectBatch={setSelectedBatch}
             onSelectTx={(hash) => {
               setSelectedTx(hash);
               setActiveTab("Transactions");
             }}
-            onSubmitted={async () => {
+          />
+        </div>
+      )}
+
+      {activeTab === "Prove" && (
+        <div className="grid gap-5">
+          <PageIntro
+            icon={<ShieldAlert className="h-5 w-5" />}
+            title="Prove"
+            description="Generate and submit validity proofs for settlement-ready batches."
+            meta={pluralize(batchItems.filter((batch) => batch.status === "built").length, "ready batch")}
+          />
+          <ProofWorkspace
+            batches={batchItems}
+            selectedBatchNumber={selectedBatch}
+            wallet={walletAddress}
+            onSelectBatch={setSelectedBatch}
+            onSubmitted={async (batchNumber) => {
               await queryClient.invalidateQueries({ queryKey: ["rollup-batches"] });
-              await queryClient.invalidateQueries({ queryKey: ["rollup-batch", selectedBatch] });
+              await queryClient.invalidateQueries({ queryKey: ["rollup-batch", batchNumber] });
             }}
           />
         </div>
@@ -521,34 +555,81 @@ function ConnectionState({
 }
 
 function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (tab: Tab) => void }) {
+  const destinations = tabs.filter((tab) => tab !== "Send");
+
   return (
-    <nav className="flex min-w-0 flex-wrap items-center gap-1 rounded-lg border border-white/10 bg-white/[0.035] p-1">
-      {tabs.map((tab) => (
+    <nav
+      className="order-3 flex w-full min-w-0 items-center gap-1 overflow-x-auto border-t border-white/8 pt-2 lg:order-none lg:w-auto lg:border-0 lg:pt-0"
+      aria-label="Primary navigation"
+    >
+      {destinations.map((tab) => (
         <button
           key={tab}
           onClick={() => onSelectTab(tab)}
+          aria-current={activeTab === tab ? "page" : undefined}
           className={cn(
-            "relative inline-flex h-10 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-medium text-white/58 transition hover:text-white",
-            tab === "Send" && "ml-auto bg-mint text-ink shadow-glow hover:bg-mint/90 hover:text-ink",
+            "relative h-9 shrink-0 rounded-md px-2.5 text-sm text-white/50 transition-colors hover:bg-white/[0.05] hover:text-white",
             activeTab === tab && "text-white",
-            activeTab === "Send" && tab === "Send" && "text-ink",
           )}
         >
           {activeTab === tab && (
             <motion.span
               layoutId="active-header-tab"
-              className={cn(
-                "absolute inset-0 rounded-lg border",
-                tab === "Send" ? "border-white/25 bg-white/10" : "border-mint/25 bg-mint/10",
-              )}
+              className="absolute inset-x-2.5 bottom-0 h-px bg-mint"
               transition={{ type: "spring", bounce: 0.18, duration: 0.45 }}
             />
           )}
-          <span className={cn("relative text-mint/80", tab === "Send" && "text-ink")}>{tabMeta[tab].icon}</span>
-          <span className="relative">{tabMeta[tab].label}</span>
+          <span className="relative">{tab}</span>
         </button>
       ))}
+      <button
+        onClick={() => onSelectTab("Send")}
+        aria-current={activeTab === "Send" ? "page" : undefined}
+        className={cn(
+          "ml-1 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-mint/50",
+          activeTab === "Send" && "ring-2 ring-white/25",
+        )}
+      >
+        <Send className="h-3.5 w-3.5" />
+        Send
+      </button>
     </nav>
+  );
+}
+
+function WalletControl({
+  wallet,
+  onConnect,
+  onDisconnect,
+}: {
+  wallet: string | null;
+  onConnect: () => Promise<void>;
+  onDisconnect: () => void;
+}) {
+  if (wallet) {
+    return (
+      <button
+        onClick={onDisconnect}
+        title="Disconnect wallet"
+        className="inline-flex h-9 shrink-0 items-center gap-2 rounded-md border border-mint/20 bg-mint/[0.08] px-3 text-sm font-medium text-mint transition hover:bg-mint/[0.14]"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-mint" />
+        <span className="hidden xl:inline">{shortHash(wallet, 6, 4)}</span>
+        <span className="xl:hidden">Wallet</span>
+      </button>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => void onConnect()}
+      disabled={!hasWalletProvider()}
+      title={hasWalletProvider() ? "Connect Ethereum wallet" : "No injected EVM wallet found"}
+      className="inline-flex h-9 shrink-0 items-center gap-2 rounded-md border border-white/12 px-3 text-sm font-medium text-white/72 transition hover:border-mint/30 hover:text-mint disabled:cursor-not-allowed disabled:opacity-45"
+    >
+      <Wallet className="h-4 w-4" />
+      <span>{hasWalletProvider() ? "Connect wallet" : "No wallet found"}</span>
+    </button>
   );
 }
 
@@ -605,7 +686,7 @@ function SearchBox({ onSearch, pending }: { onSearch: (query: string) => void; p
 
   return (
     <form
-      className="flex h-10 w-full min-w-0 max-w-xl items-center gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-3 focus-within:border-mint/40 focus-within:ring-2 focus-within:ring-mint/20 sm:w-[28rem]"
+      className="flex h-9 w-full min-w-0 items-center gap-2 rounded-md border border-white/10 bg-white/[0.045] px-2.5 transition focus-within:border-white/25 focus-within:bg-white/[0.07] sm:w-56 xl:w-64"
       onSubmit={(event) => {
         event.preventDefault();
         onSearch(value);
@@ -615,13 +696,13 @@ function SearchBox({ onSearch, pending }: { onSearch: (query: string) => void; p
       <input
         value={value}
         onChange={(event) => setValue(event.target.value)}
-        placeholder="Search height, hash, tx, address"
+        placeholder="Search"
         className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/34"
       />
       <button
         type="submit"
         disabled={pending}
-        className="rounded-md bg-white/10 px-3 py-1.5 text-xs font-medium text-white/80 transition hover:bg-mint/15 hover:text-mint disabled:opacity-50"
+        className="sr-only"
       >
         Go
       </button>
@@ -1168,20 +1249,6 @@ function SendTransferView({
     : 0;
   const nextNonce = (walletAccount.data?.nonce ?? 0) + pendingFromWallet;
 
-  async function connectEthereumWallet() {
-    setNotice(null);
-    try {
-      const connected = await connectWallet();
-      onWalletChange(connected);
-      setNotice({
-        tone: "neutral",
-        message: "Ethereum wallet connected. Transfer approval stays inside your wallet.",
-      });
-    } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet connection failed" });
-    }
-  }
-
   async function sendTransfer() {
     if (!wallet || !walletAccount.data) return;
     setSubmitting(true);
@@ -1216,20 +1283,8 @@ function SendTransferView({
 
       <div className="grid gap-5 p-5">
         {!wallet ? (
-          <div className="rounded-lg border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
-            <Wallet className="mx-auto h-7 w-7 text-mint" />
-            <div className="mt-3 font-semibold text-white">Connect Ethereum wallet</div>
-            <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-white/50">
-              MetaMask, Rabby, or another injected EVM wallet signs the EIP-712 transfer.
-            </p>
-            <div className="mt-4 flex flex-wrap justify-center gap-2">
-              <button
-                onClick={connectEthereumWallet}
-                className="h-10 rounded-lg border border-white/12 px-4 text-sm font-medium text-white/70 hover:border-mint/30 hover:text-mint"
-              >
-                {hasWalletProvider() ? "Connect wallet" : "No EVM wallet found"}
-              </button>
-            </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4 text-sm text-white/58">
+            Connect your Ethereum wallet from the header to send L2 funds.
           </div>
         ) : (
           <>
@@ -1730,17 +1785,9 @@ function DepositActionPanel({
   const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
   const configured = Boolean(l1DepositInboxAddress);
 
-  async function connectEthereumWallet() {
-    setNotice(null);
-    try {
-      const connected = await connectWallet();
-      onWalletChange(connected);
-      if (!recipient.trim()) setRecipient(connected);
-      setNotice({ tone: "neutral", message: "Wallet connected. Your deposit approval stays inside your wallet." });
-    } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet connection failed" });
-    }
-  }
+  useEffect(() => {
+    if (wallet && !recipient.trim()) setRecipient(wallet);
+  }, [wallet, recipient]);
 
   async function submitDeposit() {
     if (!wallet) return;
@@ -1780,19 +1827,8 @@ function DepositActionPanel({
         )}
 
         {!wallet ? (
-          <div className="rounded-lg border border-dashed border-mint/25 bg-mint/[0.045] p-5 text-center">
-            <Wallet className="mx-auto h-7 w-7 text-mint" />
-            <div className="mt-3 font-semibold text-white">Connect wallet</div>
-            <p className="mx-auto mt-1 max-w-sm text-sm leading-6 text-white/50">
-              Choose the wallet that will send the L1 deposit transaction.
-            </p>
-            <button
-              onClick={connectEthereumWallet}
-              disabled={!configured || !hasWalletProvider()}
-              className="mt-4 h-10 rounded-lg border border-white/12 px-4 text-sm font-medium text-white/70 hover:border-mint/30 hover:text-mint disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              {hasWalletProvider() ? "Connect wallet" : "No EVM wallet found"}
-            </button>
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4 text-sm text-white/58">
+            Connect your Ethereum wallet from the header to make a deposit.
           </div>
         ) : (
           <>
@@ -1868,22 +1904,16 @@ function RollupView({
   selectedBatchNumber,
   selectedBatch,
   batchLoading,
-  wallet,
-  onWalletChange,
   onSelectBatch,
   onSelectTx,
-  onSubmitted,
 }: {
   batches: RollupBatchSummary[];
   batchTotal: number;
   selectedBatchNumber: number | null;
   selectedBatch?: RollupBatch;
   batchLoading: boolean;
-  wallet: string | null;
-  onWalletChange: (wallet: string | null) => void;
   onSelectBatch: (batchNumber: number) => void;
   onSelectTx: (hash: string) => void;
-  onSubmitted: () => Promise<void>;
 }) {
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[24rem_1fr]">
@@ -1966,12 +1996,13 @@ function RollupView({
               <HashLine label="Batch data hash" value={selectedBatch.data_hash} />
             </div>
             {selectedBatch.status === "built" ? (
-              <SettlementNextStep
-                batch={selectedBatch}
-                wallet={wallet}
-                onWalletChange={onWalletChange}
-                onSubmitted={onSubmitted}
-              />
+              <div className="flex flex-col gap-3 rounded-lg border border-amber/20 bg-amber/[0.06] p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-amber">This package is ready to prove</div>
+                  <div className="mt-1 text-sm text-white/52">Open the dedicated proof workspace to generate and submit its validity proof.</div>
+                </div>
+                <span className="text-xs text-white/38">Select Prove in the navigation</span>
+              </div>
             ) : (
               <>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -2091,15 +2122,70 @@ function SettlementProgress({ batch }: { batch: RollupBatchSummary }) {
   );
 }
 
+function ProofWorkspace({
+  batches,
+  selectedBatchNumber,
+  wallet,
+  onSelectBatch,
+  onSubmitted,
+}: {
+  batches: RollupBatchSummary[];
+  selectedBatchNumber: number | null;
+  wallet: string | null;
+  onSelectBatch: (batchNumber: number) => void;
+  onSubmitted: (batchNumber: number) => Promise<void>;
+}) {
+  const readyBatches = batches.filter((batch) => batch.status === "built");
+  const batch = readyBatches.find((candidate) => candidate.batch_number === selectedBatchNumber) ?? readyBatches[0];
+
+  if (!batch) {
+    return (
+      <Panel className="p-8 text-center">
+        <PackageCheck className="mx-auto h-7 w-7 text-white/30" />
+        <div className="mt-3 font-semibold text-white">No batches are ready to prove</div>
+        <div className="mt-1 text-sm text-white/48">A proof workspace will appear after the operator builds a settlement batch.</div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-4 flex flex-col gap-3 border-b border-white/8 pb-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <div className="text-xs font-medium uppercase tracking-[0.14em] text-white/38">Ready batch</div>
+          <div className="mt-1 text-lg font-semibold text-white">Package {batch.batch_number}</div>
+        </div>
+        <label className="grid gap-1.5 text-xs text-white/46">
+          Select package
+          <select
+            value={batch.batch_number}
+            onChange={(event) => onSelectBatch(Number(event.target.value))}
+            className="h-10 min-w-48 rounded-md border border-white/12 bg-ink px-3 text-sm text-white outline-none focus:border-mint/40"
+          >
+            {readyBatches.map((candidate) => (
+              <option key={candidate.batch_number} value={candidate.batch_number}>
+                Package {candidate.batch_number} · {candidate.transaction_count} transfers
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <SettlementNextStep
+        batch={batch}
+        wallet={wallet}
+        onSubmitted={() => onSubmitted(batch.batch_number)}
+      />
+    </Panel>
+  );
+}
+
 function SettlementNextStep({
   batch,
   wallet,
-  onWalletChange,
   onSubmitted,
 }: {
   batch: RollupBatchSummary;
   wallet: string | null;
-  onWalletChange: (wallet: string | null) => void;
   onSubmitted: () => Promise<void>;
 }) {
   const [artifactText, setArtifactText] = useState("");
@@ -2108,15 +2194,6 @@ function SettlementNextStep({
   const witnessUrl = `${API_BASE}/rollup/batches/${batch.batch_number}/validity-witness`;
   const calldataUrl = `${API_BASE}/rollup/batches/${batch.batch_number}/settlement-calldata`;
   const canSubmit = Boolean(wallet && settlementContractAddress && artifactText.trim().length > 0);
-
-  async function connectForSettlement() {
-    setNotice(null);
-    try {
-      onWalletChange(await connectWallet());
-    } catch (error) {
-      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Wallet connection failed" });
-    }
-  }
 
   async function loadArtifact(file: File | undefined) {
     if (!file) return;
@@ -2143,14 +2220,12 @@ function SettlementNextStep({
   return (
     <div className="rounded-lg border border-amber/25 bg-amber/10 p-4">
       <div className="grid gap-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <div className="text-sm font-semibold text-amber">Next: submit the validity proof</div>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-white/58">
-              Generate the proof from this package's witness, then load the artifact here to submit it from your wallet.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
+        <div>
+          <div className="text-sm font-semibold text-amber">Next: submit the validity proof</div>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-white/58">
+            Generate the proof from this package's witness, then load the artifact here to submit it from your wallet.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
             <a
               href={witnessUrl}
               target="_blank"
@@ -2172,18 +2247,10 @@ function SettlementNextStep({
           </div>
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
-          <label className="grid gap-2 text-sm text-white/62">
-            Proof artifact JSON
-            <textarea
-              value={artifactText}
-              onChange={(event) => setArtifactText(event.target.value)}
-              placeholder='{"public_values":"0x...","proof":"0x..."}'
-              className="min-h-32 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-xs leading-5 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
-            />
-          </label>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-            <label className="inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 transition hover:border-mint/30 hover:text-mint">
+        <div className="grid gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-sm text-white/62">Proof artifact JSON</span>
+            <label className="inline-flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 transition hover:border-mint/30 hover:text-mint">
               <Upload className="h-4 w-4" />
               Load artifact
               <input
@@ -2193,31 +2260,32 @@ function SettlementNextStep({
                 onChange={(event) => void loadArtifact(event.target.files?.[0])}
               />
             </label>
-            {!wallet ? (
-              <button
-                onClick={connectForSettlement}
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90"
-              >
-                <Wallet className="h-4 w-4" />
-                Connect wallet
-              </button>
-            ) : (
-              <button
-                onClick={submitProof}
-                disabled={submitting || !canSubmit}
-                className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-amber px-3 text-sm font-semibold text-ink transition hover:bg-amber/90 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
-              >
-                <ShieldAlert className="h-4 w-4" />
-                {submitting ? "Submitting" : "Submit proof"}
-              </button>
-            )}
           </div>
+          <label>
+            <span className="sr-only">Proof artifact JSON</span>
+            <textarea
+              value={artifactText}
+              onChange={(event) => setArtifactText(event.target.value)}
+              placeholder='{"public_values":"0x...","proof":"0x..."}'
+              className="min-h-32 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-xs leading-5 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
+            />
+          </label>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 text-xs text-white/46 md:grid-cols-3">
-          <span>{settlementContractAddress ? `contract ${shortHash(settlementContractAddress, 8, 6)}` : "set VITE_ROLLUP_SETTLEMENT_CONTRACT"}</span>
-          <span>{wallet ? `wallet ${shortHash(wallet, 8, 6)}` : "wallet not connected"}</span>
-          <span>{artifactText.trim() ? "artifact loaded" : "waiting for proof artifact"}</span>
+        <div className="flex flex-col gap-3 border-t border-white/10 pt-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-white/46">
+            <span>{settlementContractAddress ? `contract ${shortHash(settlementContractAddress, 8, 6)}` : "settlement contract not configured"}</span>
+            <span>{wallet ? `wallet ${shortHash(wallet, 8, 6)}` : "connect wallet from the header"}</span>
+            <span>{artifactText.trim() ? "artifact loaded" : "waiting for artifact"}</span>
+          </div>
+          <button
+            onClick={submitProof}
+            disabled={submitting || !canSubmit}
+            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md bg-amber px-4 text-sm font-semibold text-ink transition hover:bg-amber/90 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
+          >
+            <ShieldAlert className="h-4 w-4" />
+            {submitting ? "Submitting" : "Submit proof"}
+          </button>
         </div>
 
         {notice && (
