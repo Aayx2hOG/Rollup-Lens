@@ -21,9 +21,11 @@ repository = "https://github.com/your-username/zk-rollup"
 
 [workspace.dependencies]
 anyhow = "1.0"
+async-stream = "0.3"
 axum = "0.7"
 clap = { version = "4.5", features = ["derive", "env"] }
 dotenvy = "0.15"
+futures-core = "0.3"
 hex = "0.4"
 http-body-util = "0.1"
 rand = "0.8"
@@ -36,7 +38,7 @@ sha3 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["json", "postgres", "runtime-tokio-rustls"] }
 tempfile = "3.20"
 thiserror = "1.0"
-tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
 

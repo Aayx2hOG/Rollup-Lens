@@ -1145,10 +1145,12 @@ name = "explorer-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum",
  "chain-core",
  "clap",
  "dotenvy",
+ "futures-core",
  "http-body-util",
  "serde",
  "serde_json",

@@ -24,6 +24,10 @@ use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
 use validity_core::{verify_batch_witness, BatchValidityWitness};
 
+mod events;
+
+use events::{AppEventType, EventQueue, EVENT_QUEUE_CAPACITY};
+
 const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
 const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 100;
@@ -127,6 +131,7 @@ pub async fn initialize_genesis(
 struct AppState {
     pool: PgPool,
     cache: Arc<Mutex<ResponseCache>>,
+    events: EventQueue,
     settlement_update_token: Option<String>,
     l1_deposit_ingest_token: Option<String>,
     l1_deposit_inbox: String,
@@ -470,6 +475,7 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox(
     let state = Arc::new(AppState {
         pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
+        events: EventQueue::new(EVENT_QUEUE_CAPACITY),
         settlement_update_token,
         l1_deposit_ingest_token,
         l1_deposit_inbox,
@@ -479,6 +485,7 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox(
         .route("/", get(index))
         .route("/health", get(health))
         .route("/ready", get(readiness))
+        .route("/events", get(events))
         .route("/chain/summary", get(chain_summary))
         .route("/blocks", get(blocks))
         .route("/blocks/:height", get(block_by_height))
@@ -588,6 +595,7 @@ async fn index() -> Json<Value> {
         "endpoints": [
             "GET /health",
             "GET /ready",
+            "GET /events",
             "GET /chain/summary",
             "GET /blocks",
             "GET /blocks/:height",
@@ -609,6 +617,10 @@ async fn index() -> Json<Value> {
             "GET /search/:query"
         ]
     }))
+}
+
+async fn events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.events.stream()
 }
 
 async fn chain_summary(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
@@ -709,6 +721,7 @@ async fn submit_transaction(
     .submit_transaction(transaction)
     .await?;
     state.cache_clear();
+    state.publish_event(AppEventType::TransactionSubmitted, &submitted);
     serde_json::to_value(submitted)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -739,6 +752,7 @@ async fn sequence_rollup_batch(
     .sequence_rollup_batch(limit)
     .await?;
     state.cache_clear();
+    state.publish_event(AppEventType::RollupBatchSequenced, &sequenced);
     serde_json::to_value(sequenced)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -856,6 +870,7 @@ async fn update_rollup_batch_settlement(
     .update_rollup_batch_settlement(batch_number, update)
     .await?;
     state.cache_clear();
+    state.publish_event(AppEventType::RollupBatchSettlementUpdated, &updated);
     serde_json::to_value(updated)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -911,6 +926,7 @@ async fn observe_l1_deposit(
     .observe_l1_deposit(observation)
     .await?;
     state.cache_clear();
+    state.publish_l1_deposit_event(&deposit);
     serde_json::to_value(deposit)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -996,6 +1012,28 @@ impl AppState {
     fn cache_clear(&self) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.entries.clear();
+        }
+    }
+
+    fn publish_event<T: Serialize>(&self, event_type: AppEventType, payload: &T) {
+        match serde_json::to_value(payload) {
+            Ok(payload) => self.events.publish(event_type, payload),
+            Err(error) => eprintln!("failed to serialize app event payload: {error}"),
+        }
+    }
+
+    fn publish_l1_deposit_event(&self, deposit: &L1DepositView) {
+        match serde_json::to_value(deposit) {
+            Ok(mut payload) => {
+                if let Some(object) = payload.as_object_mut() {
+                    if let Some(row_id) = object.remove("id") {
+                        object.insert("l1_deposit_row_id".to_string(), row_id);
+                    }
+                }
+                self.events
+                    .publish(AppEventType::L1DepositObserved, payload);
+            }
+            Err(error) => eprintln!("failed to serialize L1 deposit event payload: {error}"),
         }
     }
 }

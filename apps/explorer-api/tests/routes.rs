@@ -34,6 +34,22 @@ async fn postgres_router_exposes_index_without_database_queries() {
 }
 
 #[tokio::test]
+async fn postgres_router_exposes_event_stream_without_database_queries() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://postgres:postgres@localhost/zk_rollup")
+        .unwrap();
+    let app = app_with_pool(pool);
+
+    let response = get_response(app, "/events").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+}
+
+#[tokio::test]
 async fn readiness_reports_an_unavailable_database() {
     let pool = PgPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(100))
