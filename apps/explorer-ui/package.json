@@ -10,6 +10,9 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@fontsource-variable/manrope": "^5.2.8",
+    "@fontsource/instrument-serif": "^5.2.8",
     "@tanstack/react-query": "^5.81.5",
     "clsx": "^2.1.1",
     "framer-motion": "^12.19.1",

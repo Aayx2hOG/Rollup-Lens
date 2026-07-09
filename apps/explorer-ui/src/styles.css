@@ -25,9 +25,31 @@ body {
     #080a0d;
 }
 
+h1,
+h2,
+h3 {
+  font-family: "Manrope Variable", "Manrope", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: -0.025em;
+}
+
+.font-display {
+  font-family: "Instrument Serif", Georgia, serif;
+}
+
 button,
 input {
   font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+label:has(input:focus-visible) {
+  outline: 2px solid rgba(88, 244, 183, 0.52);
+  outline-offset: 2px;
 }
 
 ::selection {
@@ -37,26 +59,13 @@ input {
 
 .surface {
   position: relative;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(15, 19, 25, 0.94);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 10px 24px rgba(0, 0, 0, 0.14);
-  backdrop-filter: blur(10px);
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .surface::before {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  content: "";
-  border-radius: inherit;
-  background: linear-gradient(120deg, rgba(255, 255, 255, 0.028), transparent 34%);
-}
-
-.surface > * {
-  position: relative;
-  z-index: 1;
+  content: none;
 }
 
 .grid-mask {

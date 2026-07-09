@@ -107,7 +107,7 @@ only to the test process:
 ```bash
 TEST_DATABASE_URL='postgresql://...neon.tech/neondb?sslmode=require&channel_binding=require' \
 cargo test -p settlement-client --test validity_settlement_e2e \
-  sequences_and_finalizes_a_batch_with_mock_verifier -- --ignored --nocapture
+  deposit_transfer_proof_and_settlement_lifecycle -- --ignored --nocapture
 ```
 
 The test role must be allowed to create and drop schemas.

@@ -48,9 +48,13 @@ import {
   signTransfer,
   submitBatchWithProof,
 } from "./lib/wallet";
-import { Badge, IconButton, Panel, Shell, Skeleton } from "./components/ui";
+import { Badge, Button, buttonStyles, IconButton, Panel, Shell, Skeleton } from "./components/ui";
+import { BackgroundBeams } from "./components/aceternity/background-beams";
+import { CardSpotlight } from "./components/aceternity/card-spotlight";
+import { FloatingNavbar } from "./components/aceternity/floating-navbar";
+import { MovingBorderButton } from "./components/aceternity/moving-border";
 
-const tabs = ["Overview", "Transactions", "Deposits", "Settlement", "Prove", "Operate", "Send"] as const;
+const tabs = ["Overview", "Deposits", "Send", "Transactions", "Settlement", "Prove", "Operate"] as const;
 type Tab = (typeof tabs)[number];
 
 type TransactionReferenceFile = {
@@ -233,8 +237,8 @@ export function App() {
 
   return (
     <Shell>
-      <header className="sticky top-0 z-30 -mx-4 border-b border-white/10 bg-ink/90 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-        <div className="mx-auto flex max-w-[82rem] flex-wrap items-center gap-x-5 gap-y-3">
+      <FloatingNavbar className="rounded-xl bg-ink/88 px-3 py-2 shadow-2xl shadow-black/30 backdrop-blur-xl sm:px-4">
+        <div className="mx-auto flex max-w-[82rem] flex-wrap items-center gap-x-5 gap-y-2">
           <button
             onClick={() => setActiveTab("Overview")}
             className="flex shrink-0 items-center gap-2.5 rounded-md text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-mint/50"
@@ -243,7 +247,7 @@ export function App() {
             <span className="flex h-8 w-8 items-center justify-center rounded-md bg-mint text-ink shadow-glow">
               <Layers3 className="h-4 w-4" />
             </span>
-            <span className="text-base font-semibold tracking-tight text-white">RollupLens</span>
+            <span className="font-heading text-base font-semibold tracking-tight text-white">RollupLens</span>
             <span
               className={cn(
                 "h-1.5 w-1.5 rounded-full",
@@ -274,10 +278,10 @@ export function App() {
             </IconButton>
           </div>
         </div>
-      </header>
+      </FloatingNavbar>
 
       {walletError && (
-        <div className="-mt-2 flex items-center justify-between gap-3 rounded-md border border-rose/20 bg-rose/10 px-3 py-2 text-sm text-rose">
+        <div className="-mt-2 flex items-center justify-between gap-3 rounded-md bg-rose/10 px-3 py-2 text-sm text-rose">
           <span>{walletError}</span>
           <button onClick={() => setWalletError(null)} className="shrink-0 text-rose/70 hover:text-rose" aria-label="Dismiss wallet error">
             <XCircle className="h-4 w-4" />
@@ -514,7 +518,7 @@ function ConnectionState({
   const waking = status === "waking";
   const database = status === "database";
   return (
-    <Panel className={cn("p-4", database || status === "offline" ? "border-rose/25 bg-rose/10" : "border-amber/25 bg-amber/10")}>
+    <Panel className={cn("p-4", database || status === "offline" ? "bg-rose/10" : "bg-amber/10")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
           {connecting || waking ? (
@@ -543,27 +547,22 @@ function ConnectionState({
             </div>
           </div>
         </div>
-        <button
-          onClick={() => void onRetry()}
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-white/12 px-3 text-sm text-white/72 hover:border-mint/30 hover:text-mint"
-        >
+        <Button onClick={() => void onRetry()} size="sm">
           <RefreshCcw className="h-4 w-4" />
           Retry
-        </button>
+        </Button>
       </div>
     </Panel>
   );
 }
 
 function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (tab: Tab) => void }) {
-  const destinations = tabs.filter((tab) => tab !== "Send");
-
   return (
     <nav
-      className="order-3 flex w-full min-w-0 items-center gap-1 overflow-x-auto border-t border-white/8 pt-2 lg:order-none lg:w-auto lg:border-0 lg:pt-0"
+      className="order-3 flex w-full min-w-0 items-center gap-1 overflow-x-auto pt-2 lg:order-none lg:w-auto lg:pt-0"
       aria-label="Primary navigation"
     >
-      {destinations.map((tab) => (
+      {tabs.map((tab) => (
         <button
           key={tab}
           onClick={() => onSelectTab(tab)}
@@ -583,17 +582,6 @@ function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (t
           <span className="relative">{tab}</span>
         </button>
       ))}
-      <button
-        onClick={() => onSelectTab("Send")}
-        aria-current={activeTab === "Send" ? "page" : undefined}
-        className={cn(
-          "ml-1 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-mint/50",
-          activeTab === "Send" && "ring-2 ring-white/25",
-        )}
-      >
-        <Send className="h-3.5 w-3.5" />
-        Send
-      </button>
     </nav>
   );
 }
@@ -609,28 +597,28 @@ function WalletControl({
 }) {
   if (wallet) {
     return (
-      <button
+      <Button
         onClick={onDisconnect}
         title="Disconnect wallet"
-        className="inline-flex h-9 shrink-0 items-center gap-2 rounded-md border border-mint/20 bg-mint/[0.08] px-3 text-sm font-medium text-mint transition hover:bg-mint/[0.14]"
+        size="sm"
+        className="bg-mint/[0.08] text-mint hover:bg-mint/[0.14] hover:text-mint"
       >
         <span className="h-1.5 w-1.5 rounded-full bg-mint" />
         <span className="hidden xl:inline">{shortHash(wallet, 6, 4)}</span>
         <span className="xl:hidden">Wallet</span>
-      </button>
+      </Button>
     );
   }
 
   return (
-    <button
+    <MovingBorderButton
       onClick={() => void onConnect()}
       disabled={!hasWalletProvider()}
       title={hasWalletProvider() ? "Connect Ethereum wallet" : "No injected EVM wallet found"}
-      className="inline-flex h-9 shrink-0 items-center gap-2 rounded-md border border-white/12 px-3 text-sm font-medium text-white/72 transition hover:border-mint/30 hover:text-mint disabled:cursor-not-allowed disabled:opacity-45"
     >
       <Wallet className="h-4 w-4" />
       <span>{hasWalletProvider() ? "Connect wallet" : "No wallet found"}</span>
-    </button>
+    </MovingBorderButton>
   );
 }
 
@@ -646,14 +634,14 @@ function PageIntro({
   meta?: React.ReactNode;
 }) {
   return (
-    <section className="rounded-lg border border-white/10 bg-white/[0.025] p-5">
+    <section className="px-1 py-2">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-mint/20 bg-mint/10 text-mint">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-mint shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
             {icon}
           </div>
           <div>
-            <h2 className="text-2xl font-semibold text-white">{title}</h2>
+            <h2 className="font-display text-3xl font-normal leading-none tracking-[-0.02em] text-white">{title}</h2>
             <p className="mt-1 max-w-3xl text-sm leading-6 text-white/58">{description}</p>
           </div>
         </div>
@@ -665,7 +653,7 @@ function PageIntro({
 
 function StaleDataNotice({ message }: { message: string }) {
   return (
-    <Panel className="border-amber/25 bg-amber/10 p-4">
+    <Panel className="bg-amber/10 p-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2 text-sm font-semibold text-amber">
@@ -674,7 +662,7 @@ function StaleDataNotice({ message }: { message: string }) {
           </div>
           <div className="mt-2 text-sm text-white/68">{message}</div>
         </div>
-        <div className="hash max-w-full rounded-md border border-white/10 bg-black/20 px-2 py-1 text-xs text-white/58 sm:max-w-md">
+        <div className="hash max-w-full rounded-md bg-black/20 px-2 py-1 text-xs text-white/58 sm:max-w-md">
           {API_BASE}
         </div>
       </div>
@@ -687,7 +675,7 @@ function SearchBox({ onSearch, pending }: { onSearch: (query: string) => void; p
 
   return (
     <form
-      className="flex h-9 w-full min-w-0 items-center gap-2 rounded-md border border-white/10 bg-white/[0.045] px-2.5 transition focus-within:border-white/25 focus-within:bg-white/[0.07] sm:w-56 xl:w-64"
+      className="flex h-9 w-full min-w-0 items-center gap-2 rounded-md bg-white/[0.045] px-2.5 transition focus-within:bg-white/[0.07] sm:w-56 xl:w-64"
       onSubmit={(event) => {
         event.preventDefault();
         onSearch(value);
@@ -762,6 +750,7 @@ function HomePage({
   return (
     <div className="grid gap-4">
       <section className="surface relative overflow-hidden rounded-lg px-5 py-8 sm:px-8 sm:py-10">
+        <BackgroundBeams className="!absolute opacity-70" />
         <div className="!absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/80 to-transparent" />
         <div className="pointer-events-none !absolute -right-32 -top-48 h-96 w-96 rounded-full bg-mint/[0.06] blur-3xl" />
         <div className="relative grid items-center gap-10 lg:grid-cols-[minmax(0,1.25fr)_minmax(20rem,0.75fr)]">
@@ -770,7 +759,7 @@ function HomePage({
               <span className={cn("h-1.5 w-1.5 rounded-full", live ? "bg-mint shadow-[0_0_16px_rgba(88,244,183,0.9)]" : "bg-amber")} />
               {live ? "Network operational" : readStatusLabel(readStatus)}
             </div>
-            <h1 className="mt-5 max-w-3xl text-3xl font-semibold leading-[1.12] tracking-[-0.035em] text-white sm:text-5xl">
+            <h1 className="mt-5 max-w-3xl font-display text-4xl font-normal leading-[1.02] tracking-[-0.025em] text-white sm:text-6xl">
               Verify the rollup.
               <span className="block text-white/42">From L2 activity to L1 finality.</span>
             </h1>
@@ -779,27 +768,18 @@ function HomePage({
             </p>
             <HomeSearch onSearch={onSearch} />
             <div className="mt-4 flex flex-wrap items-center gap-2">
-              <button
-                onClick={() => onNavigate("Transactions")}
-                className="inline-flex h-10 items-center gap-2 rounded-md bg-mint px-4 text-sm font-semibold text-ink transition hover:bg-mint/90"
-              >
+              <Button onClick={() => onNavigate("Transactions")} variant="primary">
                 Explore activity
                 <ArrowRight className="h-4 w-4" />
-              </button>
-              <button
-                onClick={() => onNavigate("Settlement")}
-                className="inline-flex h-10 items-center gap-2 rounded-md border border-white/12 px-4 text-sm font-medium text-white/70 transition hover:border-white/25 hover:text-white"
-              >
+              </Button>
+              <Button onClick={() => onNavigate("Settlement")}>
                 View settlement
-              </button>
+              </Button>
               {readyBatchCount > 0 && (
-                <button
-                  onClick={() => onNavigate("Prove")}
-                  className="inline-flex h-10 items-center gap-2 rounded-md px-3 text-sm font-medium text-amber transition hover:bg-amber/10"
-                >
+                <Button onClick={() => onNavigate("Prove")} variant="ghost" className="text-amber hover:text-amber">
                   <ShieldAlert className="h-4 w-4" />
                   {pluralize(readyBatchCount, "batch")} ready to prove
-                </button>
+                </Button>
               )}
             </div>
           </div>
@@ -807,7 +787,7 @@ function HomePage({
         </div>
       </section>
 
-      <section className="grid grid-cols-2 overflow-hidden rounded-lg border border-white/10 bg-white/[0.025] lg:grid-cols-4">
+      <section className="surface grid grid-cols-2 overflow-hidden rounded-lg lg:grid-cols-4">
         <HomeMetric label="Latest block" value={summary?.height ?? "—"} detail={`${formatNumber(blockTotal)} indexed`} />
         <HomeMetric label="Transactions" value={formatNumber(summary?.transaction_count)} detail={`${formatNumber(pendingTransfers)} pending`} />
         <HomeMetric label="Accounts" value={formatNumber(summary?.account_count)} detail={summary?.valid ? "State verified" : "State check required"} good={summary?.valid} />
@@ -832,12 +812,12 @@ function HomePage({
           {blocks.length === 0 ? (
             <div className="px-4 py-10 text-sm text-white/42">No blocks indexed yet.</div>
           ) : (
-            <div className="divide-y divide-white/8">
+            <div className="space-y-2 p-3">
               {blocks.slice(0, 6).map((block) => (
                 <button
                   key={block.height}
                   onClick={() => onSelectBlock(block.height)}
-                  className="grid w-full grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.04]"
+                  className="grid w-full grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-xl bg-white/[0.03] px-4 py-3 text-left transition hover:bg-white/[0.05]"
                 >
                   <span className="text-sm font-semibold text-white">#{block.height}</span>
                   <span className="hash text-xs text-white/46">{block.block_hash}</span>
@@ -851,7 +831,7 @@ function HomePage({
           )}
         </Panel>
 
-        <Panel className="flex min-h-full flex-col p-5">
+        <CardSpotlight className="surface flex min-h-full flex-col rounded-lg p-5">
           <div className="flex items-center justify-between gap-3">
             <div className="text-sm font-semibold text-white">Settlement snapshot</div>
             {latestBatch && <Badge tone={settlementStatusTone(latestBatch.status)}>{settlementStatusLabel(latestBatch.status)}</Badge>}
@@ -868,18 +848,19 @@ function HomePage({
                 <HomeDetail label="Deposits" value={formatNumber(latestBatch.deposit_count)} />
                 <HomeDetail label="L1 chain" value={latestBatch.l1_chain_id ?? "Pending"} />
               </div>
-              <button
+              <Button
                 onClick={() => onNavigate(latestBatch.status === "built" ? "Prove" : "Settlement")}
-                className="mt-auto inline-flex h-10 items-center justify-between border-t border-white/10 pt-4 text-sm font-medium text-white/64 transition hover:text-mint"
+                variant="ghost"
+                className="mt-auto w-full justify-between px-0 pt-4 hover:bg-transparent hover:text-mint"
               >
                 {latestBatch.status === "built" ? "Open proof workspace" : "Inspect settlement"}
                 <ArrowRight className="h-4 w-4" />
-              </button>
+              </Button>
             </>
           ) : (
             <div className="flex flex-1 items-center text-sm text-white/42">No settlement packages have been built.</div>
           )}
-        </Panel>
+        </CardSpotlight>
       </section>
     </div>
   );
@@ -917,8 +898,8 @@ function RollupFlow({ latestBatch }: { latestBatch?: RollupBatchSummary }) {
   return (
     <div className="relative hidden min-h-[22rem] items-center justify-center lg:flex" aria-label="Rollup settlement flow">
       <div className="!absolute inset-8 rounded-full border border-mint/[0.06] bg-mint/[0.025] blur-2xl" />
-      <div className="relative w-full max-w-sm rounded-xl border border-white/10 bg-black/25 p-4 shadow-2xl shadow-black/25">
-        <div className="mb-4 flex items-center justify-between border-b border-white/8 pb-3">
+      <div className="relative w-full max-w-sm rounded-xl bg-black/25 p-4 shadow-2xl shadow-black/25 ring-1 ring-white/[0.04]">
+        <div className="mb-4 flex items-center justify-between pb-2">
           <span className="text-xs font-medium uppercase tracking-[0.15em] text-white/40">Live settlement flow</span>
           <span className="flex items-center gap-1.5 text-xs text-mint/70">
             <motion.span
@@ -933,16 +914,16 @@ function RollupFlow({ latestBatch }: { latestBatch?: RollupBatchSummary }) {
           {stages.map((stage, index) => (
             <div key={stage.label}>
               <motion.div
-                className="flex items-center gap-3 rounded-lg border border-white/8 bg-white/[0.035] p-3"
+                className="flex items-center gap-3 rounded-lg bg-white/[0.045] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)]"
                 animate={reduceMotion ? undefined : { borderColor: ["rgba(255,255,255,0.08)", "rgba(88,244,183,0.22)", "rgba(255,255,255,0.08)"] }}
                 transition={reduceMotion ? undefined : { duration: 4, delay: index * 0.7, repeat: Infinity }}
               >
                 <div className={cn(
-                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-md border",
-                  stage.tone === "cyan" && "border-cyan/20 bg-cyan/10 text-cyan",
-                  stage.tone === "mint" && "border-mint/20 bg-mint/10 text-mint",
-                  stage.tone === "amber" && "border-amber/20 bg-amber/10 text-amber",
-                  stage.tone === "neutral" && "border-white/10 bg-white/[0.04] text-white/40",
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-md",
+                  stage.tone === "cyan" && "bg-cyan/10 text-cyan",
+                  stage.tone === "mint" && "bg-mint/10 text-mint",
+                  stage.tone === "amber" && "bg-amber/10 text-amber",
+                  stage.tone === "neutral" && "bg-white/[0.04] text-white/40",
                 )}>
                   {stage.icon}
                 </div>
@@ -982,7 +963,7 @@ function HomeSearch({ onSearch }: { onSearch: (query: string) => void }) {
         event.preventDefault();
         onSearch(value);
       }}
-      className="mt-7 flex h-12 w-full max-w-2xl items-center gap-3 rounded-lg border border-white/14 bg-black/25 px-4 shadow-lg shadow-black/10 transition focus-within:border-mint/45 focus-within:bg-black/35"
+      className="mt-7 flex h-12 w-full max-w-2xl items-center gap-3 rounded-lg bg-black/25 px-4 shadow-lg shadow-black/10 transition focus-within:bg-black/35"
     >
       <Search className="h-5 w-5 shrink-0 text-white/36" />
       <input
@@ -1008,7 +989,7 @@ function HomeMetric({
   good?: boolean;
 }) {
   return (
-    <div className="min-w-0 border-b border-r border-white/8 p-4 last:border-r-0 lg:border-b-0">
+    <div className="min-w-0 p-4 transition-colors hover:bg-white/[0.025]">
       <div className="text-xs font-medium uppercase tracking-[0.13em] text-white/36">{label}</div>
       <div className="mt-3 truncate text-2xl font-semibold tracking-tight text-white">{value}</div>
       <div className={cn("mt-1.5 text-xs text-white/40", good && "text-mint/70")}>{detail}</div>
@@ -1018,7 +999,7 @@ function HomeMetric({
 
 function HomeDetail({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="min-w-0 border-l border-white/10 pl-3">
+    <div className="min-w-0 pl-3">
       <div className="text-xs text-white/34">{label}</div>
       <div className="mt-1 truncate text-sm font-medium text-white/76">{value}</div>
     </div>
@@ -1103,7 +1084,7 @@ function BlocksView({
                 key={block.height}
                 onClick={() => onSelectBlock(block.height)}
                 className={cn(
-                  "flex w-full items-center gap-3 border-b border-white/8 px-4 py-3 text-left transition",
+                "flex w-full items-center gap-3 px-4 py-3 text-left transition",
                   selectedHeight === block.height ? "bg-mint/10" : "hover:bg-white/[0.045]",
                 )}
               >
@@ -1138,26 +1119,28 @@ function BlocksView({
                 <HashLine label="State root" value={selectedBlock.state_root} />
                 <MetricLine label="Transfers" value={selectedBlock.transactions.length} />
               </div>
-              <div className="overflow-hidden rounded-lg border border-white/10">
-                <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)_4rem] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-center text-xs uppercase tracking-[0.14em] text-white/38">
+              <div className="overflow-hidden rounded-2xl bg-white/[0.025] p-2">
+                <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)_4rem] gap-3 rounded-xl bg-white/[0.045] px-3 py-2 text-center text-xs uppercase tracking-[0.14em] text-white/38">
                   <span>Sender</span>
                   <span className="text-center">Amount</span>
                   <span>Receiver</span>
                   <span>Details</span>
                 </div>
-                {selectedBlock.transactions.length === 0 ? (
-                  <div className="px-3 py-6 text-sm text-white/48">The first block only starts the system, so it has no transfers.</div>
-                ) : (
-                  selectedBlock.transactions.map((tx, index) => (
-                    <TransactionRow
-                      key={`${tx.signature}-${index}`}
-                      tx={tx}
-                      hash={selectedBlock.transaction_views[index]?.hash ?? null}
-                      onSelectAccount={onSelectAccount}
-                      onSelectTx={onSelectTx}
-                    />
-                  ))
-                )}
+                <div className="space-y-2 pt-2">
+                  {selectedBlock.transactions.length === 0 ? (
+                    <div className="px-3 py-6 text-sm text-white/48">The first block only starts the system, so it has no transfers.</div>
+                  ) : (
+                    selectedBlock.transactions.map((tx, index) => (
+                      <TransactionRow
+                        key={`${tx.signature}-${index}`}
+                        tx={tx}
+                        hash={selectedBlock.transaction_views[index]?.hash ?? null}
+                        onSelectAccount={onSelectAccount}
+                        onSelectTx={onSelectTx}
+                      />
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           ) : (
@@ -1180,19 +1163,17 @@ function BlocksView({
               onChange={(event) => setLookupHash(event.target.value)}
               placeholder="Paste transaction hash"
               aria-label="Transaction hash"
-              className="h-10 min-w-[16rem] flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:font-sans placeholder:text-white/34 focus:border-mint/40"
+              className="h-10 min-w-[16rem] flex-1 rounded-lg bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:font-sans placeholder:text-white/34 focus:ring-2 focus:ring-mint/10"
             />
-            <button
-              type="submit"
-              disabled={!lookupHash.trim()}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-mint px-3 text-sm font-semibold text-ink transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
+            <Button type="submit" disabled={!lookupHash.trim()} variant="primary">
               <Search className="h-4 w-4" />
               Open
-            </button>
-            <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-lg border border-white/12 px-3 text-sm font-medium text-white/68 transition hover:border-mint/30 hover:text-mint">
-              <Upload className="h-4 w-4" />
-              Open reference
+            </Button>
+            <label className={buttonStyles({ className: "cursor-pointer" })}>
+              <span className="relative z-10 inline-flex items-center gap-2">
+                <Upload className="h-4 w-4" />
+                Open reference
+              </span>
               <input
                 type="file"
                 accept="application/json,.json"
@@ -1208,14 +1189,14 @@ function BlocksView({
           {referenceError && <div className="mt-3 text-sm text-rose">{referenceError}</div>}
           {selectedTx && visibleTransfer ? (
             <div className="mt-4 grid gap-4">
-              <div className="flex flex-col gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-3 rounded-lg bg-white/[0.04] p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="text-sm font-semibold text-white">Portable transaction reference</div>
                   <div className="mt-1 text-xs text-white/46">
                     The transaction hash is the stable lookup ID. Export it with public metadata to reopen this transaction later.
                   </div>
                 </div>
-                <button
+                <Button
                   onClick={() => downloadTransactionReference({
                     hash: selectedTx,
                     transfer: visibleTransfer,
@@ -1223,11 +1204,11 @@ function BlocksView({
                     transactionIndex: transaction?.transaction_index ?? poolEntry?.included_transaction_index ?? null,
                     batch,
                   })}
-                  className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-lg border border-mint/25 bg-mint/10 px-3 text-sm font-medium text-mint hover:bg-mint/15"
+                  size="sm"
                 >
                   <Download className="h-4 w-4" />
                   Export reference
-                </button>
+                </Button>
               </div>
               <TransactionLifecycle
                 hash={selectedTx}
@@ -1242,7 +1223,7 @@ function BlocksView({
               </div>
             </div>
           ) : transactionError ? (
-            <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{transactionError}</div>
+            <div className="mt-4 rounded-lg bg-rose/10 p-3 text-sm text-rose">{transactionError}</div>
           ) : (
             <div className="mt-4 text-sm text-white/50">
               Paste a transaction hash above or select the details icon in an activity row.
@@ -1302,19 +1283,19 @@ function TransactionLifecycle({
   ];
 
   return (
-    <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+    <div className="py-2">
       <div className="mb-3 text-xs font-medium uppercase tracking-[0.16em] text-white/38">Lifecycle</div>
       <div className="grid gap-2 md:grid-cols-4">
         {steps.map((step, index) => (
-          <div key={step.label} className="relative min-w-0 rounded-lg border border-white/8 bg-white/[0.035] p-3">
+          <div key={step.label} className="relative min-w-0 px-1 py-2">
             <div className="flex items-center gap-2">
               <div className={cn(
-                "flex h-6 w-6 items-center justify-center rounded-full border text-xs font-semibold",
+                "flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold",
                 failed && index === 0
-                  ? "border-rose/30 bg-rose/10 text-rose"
+                  ? "bg-rose/10 text-rose"
                   : step.complete
-                    ? "border-mint/30 bg-mint/10 text-mint"
-                    : "border-white/10 bg-white/[0.04] text-white/38",
+                    ? "bg-mint/10 text-mint"
+                    : "bg-white/[0.04] text-white/38",
               )}>
                 {step.complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : index + 1}
               </div>
@@ -1353,11 +1334,11 @@ function AccountFinder({
           value={manual}
           onChange={(event) => setManual(event.target.value)}
           placeholder="Paste wallet address"
-          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.06] px-3 py-2 text-sm text-white outline-none placeholder:text-white/34 focus:border-mint/40"
+          className="min-w-0 flex-1 rounded-lg bg-white/[0.06] px-3 py-2 text-sm text-white outline-none placeholder:text-white/34 focus:ring-2 focus:ring-mint/10"
         />
-        <button className="rounded-lg bg-mint px-3 py-2 text-sm font-semibold text-ink transition hover:bg-mint/90">
+        <Button type="submit" variant="primary">
           Open
-        </button>
+        </Button>
       </form>
       <div className="mt-4 space-y-2">
         {candidates.map((candidate) => (
@@ -1365,10 +1346,10 @@ function AccountFinder({
             key={candidate.address}
             onClick={() => onSelectAccount(candidate.address)}
             className={cn(
-              "w-full rounded-lg border p-3 text-left transition",
+              "w-full rounded-lg p-3 text-left transition",
               selectedAccount === candidate.address
-                ? "border-mint/35 bg-mint/10"
-                : "border-white/10 bg-white/[0.035] hover:border-white/20",
+                ? "bg-mint/10"
+                : "bg-white/[0.035] hover:bg-white/[0.055]",
             )}
           >
             <div className="hash text-sm text-white">{candidate.address}</div>
@@ -1406,17 +1387,14 @@ function AccountDetail({
             <MetricLine label="Next transfer #" value={account.nonce} />
           </div>
           <div>
-            <button
-              onClick={() => onSendTo(account.address)}
-              className="inline-flex h-10 items-center gap-2 rounded-lg bg-mint px-4 text-sm font-semibold text-ink transition hover:bg-mint/90"
-            >
+            <Button onClick={() => onSendTo(account.address)} variant="primary">
               <Send className="h-4 w-4" />
               Send to this wallet
-            </button>
+            </Button>
           </div>
         </div>
       ) : accountError ? (
-        <div className="mt-4 rounded-lg border border-rose/20 bg-rose/10 p-3 text-sm text-rose">{accountError}</div>
+        <div className="mt-4 rounded-lg bg-rose/10 p-3 text-sm text-rose">{accountError}</div>
       ) : (
         <div className="mt-4 text-sm text-white/50">Select a wallet from the current activity group or paste an address.</div>
       )}
@@ -1475,99 +1453,122 @@ function SendTransferView({
   }
 
   return (
-    <Panel className="mx-auto w-full max-w-3xl overflow-hidden">
-      <div className="border-b border-white/8 bg-white/[0.025] p-5">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-lg font-semibold text-white">Send L2 funds</div>
-            <div className="mt-1 text-sm text-white/48">Your private key stays inside your wallet.</div>
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+      <Panel className="overflow-hidden">
+        <div className="pb-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="font-heading text-lg font-semibold text-white">Send L2 funds</div>
+              <div className="mt-1 text-sm text-white/48">Your private key stays inside your wallet.</div>
+            </div>
+            {wallet && <Badge tone="good">Ethereum wallet connected</Badge>}
           </div>
-          {wallet && <Badge tone="good">Ethereum wallet connected</Badge>}
         </div>
-      </div>
 
-      <div className="grid gap-5 p-5">
-        {!wallet ? (
-          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4 text-sm text-white/58">
-            Connect your Ethereum wallet from the header to send L2 funds.
-          </div>
-        ) : (
-          <>
-            <div className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-4 sm:grid-cols-[1fr_auto] sm:items-center">
-              <div className="min-w-0">
-                <div className="text-xs uppercase tracking-[0.14em] text-white/38">From</div>
-                <div className="hash mt-1 text-sm text-white/78">{walletAddress}</div>
+        <div className="grid gap-5">
+          {!wallet ? (
+            <div className="grid gap-3 rounded-xl bg-white/[0.03] p-4">
+              <div className="flex items-center gap-3">
+                <Wallet className="h-4 w-4 text-mint/70" />
+                <div className="text-sm text-white/52">Connect wallet in the header to send L2 funds.</div>
               </div>
-              <div className="flex items-center gap-5">
-                <div>
-                  <div className="text-xs text-white/38">Balance</div>
-                  <div className="mt-1 text-lg font-semibold text-white">{walletAccount.data?.balance ?? "—"}</div>
-                </div>
-                <button
-                  onClick={() => onWalletChange(null)}
-                  className="text-sm text-white/46 hover:text-white"
-                >
-                  Disconnect
-                </button>
+              <div className="text-xs text-white/36">
+                Once connected, this page will show your balance, recipient, amount, and nonce in one place.
               </div>
             </div>
-
-            {walletAccount.error ? (
-              <div className="rounded-lg border border-amber/25 bg-amber/10 p-3 text-sm text-amber">
-                This wallet is not funded on the current rollup.
-              </div>
-            ) : (
-              <div className="grid gap-4">
-                <label className="grid gap-2 text-sm font-medium text-white/70">
-                  Recipient
-                  <input
-                    value={recipient}
-                    onChange={(event) => onRecipientChange(event.target.value)}
-                    placeholder="Paste recipient wallet address"
-                    className="h-12 rounded-lg border border-white/10 bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:border-mint/50 focus:ring-2 focus:ring-mint/10"
-                  />
-                </label>
-                <label className="grid gap-2 text-sm font-medium text-white/70">
-                  Amount
-                  <input
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={amount}
-                    onChange={(event) => setAmount(Number(event.target.value))}
-                    className="h-12 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-lg text-white outline-none focus:border-mint/50 focus:ring-2 focus:ring-mint/10"
-                  />
-                </label>
-                <button
-                  onClick={sendTransfer}
-                  disabled={submitting || recipient.trim().length === 0 || amount < 1}
-                  className="inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-mint px-5 text-base font-semibold text-ink shadow-glow transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  <Send className="h-5 w-5" />
-                  {submitting ? "Sending…" : "Send transfer"}
-                </button>
-                <div className="text-center text-xs text-white/38">
-                  The next nonce ({nextNonce}) is selected automatically.
+          ) : (
+            <>
+              <div className="grid gap-3 rounded-xl bg-white/[0.03] p-4 sm:grid-cols-[1fr_auto] sm:items-center">
+                <div className="min-w-0">
+                  <div className="text-xs uppercase tracking-[0.14em] text-white/38">From</div>
+                  <div className="hash mt-1 text-sm text-white/78">{walletAddress}</div>
+                </div>
+                <div className="flex items-center gap-5">
+                  <div>
+                    <div className="text-xs text-white/38">Balance</div>
+                    <div className="mt-1 text-lg font-semibold text-white">{walletAccount.data?.balance ?? "—"}</div>
+                  </div>
+                  <Button
+                    onClick={() => onWalletChange(null)}
+                    variant="ghost"
+                    size="sm"
+                  >
+                    Disconnect
+                  </Button>
                 </div>
               </div>
-            )}
-          </>
-        )}
 
-        {notice && (
-          <div className={cn(
-            "rounded-lg border p-3 text-sm",
-            notice.tone === "bad"
-              ? "border-rose/25 bg-rose/10 text-rose"
-              : notice.tone === "good"
-                ? "border-mint/25 bg-mint/10 text-mint"
-                : "border-white/10 bg-white/[0.04] text-white/64",
-          )}>
-            {notice.message}
-          </div>
-        )}
-      </div>
-    </Panel>
+              {walletAccount.error ? (
+                <div className="rounded-xl bg-amber/10 p-3 text-sm text-amber">
+                  This wallet is not funded on the current rollup.
+                </div>
+              ) : (
+                <div className="grid gap-4">
+                  <label className="grid gap-2 text-sm font-medium text-white/70">
+                    Recipient
+                    <input
+                      value={recipient}
+                      onChange={(event) => onRecipientChange(event.target.value)}
+                      placeholder="Paste recipient wallet address"
+                      className="h-12 rounded-lg bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:ring-2 focus:ring-mint/10"
+                    />
+                  </label>
+                  <label className="grid gap-2 text-sm font-medium text-white/70">
+                    Amount
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={amount}
+                      onChange={(event) => setAmount(Number(event.target.value))}
+                      className="h-12 rounded-lg bg-white/[0.06] px-3 text-lg text-white outline-none focus:ring-2 focus:ring-mint/10"
+                    />
+                  </label>
+                  <Button
+                    onClick={sendTransfer}
+                    disabled={submitting || recipient.trim().length === 0 || amount < 1}
+                    variant="primary"
+                    size="lg"
+                    className="h-12 text-base"
+                  >
+                    <Send className="h-5 w-5" />
+                    {submitting ? "Sending…" : "Send transfer"}
+                  </Button>
+                  <div className="text-center text-xs text-white/38">
+                    The next nonce ({nextNonce}) is selected automatically.
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {notice && (
+            <div className={cn(
+              "rounded-xl p-3 text-sm",
+              notice.tone === "bad"
+                ? "bg-rose/10 text-rose"
+                : notice.tone === "good"
+                  ? "bg-mint/10 text-mint"
+                  : "bg-white/[0.04] text-white/64",
+            )}>
+              {notice.message}
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      <Panel className="overflow-hidden">
+        <div className="pb-4">
+          <div className="font-heading text-lg font-semibold text-white">Before you send</div>
+          <div className="mt-1 text-sm text-white/48">Minimal checklist for a transfer.</div>
+        </div>
+        <div className="space-y-2">
+          <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/76">Connect a wallet from the header.</div>
+          <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/76">Enter a recipient and amount.</div>
+          <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/76">The nonce is filled automatically from your account state.</div>
+        </div>
+      </Panel>
+    </div>
   );
 }
 
@@ -1649,20 +1650,20 @@ function SequencerView({
           <p className="mt-2 text-sm leading-6 text-white/48">
             Submit an externally signed transfer payload. Most users should use Send instead.
           </p>
-          <button onClick={() => setShowSignedJson((shown) => !shown)} className="mt-3 text-sm text-mint/80 hover:text-mint">
+          <Button onClick={() => setShowSignedJson((shown) => !shown)} variant="ghost" size="sm" className="mt-3 px-0 text-mint/80 hover:bg-transparent hover:text-mint">
             {showSignedJson ? "Hide" : "Show"} advanced signed JSON submission
-          </button>
+          </Button>
           {showSignedJson && (
             <div className="mt-3">
               <textarea
                 value={transferJson}
                 onChange={(event) => setTransferJson(event.target.value)}
                 placeholder='{"from":"0x...","to":"0x...","amount":5,"nonce":0,"signature":"0x..."}'
-                className="min-h-36 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
+                className="min-h-36 w-full resize-y rounded-lg bg-black/20 p-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/28 focus:ring-2 focus:ring-mint/10"
               />
-              <button onClick={submitTransfer} disabled={submitting || transferJson.trim().length === 0} className="mt-3 rounded-lg border border-mint/30 px-3 py-2 text-sm font-medium text-mint disabled:opacity-50">
+              <Button onClick={submitTransfer} disabled={submitting || transferJson.trim().length === 0} className="mt-3">
                 Submit signed JSON
-              </button>
+              </Button>
             </div>
           )}
         </Panel>
@@ -1686,17 +1687,18 @@ function SequencerView({
                 max={100}
                 value={limit}
                 onChange={(event) => setLimit(Math.min(100, Math.max(1, Number(event.target.value) || 1)))}
-                className="h-10 rounded-lg border border-white/10 bg-white/[0.06] px-3 text-white outline-none focus:border-mint/40"
+                className="h-10 rounded-lg bg-white/[0.06] px-3 text-white outline-none focus:ring-2 focus:ring-mint/10"
               />
             </label>
-            <button
+            <Button
               onClick={sequenceBatch}
               disabled={sequencing || sequenceableTotal === 0}
-              className="self-end inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan px-3 text-sm font-semibold text-ink transition hover:bg-cyan/90 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
+              variant="primary"
+              className="self-end bg-cyan hover:bg-cyan/90"
             >
               <Play className="h-4 w-4" />
               Build block
-            </button>
+            </Button>
           </div>
           {pendingTotal === 0 && (
             <div className="mt-3 text-xs text-white/40">
@@ -1706,7 +1708,7 @@ function SequencerView({
         </Panel>
 
         {notice && (
-          <Panel className={cn("p-3", notice.tone === "bad" ? "border-rose/25 bg-rose/10" : "border-mint/25 bg-mint/10")}>
+          <Panel className={cn("p-3", notice.tone === "bad" ? "bg-rose/10" : "bg-mint/10")}>
             <div className={cn("text-sm font-medium", notice.tone === "bad" ? "text-rose" : "text-mint")}>{notice.message}</div>
           </Panel>
         )}
@@ -1725,7 +1727,7 @@ function SequencerView({
               <Badge tone="good">All processed</Badge>
             </div>
           ) : (
-            <div className="max-h-[24rem] overflow-auto">
+            <div className="max-h-[24rem] space-y-2 overflow-auto p-3">
               {pendingEntries.map((entry) => (
                 <TransferQueueRow key={entry.id} entry={entry} />
               ))}
@@ -1742,9 +1744,9 @@ function SequencerView({
           {recentIncluded.length === 0 ? (
             <div className="px-4 py-5 text-sm text-white/48">No transfers have been included yet.</div>
           ) : (
-            <div className="divide-y divide-white/8">
+            <div className="space-y-2 p-3">
               {recentIncluded.map((entry) => (
-                <div key={entry.id} className="flex items-center gap-3 px-4 py-3">
+                <div key={entry.id} className="flex items-center gap-3 rounded-xl bg-white/[0.03] px-4 py-3">
                   <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-sm font-semibold text-mint">
                     {entry.included_block_height ?? "–"}
                   </div>
@@ -1754,14 +1756,14 @@ function SequencerView({
                       {entry.transfer.amount} transferred · position {entry.included_transaction_index ?? "–"}
                     </div>
                   </div>
-                  <button
+                  <IconButton
                     onClick={() => onOpenTransaction(entry.hash)}
                     title="Open transaction details"
                     aria-label="Open transaction details"
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 text-white/48 hover:border-mint/30 hover:text-mint"
+                    className="h-8 w-8"
                   >
                     <ExternalLink className="h-3.5 w-3.5" />
-                  </button>
+                  </IconButton>
                 </div>
               ))}
             </div>
@@ -1775,7 +1777,7 @@ function SequencerView({
 
 function TransferQueueRow({ entry }: { entry: TransactionPoolEntry }) {
   return (
-    <div className="grid gap-3 border-b border-white/8 px-4 py-3 last:border-b-0">
+    <div className="grid gap-3 rounded-xl bg-white/[0.03] px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="hash min-w-0 text-sm text-white">{entry.hash}</div>
         <Badge tone="warn">pending</Badge>
@@ -1803,9 +1805,9 @@ function SystemIssuesPanel({
           <Badge tone="good">Healthy</Badge>
         </div>
       ) : (
-        <div className="divide-y divide-white/8">
+        <div className="space-y-2 p-3">
           {errors.map((error) => (
-            <div key={error.id} className="grid gap-1 px-4 py-3">
+            <div key={error.id} className="grid gap-1 rounded-xl bg-white/[0.03] px-4 py-3">
               <div className="flex items-center gap-2">
                 <Badge tone={error.resolved_at ? "neutral" : error.severity === "warning" ? "warn" : "bad"}>{error.severity}</Badge>
                 <span className="text-sm font-medium text-white">{error.message}</span>
@@ -1851,7 +1853,7 @@ function DepositsView({
           onWalletChange={onWalletChange}
           onDeposited={onDeposited}
         />
-        <Panel className="overflow-hidden">
+        <Panel className="overflow-hidden rounded-2xl bg-white/[0.02] shadow-[0_20px_60px_rgba(0,0,0,0.18)]">
           <SectionTitle icon={<Activity className="h-4 w-4" />} title="Deposit pipeline" action={`${deposits.length}/${total} indexed`} />
           <div className="grid gap-3 p-4">
             <DepositStageRow label="Observed" value={observed} complete={deposits.length > 0} />
@@ -1859,7 +1861,7 @@ function DepositsView({
             <DepositStageRow label="Executed" value={executed} complete={executed > 0} />
             <DepositStageRow label="Finalized" value={finalized} complete={finalized > 0} />
           </div>
-          <div className="grid grid-cols-2 border-t border-white/8">
+          <div className="grid grid-cols-2 gap-3 p-4 pt-0">
             <DepositCompactMetric label="Orphaned" value={orphaned} />
             <DepositCompactMetric
               label="Latest range"
@@ -1869,12 +1871,12 @@ function DepositsView({
         </Panel>
       </div>
 
-      <Panel className="min-w-0 overflow-hidden">
+      <Panel className="min-w-0 overflow-hidden rounded-2xl bg-white/[0.02] shadow-[0_20px_60px_rgba(0,0,0,0.18)]">
         <SectionTitle icon={<Database className="h-4 w-4" />} title="Canonical deposits" action="L1 to L2 state input" />
         {deposits.length === 0 ? (
           <div className="px-4 py-10 text-sm text-white/48">No deposits have been indexed yet.</div>
         ) : (
-          <div className="divide-y divide-white/8">
+          <div className="space-y-3 p-3">
             {deposits.map((deposit) => {
               const batch = batchForDeposit(deposit, batches);
               return (
@@ -1895,10 +1897,10 @@ function DepositsView({
 
 function DepositStageRow({ label, value, complete }: { label: string; value: number; complete: boolean }) {
   return (
-    <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-md border border-white/8 bg-white/[0.035] px-3 py-2.5">
+    <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl bg-white/[0.03] px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className={cn(
-        "flex h-7 w-7 items-center justify-center rounded-full border",
-        complete ? "border-mint/30 bg-mint/10 text-mint" : "border-white/10 bg-white/[0.04] text-white/34",
+        "flex h-7 w-7 items-center justify-center rounded-full shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
+        complete ? "bg-mint/10 text-mint" : "bg-white/[0.04] text-white/34",
       )}>
         {complete ? <CheckCircle2 className="h-4 w-4" /> : <Clock3 className="h-4 w-4" />}
       </div>
@@ -1910,7 +1912,7 @@ function DepositStageRow({ label, value, complete }: { label: string; value: num
 
 function DepositCompactMetric({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="min-w-0 border-r border-white/8 p-4 last:border-r-0">
+    <div className="min-w-0 rounded-xl bg-white/[0.03] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="text-xs uppercase tracking-[0.16em] text-white/36">{label}</div>
       <div className="mt-2 truncate text-sm font-semibold text-white">{value}</div>
     </div>
@@ -1927,10 +1929,10 @@ function DepositRow({
   onSelectBatch?: (batchNumber: number) => void;
 }) {
   return (
-    <div className="grid gap-3 px-4 py-4">
+    <div className="grid gap-3 rounded-2xl bg-white/[0.03] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="shrink-0 rounded-md border border-white/10 bg-white/[0.05] px-2.5 py-1 text-sm font-semibold text-white">
+          <span className="shrink-0 rounded-md bg-white/[0.06] px-2.5 py-1 text-sm font-semibold text-white">
             #{deposit.deposit_id}
           </span>
           <Badge tone={depositStatusTone(deposit.status)}>{depositStatusLabel(deposit.status)}</Badge>
@@ -1940,7 +1942,7 @@ function DepositRow({
           <div className="mt-0.5 text-xs text-white/38">{deposit.confirmations} confirmations</div>
         </div>
       </div>
-      <div className="grid gap-3 rounded-md border border-white/8 bg-white/[0.025] p-3 text-xs lg:grid-cols-[1fr_1fr_auto]">
+      <div className="grid gap-3 rounded-2xl bg-black/10 p-3 text-xs lg:grid-cols-[1fr_1fr_auto]">
         <AddressSummary label="L1 depositor" value={deposit.depositor_l1_address} />
         <AddressSummary label="L2 recipient" value={deposit.recipient_l2_address} />
         <div className="min-w-0">
@@ -1948,7 +1950,7 @@ function DepositRow({
           {batch ? (
             <button
               onClick={() => onSelectBatch?.(batch.batch_number)}
-              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-mint/20 bg-mint/10 px-2 text-xs font-medium text-mint transition hover:border-mint/40"
+              className="inline-flex h-7 items-center gap-1.5 rounded-md bg-mint/10 px-2 text-xs font-medium text-mint transition hover:bg-mint/15"
             >
               <PackageCheck className="h-3.5 w-3.5" />
               {batch.batch_number}
@@ -1968,7 +1970,7 @@ function DepositRow({
 
 function AddressSummary({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 rounded-lg bg-black/18 px-3 py-2">
       <div className="mb-1 text-[0.68rem] uppercase tracking-[0.14em] text-white/34">{label}</div>
       <div className="hash max-w-full text-sm text-white/66" title={value}>{shortHash(value, 10, 8)}</div>
     </div>
@@ -2013,42 +2015,44 @@ function DepositActionPanel({
   }
 
   return (
-    <Panel className="overflow-hidden">
-      <div className="border-b border-white/8 bg-white/[0.025] p-4">
+    <Panel className="overflow-hidden !bg-transparent !shadow-none before:hidden">
+      <div className="pb-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-lg font-semibold text-white">Add funds</div>
+            <div className="font-heading text-lg font-semibold text-white">Add funds</div>
             <div className="mt-1 text-sm text-white/48">Deposit ETH from your L1 wallet to an L2 recipient.</div>
           </div>
           {wallet && <Badge tone="good">Connected</Badge>}
         </div>
       </div>
 
-      <div className="grid gap-4 p-4">
+      <div className="grid gap-4">
         {!configured && (
-          <div className="rounded-lg border border-amber/25 bg-amber/10 p-3 text-sm text-amber">
+          <div className="rounded-2xl bg-amber/10 p-3 text-sm text-amber shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
             Deposit contract is not configured for this UI.
           </div>
         )}
 
         {!wallet ? (
-          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4 text-sm text-white/58">
-            Connect your Ethereum wallet from the header to make a deposit.
+          <div className="flex items-center gap-3 py-2 text-sm text-white/52">
+            <Wallet className="h-4 w-4 text-mint/70" />
+            Use Connect wallet in the header to make a deposit.
           </div>
         ) : (
           <>
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <div className="rounded-2xl bg-white/[0.04] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-xs uppercase tracking-[0.14em] text-white/38">From</div>
                   <div className="hash mt-1 max-w-full text-xs text-white/78 sm:text-sm" title={wallet}>{wallet}</div>
                 </div>
-                <button
+                <Button
                   onClick={() => onWalletChange(null)}
-                  className="shrink-0 text-sm text-white/46 hover:text-white"
+                  variant="ghost"
+                  size="sm"
                 >
                   Disconnect
-                </button>
+                </Button>
               </div>
             </div>
 
@@ -2058,12 +2062,12 @@ function DepositActionPanel({
                 value={recipient}
                 onChange={(event) => setRecipient(event.target.value)}
                 placeholder="0x..."
-                className="h-11 rounded-lg border border-white/10 bg-white/[0.06] px-4 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:border-mint/50 focus:ring-2 focus:ring-mint/10"
+                className="h-11 rounded-lg bg-white/[0.06] px-4 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:ring-2 focus:ring-mint/10"
               />
             </label>
             <label className="grid gap-2 text-sm font-medium text-white/70">
               Amount
-              <div className="grid grid-cols-[1fr_auto] overflow-hidden rounded-lg border border-white/10 bg-white/[0.06] focus-within:border-mint/50 focus-within:ring-2 focus-within:ring-mint/10">
+              <div className="grid grid-cols-[1fr_auto] overflow-hidden rounded-lg bg-white/[0.06] focus-within:ring-2 focus-within:ring-mint/10">
                 <input
                   inputMode="decimal"
                   value={amount}
@@ -2071,29 +2075,30 @@ function DepositActionPanel({
                   placeholder="0.01"
                   className="h-11 min-w-0 bg-transparent px-4 text-lg text-white outline-none placeholder:text-white/30"
                 />
-                <div className="flex h-11 items-center border-l border-white/10 px-4 text-sm text-white/48">ETH</div>
+                <div className="flex h-11 items-center px-4 text-sm text-white/48">ETH</div>
               </div>
             </label>
 
-            <button
+            <Button
               onClick={submitDeposit}
               disabled={!configured || submitting || recipient.trim().length === 0 || amount.trim().length === 0}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-mint px-5 text-sm font-semibold text-ink shadow-glow transition hover:bg-mint/90 disabled:cursor-not-allowed disabled:opacity-45"
+              variant="primary"
+              size="lg"
             >
               <Upload className="h-4 w-4" />
               {submitting ? "Depositing..." : "Deposit"}
-            </button>
+            </Button>
           </>
         )}
 
         {notice && (
           <div className={cn(
-            "rounded-lg border p-3 text-sm",
+            "rounded-2xl p-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]",
             notice.tone === "bad"
-              ? "border-rose/25 bg-rose/10 text-rose"
+              ? "bg-rose/10 text-rose"
               : notice.tone === "good"
-                ? "border-mint/25 bg-mint/10 text-mint"
-                : "border-white/10 bg-white/[0.04] text-white/64",
+                ? "bg-mint/10 text-mint"
+                : "bg-white/[0.04] text-white/64",
           )}>
             {notice.message}
           </div>
@@ -2122,19 +2127,21 @@ function RollupView({
 }) {
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[24rem_1fr]">
-      <Panel className="overflow-hidden">
+      <Panel className="overflow-hidden rounded-2xl bg-white/[0.02] shadow-[0_20px_60px_rgba(0,0,0,0.18)]">
         <SectionTitle icon={<PackageCheck className="h-4 w-4" />} title="Settlement packages" action={`${batches.length}/${batchTotal} built`} />
-        <div className="max-h-[36rem] overflow-auto">
+        <div className="max-h-[36rem] space-y-2 overflow-auto p-3">
           {batches.length === 0 ? (
-            <div className="px-4 py-10 text-sm text-white/48">No activity groups are ready for settlement yet.</div>
+            <div className="px-1 py-7 text-sm text-white/48">No activity groups are ready for settlement yet.</div>
           ) : (
             batches.map((batch) => (
               <button
                 key={batch.batch_number}
                 onClick={() => onSelectBatch(batch.batch_number)}
                 className={cn(
-                  "w-full border-b border-white/8 px-4 py-3 text-left transition",
-                  selectedBatchNumber === batch.batch_number ? "bg-mint/10" : "hover:bg-white/[0.045]",
+                  "w-full rounded-xl px-4 py-3 text-left transition duration-200 hover:-translate-y-px hover:bg-white/[0.05]",
+                  selectedBatchNumber === batch.batch_number
+                    ? "bg-mint/[0.12] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_10px_24px_rgba(0,0,0,0.14)]"
+                    : "bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
                 )}
               >
                 <div className="flex items-center justify-between gap-3">
@@ -2162,7 +2169,8 @@ function RollupView({
         </div>
       </Panel>
 
-      <Panel className="p-4">
+      <Panel className="overflow-hidden rounded-2xl bg-white/[0.02] shadow-[0_20px_60px_rgba(0,0,0,0.18)]">
+        <div className="p-4">
         <SectionTitle
           icon={<Layers3 className="h-4 w-4" />}
           title="Settlement package detail"
@@ -2184,7 +2192,7 @@ function RollupView({
               <MetricLine label="Deposit range" value={formatDepositRange(selectedBatch)} />
               <MetricLine label="Proof input" value={selectedBatch.deposit_count > 0 ? "Bound" : "Empty"} />
             </div>
-            <div className="flex flex-col gap-2 border-b border-white/8 pb-3 sm:flex-row sm:items-end sm:justify-between">
+            <div className="flex flex-col gap-2 pb-2 sm:flex-row sm:items-end sm:justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-white">Validity commitments</h3>
                 <p className="mt-1 text-xs leading-5 text-white/48">
@@ -2201,7 +2209,7 @@ function RollupView({
               <HashLine label="Batch data hash" value={selectedBatch.data_hash} />
             </div>
             {selectedBatch.status === "built" ? (
-              <div className="flex flex-col gap-3 rounded-lg border border-amber/20 bg-amber/[0.06] p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-3 rounded-2xl bg-amber/[0.08] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)] sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="text-sm font-semibold text-amber">This package is ready to prove</div>
                   <div className="mt-1 text-sm text-white/52">Open the dedicated proof workspace to generate and submit its validity proof.</div>
@@ -2247,39 +2255,42 @@ function RollupView({
                 </div>
               </>
             )}
-            <div className="overflow-hidden rounded-lg border border-white/10">
-              <div className="grid grid-cols-[auto_1fr_auto] gap-3 border-b border-white/10 bg-white/[0.045] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38">
+            <div className="overflow-hidden rounded-2xl bg-white/[0.025] p-2">
+              <div className="grid grid-cols-[auto_1fr_auto] gap-3 rounded-xl bg-white/[0.05] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
                 <span>Group</span>
                 <span>Transfer</span>
                 <span>Open</span>
               </div>
-              {selectedBatch.transactions.length === 0 ? (
-                <div className="px-3 py-6 text-sm text-white/48">This package has no transfers.</div>
-              ) : (
-                selectedBatch.transactions.map((transaction) => (
-                  <div
-                    key={transaction.hash}
-                    className="grid grid-cols-[auto_1fr_auto] items-center gap-3 border-b border-white/8 px-3 py-3 text-sm last:border-b-0"
-                  >
-                    <span className="rounded-md bg-white/[0.06] px-2 py-1 text-xs font-semibold text-white/72">
-                      {transaction.block_height ?? "pending"}
-                    </span>
-                    <span className="hash min-w-0 text-white/72">{transaction.hash}</span>
-                    <button
-                      onClick={() => onSelectTx(transaction.hash)}
-                      className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.045] px-2 py-1 text-xs text-white/58 transition hover:border-mint/30 hover:text-mint"
+              <div className="space-y-2 pt-2">
+                {selectedBatch.transactions.length === 0 ? (
+                  <div className="px-3 py-5 text-sm text-white/48">This package has no transfers.</div>
+                ) : (
+                  selectedBatch.transactions.map((transaction) => (
+                    <div
+                      key={transaction.hash}
+                      className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl bg-white/[0.03] px-3 py-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
                     >
-                      <ExternalLink className="h-3 w-3" />
-                      View
-                    </button>
-                  </div>
-                ))
-              )}
+                      <span className="rounded-md bg-white/[0.06] px-2 py-1 text-xs font-semibold text-white/72">
+                        {transaction.block_height ?? "pending"}
+                      </span>
+                      <span className="hash min-w-0 text-white/72">{transaction.hash}</span>
+                      <Button
+                        onClick={() => onSelectTx(transaction.hash)}
+                        size="sm"
+                      >
+                        <ExternalLink className="h-3 w-3" />
+                        View
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           </div>
         ) : (
           <div className="mt-4 text-sm text-white/50">Select a settlement package from the list.</div>
         )}
+        </div>
       </Panel>
     </div>
   );
@@ -2300,19 +2311,19 @@ function SettlementProgress({ batch }: { batch: RollupBatchSummary }) {
   ];
 
   return (
-    <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+    <div className="py-2">
       <div className="mb-3 flex items-center justify-between gap-3">
         <span className="text-xs font-medium uppercase tracking-[0.16em] text-white/38">Settlement progress</span>
         <Badge tone={settlementStatusTone(batch.status)}>{settlementStatusLabel(batch.status)}</Badge>
       </div>
       <div className="grid gap-2 md:grid-cols-4">
         {steps.map((step, index) => (
-          <div key={step.label} className="flex items-center gap-3 rounded-lg border border-white/8 bg-white/[0.035] p-3">
+          <div key={step.label} className="flex items-center gap-3 rounded-xl bg-white/[0.03] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
             <div className={cn(
-              "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold",
+              "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
               step.complete
-                ? "border-mint/30 bg-mint/10 text-mint"
-                : "border-white/10 bg-white/[0.04] text-white/38",
+                ? "bg-mint/10 text-mint"
+                : "bg-white/[0.04] text-white/38",
             )}>
               {step.complete ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
             </div>
@@ -2354,32 +2365,34 @@ function ProofWorkspace({
   }
 
   return (
-    <Panel className="p-4">
-      <div className="mb-4 flex flex-col gap-3 border-b border-white/8 pb-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <div className="text-xs font-medium uppercase tracking-[0.14em] text-white/38">Ready batch</div>
-          <div className="mt-1 text-lg font-semibold text-white">Package {batch.batch_number}</div>
+    <Panel className="overflow-hidden rounded-2xl bg-white/[0.02] shadow-[0_20px_60px_rgba(0,0,0,0.18)]">
+      <div className="p-4">
+        <div className="mb-4 flex flex-col gap-3 pb-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <div className="text-xs font-medium uppercase tracking-[0.14em] text-white/38">Ready batch</div>
+            <div className="mt-1 font-heading text-lg font-semibold text-white">Package {batch.batch_number}</div>
+          </div>
+          <label className="grid gap-1.5 text-xs text-white/46">
+            Select package
+            <select
+              value={batch.batch_number}
+              onChange={(event) => onSelectBatch(Number(event.target.value))}
+              className="h-10 min-w-48 rounded-md bg-ink px-3 text-sm text-white outline-none focus:ring-2 focus:ring-mint/10"
+            >
+              {readyBatches.map((candidate) => (
+                <option key={candidate.batch_number} value={candidate.batch_number}>
+                  Package {candidate.batch_number} · {candidate.transaction_count} transfers
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        <label className="grid gap-1.5 text-xs text-white/46">
-          Select package
-          <select
-            value={batch.batch_number}
-            onChange={(event) => onSelectBatch(Number(event.target.value))}
-            className="h-10 min-w-48 rounded-md border border-white/12 bg-ink px-3 text-sm text-white outline-none focus:border-mint/40"
-          >
-            {readyBatches.map((candidate) => (
-              <option key={candidate.batch_number} value={candidate.batch_number}>
-                Package {candidate.batch_number} · {candidate.transaction_count} transfers
-              </option>
-            ))}
-          </select>
-        </label>
+        <SettlementNextStep
+          batch={batch}
+          wallet={wallet}
+          onSubmitted={() => onSubmitted(batch.batch_number)}
+        />
       </div>
-      <SettlementNextStep
-        batch={batch}
-        wallet={wallet}
-        onSubmitted={() => onSubmitted(batch.batch_number)}
-      />
     </Panel>
   );
 }
@@ -2423,7 +2436,7 @@ function SettlementNextStep({
   }
 
   return (
-    <div className="rounded-lg border border-amber/25 bg-amber/10 p-4">
+    <div className="rounded-2xl bg-amber/10 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
       <div className="grid gap-4">
         <div>
           <div className="text-sm font-semibold text-amber">Next: submit the validity proof</div>
@@ -2435,19 +2448,23 @@ function SettlementNextStep({
               href={witnessUrl}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint"
+              className={buttonStyles({ size: "sm" })}
             >
-              <ExternalLink className="h-4 w-4" />
-              Open witness
+              <span className="relative z-10 inline-flex items-center gap-2">
+                <ExternalLink className="h-4 w-4" />
+                Open witness
+              </span>
             </a>
             <a
               href={calldataUrl}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 hover:border-mint/30 hover:text-mint"
+              className={buttonStyles({ size: "sm" })}
             >
-              <ExternalLink className="h-4 w-4" />
-              Open calldata
+              <span className="relative z-10 inline-flex items-center gap-2">
+                <ExternalLink className="h-4 w-4" />
+                Open calldata
+              </span>
             </a>
           </div>
         </div>
@@ -2455,9 +2472,11 @@ function SettlementNextStep({
         <div className="grid gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-sm text-white/62">Proof artifact JSON</span>
-            <label className="inline-flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-white/12 bg-white/[0.05] px-3 text-sm font-medium text-white/72 transition hover:border-mint/30 hover:text-mint">
-              <Upload className="h-4 w-4" />
-              Load artifact
+            <label className={buttonStyles({ size: "sm", className: "cursor-pointer" })}>
+              <span className="relative z-10 inline-flex items-center gap-2">
+                <Upload className="h-4 w-4" />
+                Load artifact
+              </span>
               <input
                 type="file"
                 accept="application/json,.json"
@@ -2472,36 +2491,36 @@ function SettlementNextStep({
               value={artifactText}
               onChange={(event) => setArtifactText(event.target.value)}
               placeholder='{"public_values":"0x...","proof":"0x..."}'
-              className="min-h-32 w-full resize-y rounded-lg border border-white/10 bg-black/20 p-3 font-mono text-xs leading-5 text-white outline-none placeholder:text-white/28 focus:border-mint/40"
+              className="min-h-32 w-full resize-y rounded-lg bg-black/20 p-3 font-mono text-xs leading-5 text-white outline-none placeholder:text-white/28 focus:ring-2 focus:ring-mint/10"
             />
           </label>
         </div>
 
-        <div className="flex flex-col gap-3 border-t border-white/10 pt-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-3 rounded-2xl bg-black/10 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-white/46">
             <span>{settlementContractAddress ? `contract ${shortHash(settlementContractAddress, 8, 6)}` : "settlement contract not configured"}</span>
             <span>{wallet ? `wallet ${shortHash(wallet, 8, 6)}` : "connect wallet from the header"}</span>
             <span>{artifactText.trim() ? "artifact loaded" : "waiting for artifact"}</span>
           </div>
-          <button
+          <Button
             onClick={submitProof}
             disabled={submitting || !canSubmit}
-            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md bg-amber px-4 text-sm font-semibold text-ink transition hover:bg-amber/90 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30"
+            variant="warning"
           >
             <ShieldAlert className="h-4 w-4" />
             {submitting ? "Submitting" : "Submit proof"}
-          </button>
+          </Button>
         </div>
 
         {notice && (
           <div
             className={cn(
-              "rounded-lg border px-3 py-2 text-sm font-medium",
+              "rounded-2xl px-3 py-2 text-sm font-medium shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]",
               notice.tone === "bad"
-                ? "border-rose/25 bg-rose/10 text-rose"
+                ? "bg-rose/10 text-rose"
                 : notice.tone === "good"
-                  ? "border-mint/25 bg-mint/10 text-mint"
-                  : "border-white/10 bg-white/[0.05] text-white/64",
+                  ? "bg-mint/10 text-mint"
+                  : "bg-white/[0.05] text-white/64",
             )}
           >
             {notice.message}
@@ -2530,7 +2549,7 @@ function SettlementReceiptPanel({
   const hasReceipt = Boolean(receipt);
 
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
+    <div className="rounded-xl bg-white/[0.03] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-sm font-semibold text-white">
           <ReceiptText className="h-4 w-4 text-mint" />
@@ -2543,7 +2562,7 @@ function SettlementReceiptPanel({
         <ReceiptMetric icon={<Blocks className="h-3.5 w-3.5" />} label="Block" value={blockNumber ?? "none"} />
         <ReceiptMetric icon={<Gauge className="h-3.5 w-3.5" />} label="Gas" value={gasUsed ?? "none"} />
       </div>
-      <div className="mt-3 flex min-w-0 items-center gap-2 rounded-md border border-white/8 bg-black/15 px-2.5 py-2">
+      <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg bg-black/10 px-3 py-2">
         <span className="text-xs uppercase tracking-[0.14em] text-white/36">Tx</span>
         <span className="hash min-w-0 flex-1 text-sm text-white/72">{txHash ?? "none"}</span>
         {txHash && <CopyButton value={txHash} label={`${title} transaction`} />}
@@ -2554,7 +2573,7 @@ function SettlementReceiptPanel({
 
 function ReceiptMetric({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
   return (
-    <div className="min-w-0 rounded-md border border-white/8 bg-black/15 px-2.5 py-2">
+    <div className="min-w-0 rounded-lg bg-black/12 px-3 py-2">
       <div className="flex items-center gap-1.5 text-xs uppercase tracking-[0.14em] text-white/36">
         <span className="text-white/42">{icon}</span>
         {label}
@@ -2566,7 +2585,7 @@ function ReceiptMetric({ icon, label, value }: { icon: React.ReactNode; label: s
 
 function SectionTitle({ icon, title, action, flush = false }: { icon: React.ReactNode; title: string; action?: React.ReactNode; flush?: boolean }) {
   return (
-    <div className={cn("flex items-center justify-between gap-3", !flush && "border-b border-white/10 px-4 py-3")}>
+    <div className={cn("flex items-center justify-between gap-3", !flush && "px-4 pb-2 pt-4")}>
       <div className="flex items-center gap-2 text-sm font-semibold text-white">
         <span className="text-mint">{icon}</span>
         {title}
@@ -2578,7 +2597,7 @@ function SectionTitle({ icon, title, action, flush = false }: { icon: React.Reac
 
 function HashLine({ label, value }: { label: string; value?: string | null }) {
   return (
-    <div className="min-w-0 rounded-lg border border-white/10 bg-white/[0.04] p-3">
+    <div className="min-w-0 rounded-lg bg-black/10 px-3 py-3">
       <div className="mb-2 text-xs uppercase tracking-[0.16em] text-white/36">{label}</div>
       <div className="flex min-w-0 items-center gap-2">
         <div className="hash min-w-0 flex-1 text-sm text-white/78">{value ?? "none"}</div>
@@ -2662,7 +2681,7 @@ function settlementMilestoneText(batch: RollupBatchSummary) {
 
 function MetricLine({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
+    <div className="rounded-xl bg-white/[0.03] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="mb-2 text-xs uppercase tracking-[0.16em] text-white/36">{label}</div>
       <div className="break-words text-xl font-semibold leading-tight text-white sm:text-2xl">{value}</div>
     </div>
@@ -2672,7 +2691,7 @@ function MetricLine({ label, value }: { label: string; value: React.ReactNode })
 function CopyButton({ value, label = "value" }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button
+    <IconButton
       title={`Copy ${label.toLowerCase()}`}
       aria-label={`Copy ${label.toLowerCase()}`}
       onClick={async () => {
@@ -2680,10 +2699,10 @@ function CopyButton({ value, label = "value" }: { value: string; label?: string 
         setCopied(true);
         window.setTimeout(() => setCopied(false), 900);
       }}
-      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/44 transition hover:bg-white/10 hover:text-mint"
+      className="h-8 w-8 bg-transparent"
     >
       {copied ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-    </button>
+    </IconButton>
   );
 }
 
@@ -2742,7 +2761,7 @@ function TransactionRow({
   onSelectTx: (hash: string) => void;
 }) {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)_4rem] items-center gap-3 border-b border-white/8 px-3 py-3 text-sm last:border-b-0">
+    <div className="grid grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)_4rem] items-center gap-3 rounded-xl bg-white/[0.03] px-3 py-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <button
         onClick={() => onSelectAccount(tx.from)}
         title={tx.from}
@@ -2763,7 +2782,7 @@ function TransactionRow({
         onClick={() => hash && onSelectTx(hash)}
         title={hash ? `Open transaction ${hash}` : "Transaction unavailable"}
         aria-label={hash ? "Open transaction details" : "Transaction unavailable"}
-        className="inline-flex h-8 w-8 items-center justify-center justify-self-center rounded-md border border-white/10 bg-white/[0.045] text-white/58 transition hover:border-mint/30 hover:text-mint disabled:opacity-40"
+        className="inline-flex h-8 w-8 items-center justify-center justify-self-center rounded-md bg-white/[0.045] text-white/58 transition hover:text-mint disabled:opacity-40"
       >
         <ExternalLink className="h-3.5 w-3.5" />
       </button>
@@ -2778,10 +2797,10 @@ function TransferDetail({ tx, onSelectAccount }: { tx: Transfer; onSelectAccount
       <HashLine label="Receiver wallet" value={tx.to} />
       <MetricLine label="Amount" value={tx.amount} />
       <MetricLine label="Transfer #" value={tx.nonce} />
-      <button onClick={() => onSelectAccount(tx.from)} className="rounded-lg border border-cyan/20 bg-cyan/10 p-3 text-left text-sm font-medium text-cyan">
+      <button onClick={() => onSelectAccount(tx.from)} className="rounded-lg bg-cyan/10 p-3 text-left text-sm font-medium text-cyan shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
         Open sender
       </button>
-      <button onClick={() => onSelectAccount(tx.to)} className="rounded-lg border border-mint/20 bg-mint/10 p-3 text-left text-sm font-medium text-mint">
+      <button onClick={() => onSelectAccount(tx.to)} className="rounded-lg bg-mint/10 p-3 text-left text-sm font-medium text-mint shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
         Open receiver
       </button>
     </div>

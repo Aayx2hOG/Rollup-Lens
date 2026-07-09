@@ -18,7 +18,9 @@ export default {
         inset: "inset 0 1px 0 rgba(255,255,255,0.12)",
       },
       fontFamily: {
-        sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+        sans: ["Inter Variable", "Inter", "ui-sans-serif", "system-ui", "sans-serif"],
+        heading: ["Manrope Variable", "Manrope", "Inter Variable", "ui-sans-serif", "system-ui", "sans-serif"],
+        display: ["Instrument Serif", "Georgia", "serif"],
         mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "monospace"],
       },
     },

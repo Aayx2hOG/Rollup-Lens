@@ -77,16 +77,18 @@ cargo run -p settlement-client -- --dry-run submit-batch --batch-number 0
 
 ## End-to-end validity settlement tests
 
-Both ignored Rust integration-test tiers create an isolated Postgres schema,
-run the explorer API, sequence a signed transfer, deploy contracts to Anvil,
-submit through this client, and verify L1 state and persisted receipt metadata.
+Both ignored Rust integration-test tiers create an isolated Postgres schema and
+an empty protocol genesis, deploy a real deposit inbox to Anvil, derive a
+deposit observation from its canonical event, sequence the deposit credit,
+submit a signed L2 transfer, prove and settle both batches, and verify final
+balances, nonces, L1 state, and persisted receipt metadata.
 
 The fast tier uses a deterministic verifier mock and does not require SP1:
 
 ```bash
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
 cargo test -p settlement-client --test validity_settlement_e2e \
-  sequences_and_finalizes_a_batch_with_mock_verifier -- --ignored --nocapture
+  deposit_transfer_proof_and_settlement_lifecycle -- --ignored --nocapture
 ```
 
 The real tier generates a Groth16 proof and deploys the official SP1 verifier:

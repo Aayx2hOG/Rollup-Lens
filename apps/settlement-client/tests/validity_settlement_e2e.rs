@@ -13,7 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chain_core::{sign_transfer, Account};
+use chain_core::sign_transfer;
 use explorer_api::{app_with_pool_and_tokens_and_deposit_inbox, initialize_genesis, GenesisConfig};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
@@ -25,8 +25,6 @@ const ANVIL_ADDRESS: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
 const MOCK_PROGRAM_VKEY: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000007";
 const MOCK_PROOF: &str = "0x70726f6f66";
-const L1_DEPOSIT_INBOX: &str = "0x2222222222222222222222222222222222222222";
-
 const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/0001_init/migration.sql"),
     include_str!("../../../prisma/migrations/0002_error_events/migration.sql"),
@@ -43,7 +41,7 @@ const MIGRATIONS: &[&str] = &[
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TEST_DATABASE_URL, Anvil, and Forge"]
-async fn sequences_and_finalizes_a_batch_with_mock_verifier() {
+async fn deposit_transfer_proof_and_settlement_lifecycle() {
     run_scenario(VerifierMode::Mock).await;
 }
 
@@ -84,29 +82,30 @@ async fn run_scenario(verifier_mode: VerifierMode) {
     let temp = tempfile::tempdir().expect("create test directory");
     let (pool, schema) = isolated_database(&database_url).await;
 
-    let alice = create_keypair();
     let bob = create_keypair();
-    let alice_address = alice.address.clone();
+    let alice_address = ANVIL_ADDRESS.to_string();
     let bob_address = bob.address.clone();
-    let genesis = initialize_genesis(
-        &pool,
-        GenesisConfig {
-            accounts: vec![
-                Account {
-                    address: alice_address,
-                    balance: 1_000,
-                    nonce: 0,
-                },
-                Account {
-                    address: bob_address.clone(),
-                    balance: 0,
-                    nonce: 0,
-                },
-            ],
-        },
-    )
-    .await
-    .expect("initialize genesis");
+    let genesis = initialize_genesis(&pool, GenesisConfig { accounts: vec![] })
+        .await
+        .expect("initialize genesis");
+
+    let anvil_port = unused_port();
+    let rpc_url = format!("http://127.0.0.1:{anvil_port}");
+    let anvil = ManagedChild::spawn(
+        Command::new("anvil")
+            .arg("--port")
+            .arg(anvil_port.to_string())
+            .arg("--silent"),
+        "start Anvil",
+    );
+    let client = reqwest::Client::new();
+    wait_for_rpc(&client, &rpc_url).await;
+    let deposit_inbox = forge_create(
+        &workspace,
+        &rpc_url,
+        "contracts/L1DepositInbox.sol:L1DepositInbox",
+        &[],
+    );
 
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -119,78 +118,48 @@ async fn run_scenario(verifier_mode: VerifierMode) {
                 pool.clone(),
                 None,
                 None,
-                L1_DEPOSIT_INBOX.to_string(),
+                deposit_inbox.clone(),
             ),
         )
         .into_future(),
     );
 
-    let client = reqwest::Client::new();
-    let transfer = sign_transfer(&alice.secret_key_hex, bob_address, 25, 0).unwrap();
-    post_ok(
-        &client,
-        &format!("{api_url}/rollup/transactions"),
-        &json!(transfer),
-    )
-    .await;
+    let deposit_receipt = cast_send(
+        &rpc_url,
+        &deposit_inbox,
+        "deposit(address)",
+        &[&alice_address],
+        100,
+    );
+    let deposit = deposit_observation(&deposit_receipt, &deposit_inbox, &alice_address);
+    post_ok(&client, &format!("{api_url}/l1/deposits"), &deposit).await;
     post_ok(&client, &format!("{api_url}/rollup/batches"), &json!({})).await;
 
-    let witness_path = temp.path().join("witness.json");
-    let witness = get_ok(
+    let credited = get_ok(&client, &format!("{api_url}/accounts/{alice_address}")).await;
+    assert_eq!(credited["balance"], json!(100));
+    let indexed_deposits = get_ok(&client, &format!("{api_url}/l1/deposits")).await;
+    assert_eq!(indexed_deposits["total"], json!(1));
+    assert_eq!(indexed_deposits["items"][0]["status"], json!("executed"));
+
+    let (deposit_artifact_path, deposit_artifact) = create_artifact(
         &client,
-        &format!("{api_url}/rollup/batches/0/validity-witness"),
+        &api_url,
+        temp.path(),
+        0,
+        prover.as_deref(),
+        &deposit_inbox,
     )
     .await;
-    fs::write(&witness_path, serde_json::to_vec_pretty(&witness).unwrap()).unwrap();
-
-    let artifact_path = temp.path().join("proof.json");
-    match prover {
-        Some(prover) => {
-            run(
-                Command::new(&prover)
-                    .arg("groth16")
-                    .arg(&witness_path)
-                    .arg("--evm-artifact-out")
-                    .arg(&artifact_path),
-                "generate SP1 Groth16 proof",
-            );
-        }
-        None => {
-            let calldata = get_ok(
-                &client,
-                &format!("{api_url}/rollup/batches/0/settlement-calldata"),
-            )
-            .await;
-            let batch = get_ok(&client, &format!("{api_url}/rollup/batches/0")).await;
-            let artifact = mock_proof_artifact(&calldata, &batch);
-            fs::write(
-                &artifact_path,
-                serde_json::to_vec_pretty(&artifact).unwrap(),
-            )
-            .unwrap();
-        }
-    }
-    let artifact: Value =
-        serde_json::from_slice(&fs::read(&artifact_path).unwrap()).expect("parse proof artifact");
-    let decoded = &artifact["decoded"];
-    assert_eq!(decoded["batch_number"], json!(0));
+    let deposit_decoded = &deposit_artifact["decoded"];
+    assert_eq!(deposit_decoded["batch_number"], json!(0));
     assert_eq!(
-        strip_hex(decoded["prev_state_root"].as_str().unwrap()),
+        strip_hex(deposit_decoded["prev_state_root"].as_str().unwrap()),
         genesis.state_root
     );
+    assert_eq!(deposit_decoded["deposit_count"], json!(1));
+    assert_eq!(deposit_decoded["l1_deposit_inbox"], json!(deposit_inbox));
 
-    let anvil_port = unused_port();
-    let rpc_url = format!("http://127.0.0.1:{anvil_port}");
-    let anvil = ManagedChild::spawn(
-        Command::new("anvil")
-            .arg("--port")
-            .arg(anvil_port.to_string())
-            .arg("--silent"),
-        "start Anvil",
-    );
-    wait_for_rpc(&client, &rpc_url).await;
-
-    let program_vkey = artifact["program_vkey"].as_str().unwrap();
+    let program_vkey = deposit_artifact["program_vkey"].as_str().unwrap();
     let verifier = match verifier_mode {
         VerifierMode::Mock => forge_create(
             &workspace,
@@ -210,7 +179,7 @@ async fn run_scenario(verifier_mode: VerifierMode) {
         &workspace,
         &rpc_url,
         "contracts/ValidityRollupSettlement.sol:ValidityRollupSettlement",
-        &[&genesis_root, &verifier, program_vkey, L1_DEPOSIT_INBOX],
+        &[&genesis_root, &verifier, program_vkey, &deposit_inbox],
     );
 
     settlement_client(
@@ -228,31 +197,71 @@ async fn run_scenario(verifier_mode: VerifierMode) {
             "--batch-number",
             "0",
             "--proof",
-            artifact_path.to_str().unwrap(),
+            deposit_artifact_path.to_str().unwrap(),
+        ],
+    );
+
+    let transfer = sign_transfer(ANVIL_PRIVATE_KEY, bob_address.clone(), 25, 0).unwrap();
+    post_ok(
+        &client,
+        &format!("{api_url}/rollup/transactions"),
+        &json!(transfer),
+    )
+    .await;
+    post_ok(&client, &format!("{api_url}/rollup/batches"), &json!({})).await;
+    let (transfer_artifact_path, transfer_artifact) = create_artifact(
+        &client,
+        &api_url,
+        temp.path(),
+        1,
+        prover.as_deref(),
+        &deposit_inbox,
+    )
+    .await;
+    assert_eq!(transfer_artifact["decoded"]["batch_number"], json!(1));
+    assert_eq!(transfer_artifact["decoded"]["deposit_count"], json!(0));
+    settlement_client(
+        &api_url,
+        &rpc_url,
+        &settlement,
+        &[
+            "submit-batch",
+            "--batch-number",
+            "1",
+            "--proof",
+            transfer_artifact_path.to_str().unwrap(),
         ],
     );
 
     let finalized_root = cast_call(&rpc_url, &settlement, "finalizedStateRoot()(bytes32)");
     assert_eq!(
         finalized_root.to_ascii_lowercase(),
-        decoded["new_state_root"]
+        transfer_artifact["decoded"]["new_state_root"]
             .as_str()
             .unwrap()
             .to_ascii_lowercase()
     );
     assert_eq!(
         cast_call(&rpc_url, &settlement, "nextBatchNumber()(uint256)"),
-        "1"
+        "2"
     );
 
-    let batch = get_ok(&client, &format!("{api_url}/rollup/batches/0")).await;
-    assert_eq!(batch["status"], json!("finalized"));
-    assert!(batch["l1_submit_tx_hash"]
+    let alice = get_ok(&client, &format!("{api_url}/accounts/{alice_address}")).await;
+    let bob = get_ok(&client, &format!("{api_url}/accounts/{bob_address}")).await;
+    assert_eq!(alice["balance"], json!(75));
+    assert_eq!(alice["nonce"], json!(1));
+    assert_eq!(bob["balance"], json!(25));
+
+    let deposit_batch = get_ok(&client, &format!("{api_url}/rollup/batches/0")).await;
+    let transfer_batch = get_ok(&client, &format!("{api_url}/rollup/batches/1")).await;
+    assert_eq!(deposit_batch["status"], json!("finalized"));
+    assert_eq!(transfer_batch["status"], json!("finalized"));
+    assert!(transfer_batch["l1_submit_tx_hash"]
         .as_str()
         .unwrap()
         .starts_with("0x"));
-    assert!(batch["l1_submit_receipt"].is_object());
-    assert_eq!(batch["l1_chain_id"], json!(31337));
+    assert!(transfer_batch["l1_submit_receipt"].is_object());
+    assert_eq!(transfer_batch["l1_chain_id"], json!(31337));
 
     api_task.abort();
     let _ = api_task.await;
@@ -260,7 +269,56 @@ async fn run_scenario(verifier_mode: VerifierMode) {
     drop_schema(&pool, &schema).await;
 }
 
-fn mock_proof_artifact(calldata: &Value, batch: &Value) -> Value {
+async fn create_artifact(
+    client: &reqwest::Client,
+    api_url: &str,
+    directory: &Path,
+    batch_number: u64,
+    prover: Option<&Path>,
+    deposit_inbox: &str,
+) -> (PathBuf, Value) {
+    let witness_path = directory.join(format!("batch-{batch_number}-witness.json"));
+    let witness = get_ok(
+        client,
+        &format!("{api_url}/rollup/batches/{batch_number}/validity-witness"),
+    )
+    .await;
+    fs::write(&witness_path, serde_json::to_vec_pretty(&witness).unwrap()).unwrap();
+
+    let artifact_path = directory.join(format!("batch-{batch_number}-proof.json"));
+    match prover {
+        Some(prover) => {
+            run(
+                Command::new(prover)
+                    .arg("groth16")
+                    .arg(&witness_path)
+                    .arg("--evm-artifact-out")
+                    .arg(&artifact_path),
+                "generate SP1 Groth16 proof",
+            );
+        }
+        None => {
+            let calldata = get_ok(
+                client,
+                &format!("{api_url}/rollup/batches/{batch_number}/settlement-calldata"),
+            )
+            .await;
+            let batch = get_ok(client, &format!("{api_url}/rollup/batches/{batch_number}")).await;
+            let artifact = mock_proof_artifact(&calldata, &batch, deposit_inbox);
+            fs::write(
+                &artifact_path,
+                serde_json::to_vec_pretty(&artifact).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    let artifact =
+        serde_json::from_slice(&fs::read(&artifact_path).unwrap()).expect("parse proof artifact");
+    (artifact_path, artifact)
+}
+
+fn mock_proof_artifact(calldata: &Value, batch: &Value, deposit_inbox: &str) -> Value {
     let args = calldata["ordered_args"]
         .as_array()
         .expect("settlement calldata args");
@@ -287,7 +345,7 @@ fn mock_proof_artifact(calldata: &Value, batch: &Value) -> Value {
             .as_u64()
             .expect("transaction count"),
     ));
-    public_values.push_str(&abi_address(L1_DEPOSIT_INBOX));
+    public_values.push_str(&abi_address(deposit_inbox));
 
     json!({
         "program_vkey": MOCK_PROGRAM_VKEY,
@@ -305,7 +363,7 @@ fn mock_proof_artifact(calldata: &Value, batch: &Value) -> Value {
             "last_deposit_id": batch["last_deposit_id"],
             "deposit_count": batch["deposit_count"],
             "transaction_count": batch["transaction_count"],
-            "l1_deposit_inbox": L1_DEPOSIT_INBOX
+            "l1_deposit_inbox": deposit_inbox
         }
     })
 }
@@ -375,6 +433,113 @@ fn cast_call(rpc_url: &str, contract: &str, signature: &str) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+fn cast_send(
+    rpc_url: &str,
+    contract: &str,
+    signature: &str,
+    args: &[&str],
+    value_wei: u64,
+) -> Value {
+    let output = run(
+        Command::new("cast")
+            .args(["send", contract, signature])
+            .args(args)
+            .args([
+                "--value",
+                &value_wei.to_string(),
+                "--private-key",
+                ANVIL_PRIVATE_KEY,
+                "--rpc-url",
+                rpc_url,
+                "--json",
+            ]),
+        "send L1 deposit",
+    );
+    serde_json::from_slice(&output.stdout).expect("parse cast send receipt JSON")
+}
+
+fn deposit_observation(receipt: &Value, inbox: &str, recipient: &str) -> Value {
+    let logs = receipt["logs"].as_array().expect("deposit receipt logs");
+    let log = logs
+        .iter()
+        .find(|log| {
+            log["address"]
+                .as_str()
+                .is_some_and(|address| address.eq_ignore_ascii_case(inbox))
+        })
+        .expect("DepositAccepted log");
+    let topics = log["topics"].as_array().expect("deposit log topics");
+    assert_eq!(topics.len(), 4, "DepositAccepted must contain four topics");
+    let data = abi_words(log["data"].as_str().expect("deposit log data"));
+    assert_eq!(
+        data.len(),
+        3,
+        "DepositAccepted must contain three data words"
+    );
+
+    let depositor = abi_word_address(topics[2].as_str().expect("depositor topic"));
+    let event_recipient = abi_word_address(topics[3].as_str().expect("recipient topic"));
+    assert!(depositor.eq_ignore_ascii_case(ANVIL_ADDRESS));
+    assert!(event_recipient.eq_ignore_ascii_case(recipient));
+
+    json!({
+        "chain_id": 31337,
+        "inbox_address": inbox,
+        "deposit_id": abi_word_u64(topics[1].as_str().expect("deposit ID topic")),
+        "l1_tx_hash": receipt["transactionHash"],
+        "l1_block_number": json_u64(&receipt["blockNumber"], "receipt block number"),
+        "l1_block_hash": receipt["blockHash"],
+        "l1_log_index": json_u64(&log["logIndex"], "deposit log index"),
+        "depositor_l1_address": depositor,
+        "recipient_l2_address": event_recipient,
+        "amount": abi_word_u64(&data[0]),
+        "rolling_commitment": data[2],
+        "confirmations": 2
+    })
+}
+
+fn abi_words(value: &str) -> Vec<String> {
+    let hex = strip_hex(value);
+    assert_eq!(hex.len() % 64, 0, "ABI data must contain complete words");
+    hex.as_bytes()
+        .chunks(64)
+        .map(|word| format!("0x{}", String::from_utf8_lossy(word)))
+        .collect()
+}
+
+fn abi_word_address(value: &str) -> String {
+    let word = strip_hex(value);
+    assert_eq!(word.len(), 64, "ABI address topic must be one word");
+    assert_eq!(
+        &word[..24],
+        "0".repeat(24),
+        "ABI address must be left padded"
+    );
+    format!("0x{}", &word[24..].to_ascii_lowercase())
+}
+
+fn abi_word_u64(value: &str) -> u64 {
+    let word = strip_hex(value);
+    assert_eq!(word.len(), 64, "ABI integer must be one word");
+    u64::from_str_radix(&word[48..], 16).expect("ABI integer must fit u64")
+}
+
+fn json_u64(value: &Value, label: &str) -> u64 {
+    if let Some(value) = value.as_u64() {
+        return value;
+    }
+    let value = value
+        .as_str()
+        .unwrap_or_else(|| panic!("{label} must be a number or string"));
+    if let Some(hex) = value.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("invalid hexadecimal {label}"))
+    } else {
+        value
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid decimal {label}"))
+    }
+}
+
 async fn post_ok(client: &reqwest::Client, url: &str, body: &Value) -> Value {
     let response = client
         .post(url)
@@ -424,13 +589,10 @@ async fn isolated_database(database_url: &str) -> (PgPool, String) {
         .await
         .expect("select isolated schema");
     for migration in MIGRATIONS {
-        for statement in migration
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            pool.execute(statement).await.expect("apply migration");
-        }
+        sqlx::raw_sql(migration)
+            .execute(&pool)
+            .await
+            .expect("apply migration");
     }
     (pool, schema)
 }
