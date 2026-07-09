@@ -23,7 +23,7 @@ import {
   Wallet,
   XCircle,
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   API_BASE,
   api,
@@ -256,9 +256,11 @@ export function App() {
           <HeaderNav activeTab={activeTab} onSelectTab={setActiveTab} />
 
           <div className="order-2 ml-auto flex min-w-0 flex-1 items-center justify-end gap-2 sm:flex-initial lg:order-none">
-            <div className="min-w-0 flex-1 sm:flex-initial">
-              <SearchBox onSearch={onSearch} pending={false} />
-            </div>
+            {activeTab !== "Overview" && (
+              <div className="min-w-0 flex-1 sm:flex-initial">
+                <SearchBox onSearch={onSearch} pending={false} />
+              </div>
+            )}
             <WalletControl
               wallet={walletAddress}
               onConnect={connectGlobalWallet}
@@ -305,23 +307,22 @@ export function App() {
       </AnimatePresence>
 
       {activeTab === "Overview" && (
-        <div className="grid gap-5">
-          <HomeHero
-            readStatus={readStatus}
-            summary={summary.data}
-            latestBatch={batchItems[0]}
-            pendingTransfers={summary.data?.pending_transaction_count ?? 0}
-          />
-          <Overview
-            blocks={blockItems}
-            blockTotal={blockTotal}
-            onSelectBlock={(height) => {
-              setSelectedHeight(height);
-              setOverviewBlockTarget(height);
-              setActiveTab("Transactions");
-            }}
-          />
-        </div>
+        <HomePage
+          readStatus={readStatus}
+          summary={summary.data}
+          latestBatch={batchItems[0]}
+          pendingTransfers={summary.data?.pending_transaction_count ?? 0}
+          readyBatchCount={batchItems.filter((batch) => batch.status === "built").length}
+          blocks={blockItems}
+          blockTotal={blockTotal}
+          onSearch={onSearch}
+          onNavigate={setActiveTab}
+          onSelectBlock={(height) => {
+            setSelectedHeight(height);
+            setOverviewBlockTarget(height);
+            setActiveTab("Transactions");
+          }}
+        />
       )}
 
       {activeTab === "Transactions" && (
@@ -733,90 +734,294 @@ function summarizeResult(result: SearchResult | null) {
   return `${result.data.hash} / block ${result.data.block_height ?? "pending"}`;
 }
 
-function HomeHero({
+function HomePage({
   readStatus,
   summary,
   latestBatch,
   pendingTransfers,
+  readyBatchCount,
+  blocks,
+  blockTotal,
+  onSearch,
+  onNavigate,
+  onSelectBlock,
 }: {
   readStatus: string;
   summary?: { height: number | null; transaction_count: number; account_count: number; valid: boolean };
   latestBatch?: RollupBatchSummary;
   pendingTransfers: number;
+  readyBatchCount: number;
+  blocks: BlockSummary[];
+  blockTotal: number;
+  onSearch: (query: string) => void;
+  onNavigate: (tab: Tab) => void;
+  onSelectBlock: (height: number) => void;
 }) {
   const live = readStatus === "ok";
-  return (
-    <section className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.025] p-5 shadow-xl shadow-black/20">
-      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/70 to-transparent" />
-      <div>
-        <div>
-          <div className="flex items-center gap-2 text-sm font-medium text-white/68">
-            <span className={cn("h-2 w-2 rounded-full", live ? "bg-mint shadow-[0_0_18px_rgba(88,244,183,0.8)]" : "bg-amber")} />
-            {live ? "Rollup services operational" : readStatusLabel(readStatus)}
-          </div>
-          <h2 className="mt-2 text-2xl font-semibold leading-tight text-white">
-            L2 execution and L1 settlement
-          </h2>
-          <p className="mt-1 text-sm text-white/52">
-            Current chain state, pending work, and settlement progress.
-          </p>
-        </div>
-      </div>
-      <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
-        <HeroMetric label="Latest block" value={summary?.height ?? "none"} />
-        <HeroMetric label="Transfers" value={formatNumber(summary?.transaction_count)} />
-        <HeroMetric label="Pending" value={formatNumber(pendingTransfers)} />
-        <HeroMetric label="Latest batch" value={latestBatch ? `#${latestBatch.batch_number}` : "none"} />
-        <HeroMetric label="Settlement" value={latestBatch ? settlementStatusLabel(latestBatch.status) : "none"} />
-      </div>
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-white/42">
-        <span>{formatNumber(summary?.account_count)} accounts indexed</span>
-        <Badge tone={summary?.valid ? "good" : "warn"}>{summary?.valid ? "State valid" : "Check state"}</Badge>
-      </div>
-    </section>
-  );
-}
 
-function HeroMetric({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.04] p-3">
-      <div className="text-xs text-white/42">{label}</div>
-      <div className="mt-2 text-xl font-semibold text-white">{value}</div>
+    <div className="grid gap-4">
+      <section className="surface relative overflow-hidden rounded-lg px-5 py-8 sm:px-8 sm:py-10">
+        <div className="!absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mint/80 to-transparent" />
+        <div className="pointer-events-none !absolute -right-32 -top-48 h-96 w-96 rounded-full bg-mint/[0.06] blur-3xl" />
+        <div className="relative grid items-center gap-10 lg:grid-cols-[minmax(0,1.25fr)_minmax(20rem,0.75fr)]">
+          <div>
+            <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-white/48">
+              <span className={cn("h-1.5 w-1.5 rounded-full", live ? "bg-mint shadow-[0_0_16px_rgba(88,244,183,0.9)]" : "bg-amber")} />
+              {live ? "Network operational" : readStatusLabel(readStatus)}
+            </div>
+            <h1 className="mt-5 max-w-3xl text-3xl font-semibold leading-[1.12] tracking-[-0.035em] text-white sm:text-5xl">
+              Verify the rollup.
+              <span className="block text-white/42">From L2 activity to L1 finality.</span>
+            </h1>
+            <p className="mt-4 max-w-2xl text-sm leading-6 text-white/56 sm:text-base">
+              Search blocks, transactions, and accounts. Track every batch from execution through proof submission and settlement.
+            </p>
+            <HomeSearch onSearch={onSearch} />
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => onNavigate("Transactions")}
+                className="inline-flex h-10 items-center gap-2 rounded-md bg-mint px-4 text-sm font-semibold text-ink transition hover:bg-mint/90"
+              >
+                Explore activity
+                <ArrowRight className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => onNavigate("Settlement")}
+                className="inline-flex h-10 items-center gap-2 rounded-md border border-white/12 px-4 text-sm font-medium text-white/70 transition hover:border-white/25 hover:text-white"
+              >
+                View settlement
+              </button>
+              {readyBatchCount > 0 && (
+                <button
+                  onClick={() => onNavigate("Prove")}
+                  className="inline-flex h-10 items-center gap-2 rounded-md px-3 text-sm font-medium text-amber transition hover:bg-amber/10"
+                >
+                  <ShieldAlert className="h-4 w-4" />
+                  {pluralize(readyBatchCount, "batch")} ready to prove
+                </button>
+              )}
+            </div>
+          </div>
+          <RollupFlow latestBatch={latestBatch} />
+        </div>
+      </section>
+
+      <section className="grid grid-cols-2 overflow-hidden rounded-lg border border-white/10 bg-white/[0.025] lg:grid-cols-4">
+        <HomeMetric label="Latest block" value={summary?.height ?? "—"} detail={`${formatNumber(blockTotal)} indexed`} />
+        <HomeMetric label="Transactions" value={formatNumber(summary?.transaction_count)} detail={`${formatNumber(pendingTransfers)} pending`} />
+        <HomeMetric label="Accounts" value={formatNumber(summary?.account_count)} detail={summary?.valid ? "State verified" : "State check required"} good={summary?.valid} />
+        <HomeMetric
+          label="Latest batch"
+          value={latestBatch ? `#${latestBatch.batch_number}` : "—"}
+          detail={latestBatch ? settlementStatusLabel(latestBatch.status) : "No batches yet"}
+        />
+      </section>
+
+      <section className="grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(20rem,0.8fr)]">
+        <Panel className="overflow-hidden">
+          <SectionTitle
+            icon={<Activity className="h-4 w-4" />}
+            title="Recent activity"
+            action={
+              <button onClick={() => onNavigate("Transactions")} className="inline-flex items-center gap-1 text-white/46 hover:text-mint">
+                View all <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+            }
+          />
+          {blocks.length === 0 ? (
+            <div className="px-4 py-10 text-sm text-white/42">No blocks indexed yet.</div>
+          ) : (
+            <div className="divide-y divide-white/8">
+              {blocks.slice(0, 6).map((block) => (
+                <button
+                  key={block.height}
+                  onClick={() => onSelectBlock(block.height)}
+                  className="grid w-full grid-cols-[4.5rem_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.04]"
+                >
+                  <span className="text-sm font-semibold text-white">#{block.height}</span>
+                  <span className="hash text-xs text-white/46">{block.block_hash}</span>
+                  <span className="flex items-center gap-3 text-xs text-white/42">
+                    {pluralize(block.transaction_count, "tx")}
+                    <ArrowRight className="h-3.5 w-3.5 text-white/24" />
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        <Panel className="flex min-h-full flex-col p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-semibold text-white">Settlement snapshot</div>
+            {latestBatch && <Badge tone={settlementStatusTone(latestBatch.status)}>{settlementStatusLabel(latestBatch.status)}</Badge>}
+          </div>
+          {latestBatch ? (
+            <>
+              <div className="mt-6">
+                <div className="text-xs uppercase tracking-[0.14em] text-white/36">Latest package</div>
+                <div className="mt-2 text-3xl font-semibold tracking-tight text-white">#{latestBatch.batch_number}</div>
+              </div>
+              <div className="mt-5 grid grid-cols-2 gap-3">
+                <HomeDetail label="Block range" value={`${latestBatch.start_block_height}–${latestBatch.end_block_height}`} />
+                <HomeDetail label="Transfers" value={formatNumber(latestBatch.transaction_count)} />
+                <HomeDetail label="Deposits" value={formatNumber(latestBatch.deposit_count)} />
+                <HomeDetail label="L1 chain" value={latestBatch.l1_chain_id ?? "Pending"} />
+              </div>
+              <button
+                onClick={() => onNavigate(latestBatch.status === "built" ? "Prove" : "Settlement")}
+                className="mt-auto inline-flex h-10 items-center justify-between border-t border-white/10 pt-4 text-sm font-medium text-white/64 transition hover:text-mint"
+              >
+                {latestBatch.status === "built" ? "Open proof workspace" : "Inspect settlement"}
+                <ArrowRight className="h-4 w-4" />
+              </button>
+            </>
+          ) : (
+            <div className="flex flex-1 items-center text-sm text-white/42">No settlement packages have been built.</div>
+          )}
+        </Panel>
+      </section>
     </div>
   );
 }
 
-function Overview({
-  blocks,
-  blockTotal,
-  onSelectBlock,
-}: {
-  blocks: BlockSummary[];
-  blockTotal: number;
-  onSelectBlock: (height: number) => void;
-}) {
+function RollupFlow({ latestBatch }: { latestBatch?: RollupBatchSummary }) {
+  const reduceMotion = useReducedMotion();
+  const stages = [
+    {
+      label: "L2 execution",
+      detail: "Transactions sequenced",
+      icon: <Blocks className="h-4 w-4" />,
+      tone: "cyan",
+    },
+    {
+      label: latestBatch ? `Batch #${latestBatch.batch_number}` : "Settlement batch",
+      detail: "State commitments built",
+      icon: <Layers3 className="h-4 w-4" />,
+      tone: "mint",
+    },
+    {
+      label: "Validity proof",
+      detail: latestBatch?.status === "built" ? "Ready for prover" : "Proof verified",
+      icon: <ShieldAlert className="h-4 w-4" />,
+      tone: latestBatch?.status === "built" ? "amber" : "mint",
+    },
+    {
+      label: "Ethereum L1",
+      detail: latestBatch?.status === "finalized" ? "State finalized" : "Settlement destination",
+      icon: <CheckCircle2 className="h-4 w-4" />,
+      tone: latestBatch?.status === "finalized" ? "mint" : "neutral",
+    },
+  ] as const;
+
   return (
-    <Panel className="overflow-hidden">
-        <SectionTitle icon={<Blocks className="h-4 w-4" />} title="Recent activity groups" action={`${blocks.length}/${blockTotal} loaded`} />
-        <div className="divide-y divide-white/8">
-          {blocks.map((block) => (
-            <button
-              key={block.height}
-              onClick={() => onSelectBlock(block.height)}
-              className="grid w-full grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-3 text-left transition hover:bg-white/[0.045]"
-            >
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan/10 text-cyan">
-                #{block.height}
-              </div>
-              <div className="min-w-0">
-                <div className="hash text-sm text-white">{block.block_hash}</div>
-                <div className="mt-1 text-xs text-white/45">{pluralize(block.transaction_count, "transfer")}</div>
-              </div>
-              <ArrowRight className="h-4 w-4 text-white/34" />
-            </button>
+    <div className="relative hidden min-h-[22rem] items-center justify-center lg:flex" aria-label="Rollup settlement flow">
+      <div className="!absolute inset-8 rounded-full border border-mint/[0.06] bg-mint/[0.025] blur-2xl" />
+      <div className="relative w-full max-w-sm rounded-xl border border-white/10 bg-black/25 p-4 shadow-2xl shadow-black/25">
+        <div className="mb-4 flex items-center justify-between border-b border-white/8 pb-3">
+          <span className="text-xs font-medium uppercase tracking-[0.15em] text-white/40">Live settlement flow</span>
+          <span className="flex items-center gap-1.5 text-xs text-mint/70">
+            <motion.span
+              className="h-1.5 w-1.5 rounded-full bg-mint"
+              animate={reduceMotion ? undefined : { opacity: [0.35, 1, 0.35] }}
+              transition={reduceMotion ? undefined : { duration: 2, repeat: Infinity }}
+            />
+            tracking
+          </span>
+        </div>
+        <div>
+          {stages.map((stage, index) => (
+            <div key={stage.label}>
+              <motion.div
+                className="flex items-center gap-3 rounded-lg border border-white/8 bg-white/[0.035] p-3"
+                animate={reduceMotion ? undefined : { borderColor: ["rgba(255,255,255,0.08)", "rgba(88,244,183,0.22)", "rgba(255,255,255,0.08)"] }}
+                transition={reduceMotion ? undefined : { duration: 4, delay: index * 0.7, repeat: Infinity }}
+              >
+                <div className={cn(
+                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-md border",
+                  stage.tone === "cyan" && "border-cyan/20 bg-cyan/10 text-cyan",
+                  stage.tone === "mint" && "border-mint/20 bg-mint/10 text-mint",
+                  stage.tone === "amber" && "border-amber/20 bg-amber/10 text-amber",
+                  stage.tone === "neutral" && "border-white/10 bg-white/[0.04] text-white/40",
+                )}>
+                  {stage.icon}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-white/88">{stage.label}</div>
+                  <div className="mt-0.5 text-xs text-white/40">{stage.detail}</div>
+                </div>
+                <motion.div
+                  className="ml-auto h-1.5 w-1.5 rounded-full bg-mint"
+                  animate={reduceMotion ? undefined : { scale: [0.8, 1.35, 0.8], opacity: [0.3, 1, 0.3] }}
+                  transition={reduceMotion ? undefined : { duration: 2.4, delay: index * 0.45, repeat: Infinity }}
+                />
+              </motion.div>
+              {index < stages.length - 1 && (
+                <div className="relative ml-7 h-5 w-px overflow-hidden bg-white/10">
+                  <motion.div
+                    className="!absolute inset-x-0 h-2 bg-gradient-to-b from-mint/0 via-mint to-mint/0"
+                    animate={reduceMotion ? undefined : { y: [-8, 20] }}
+                    transition={reduceMotion ? undefined : { duration: 1.4, delay: index * 0.2, repeat: Infinity, ease: "linear" }}
+                  />
+                </div>
+              )}
+            </div>
           ))}
         </div>
-    </Panel>
+      </div>
+    </div>
+  );
+}
+
+function HomeSearch({ onSearch }: { onSearch: (query: string) => void }) {
+  const [value, setValue] = useState("");
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSearch(value);
+      }}
+      className="mt-7 flex h-12 w-full max-w-2xl items-center gap-3 rounded-lg border border-white/14 bg-black/25 px-4 shadow-lg shadow-black/10 transition focus-within:border-mint/45 focus-within:bg-black/35"
+    >
+      <Search className="h-5 w-5 shrink-0 text-white/36" />
+      <input
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder="Search block, transaction, or address"
+        aria-label="Search the rollup"
+        className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/32"
+      />
+    </form>
+  );
+}
+
+function HomeMetric({
+  label,
+  value,
+  detail,
+  good,
+}: {
+  label: string;
+  value: React.ReactNode;
+  detail: React.ReactNode;
+  good?: boolean;
+}) {
+  return (
+    <div className="min-w-0 border-b border-r border-white/8 p-4 last:border-r-0 lg:border-b-0">
+      <div className="text-xs font-medium uppercase tracking-[0.13em] text-white/36">{label}</div>
+      <div className="mt-3 truncate text-2xl font-semibold tracking-tight text-white">{value}</div>
+      <div className={cn("mt-1.5 text-xs text-white/40", good && "text-mint/70")}>{detail}</div>
+    </div>
+  );
+}
+
+function HomeDetail({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="min-w-0 border-l border-white/10 pl-3">
+      <div className="text-xs text-white/34">{label}</div>
+      <div className="mt-1 truncate text-sm font-medium text-white/76">{value}</div>
+    </div>
   );
 }
 
