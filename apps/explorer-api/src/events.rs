@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 pub(crate) const EVENT_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
-pub(crate) struct EventQueue {
+pub struct EventQueue {
     sender: broadcast::Sender<AppEvent>,
     next_id: Arc<AtomicU64>,
 }

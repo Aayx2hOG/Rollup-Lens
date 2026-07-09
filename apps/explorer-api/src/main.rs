@@ -3,8 +3,8 @@ use std::{env, fs, net::SocketAddr, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use clap::Parser;
 use explorer_api::{
-    app_with_pool_and_tokens_and_deposit_inbox, initialize_genesis, sequence_pending_transactions,
-    GenesisConfig,
+    app_with_pool_and_tokens_and_deposit_inbox_and_events, initialize_genesis, new_event_queue,
+    sequence_pending_transactions_with_events, EventQueue, GenesisConfig,
 };
 use sqlx::postgres::PgPoolOptions;
 
@@ -75,18 +75,21 @@ async fn main() -> Result<()> {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "0x0000000000000000000000000000000000000000".to_string())
         .to_ascii_lowercase();
+    let events = new_event_queue();
     if cli.auto_sequence {
         spawn_auto_sequencer(
             pool.clone(),
             cli.auto_sequence_interval_seconds,
             l1_deposit_inbox.clone(),
+            events.clone(),
         );
     }
-    let router = app_with_pool_and_tokens_and_deposit_inbox(
+    let router = app_with_pool_and_tokens_and_deposit_inbox_and_events(
         pool,
         settlement_token,
         l1_deposit_ingest_token,
         l1_deposit_inbox,
+        events,
     );
 
     println!("serving Postgres-backed rollup API");
@@ -96,7 +99,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn spawn_auto_sequencer(pool: sqlx::PgPool, interval_seconds: u64, l1_deposit_inbox: String) {
+fn spawn_auto_sequencer(
+    pool: sqlx::PgPool,
+    interval_seconds: u64,
+    l1_deposit_inbox: String,
+    events: EventQueue,
+) {
     let interval = Duration::from_secs(interval_seconds.max(1));
     tokio::spawn(async move {
         println!(
@@ -106,7 +114,14 @@ fn spawn_auto_sequencer(pool: sqlx::PgPool, interval_seconds: u64, l1_deposit_in
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            match sequence_pending_transactions(pool.clone(), 100, l1_deposit_inbox.clone()).await {
+            match sequence_pending_transactions_with_events(
+                pool.clone(),
+                100,
+                l1_deposit_inbox.clone(),
+                events.clone(),
+            )
+            .await
+            {
                 Ok(true) => println!("automatic sequencer processed pending transactions"),
                 Ok(false) => {}
                 Err(error) => eprintln!("automatic sequencing failed: {error}"),

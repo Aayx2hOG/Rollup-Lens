@@ -26,7 +26,9 @@ use validity_core::{verify_batch_witness, BatchValidityWitness};
 
 mod events;
 
-use events::{AppEventType, EventQueue, EVENT_QUEUE_CAPACITY};
+pub use events::EventQueue;
+
+use events::{AppEventType, EVENT_QUEUE_CAPACITY};
 
 const POSTGRES_CACHE_TTL: Duration = Duration::from_secs(5);
 const DEFAULT_PAGE_LIMIT: usize = 50;
@@ -152,6 +154,12 @@ struct CacheEntry {
 struct DbSource {
     pool: PgPool,
     l1_deposit_inbox: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExplorerService {
+    source: DbSource,
+    events: EventQueue,
 }
 
 #[derive(Debug, Serialize)]
@@ -471,11 +479,27 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox(
     l1_deposit_ingest_token: Option<String>,
     l1_deposit_inbox: String,
 ) -> Router {
+    app_with_pool_and_tokens_and_deposit_inbox_and_events(
+        pool,
+        settlement_update_token,
+        l1_deposit_ingest_token,
+        l1_deposit_inbox,
+        new_event_queue(),
+    )
+}
+
+pub fn app_with_pool_and_tokens_and_deposit_inbox_and_events(
+    pool: PgPool,
+    settlement_update_token: Option<String>,
+    l1_deposit_ingest_token: Option<String>,
+    l1_deposit_inbox: String,
+    events: EventQueue,
+) -> Router {
     let l1_deposit_inbox = l1_deposit_inbox.to_ascii_lowercase();
     let state = Arc::new(AppState {
         pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
-        events: EventQueue::new(EVENT_QUEUE_CAPACITY),
+        events,
         settlement_update_token,
         l1_deposit_ingest_token,
         l1_deposit_inbox,
@@ -485,7 +509,7 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox(
         .route("/", get(index))
         .route("/health", get(health))
         .route("/ready", get(readiness))
-        .route("/events", get(events))
+        .route("/events", get(event_stream))
         .route("/chain/summary", get(chain_summary))
         .route("/blocks", get(blocks))
         .route("/blocks/:height", get(block_by_height))
@@ -525,18 +549,42 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox(
         .with_state(state)
 }
 
+pub fn new_event_queue() -> EventQueue {
+    EventQueue::new(EVENT_QUEUE_CAPACITY)
+}
+
 pub async fn sequence_pending_transactions(
     pool: PgPool,
     limit: usize,
     l1_deposit_inbox: String,
 ) -> Result<bool, String> {
-    match (DbSource {
-        pool,
-        l1_deposit_inbox,
-    }
-    .sequence_rollup_batch(limit)
-    .await)
-    {
+    sequence_pending_transactions_with_optional_events(pool, limit, l1_deposit_inbox, None).await
+}
+
+pub async fn sequence_pending_transactions_with_events(
+    pool: PgPool,
+    limit: usize,
+    l1_deposit_inbox: String,
+    events: EventQueue,
+) -> Result<bool, String> {
+    sequence_pending_transactions_with_optional_events(pool, limit, l1_deposit_inbox, Some(events))
+        .await
+}
+
+async fn sequence_pending_transactions_with_optional_events(
+    pool: PgPool,
+    limit: usize,
+    l1_deposit_inbox: String,
+    events: Option<EventQueue>,
+) -> Result<bool, String> {
+    let service = ExplorerService {
+        source: DbSource {
+            pool,
+            l1_deposit_inbox,
+        },
+        events: events.unwrap_or_else(new_event_queue),
+    };
+    match service.sequence_rollup_batch(limit).await {
         Ok(_) => Ok(true),
         Err(ApiError::BadRequest(message))
             if message == "no pending transactions or confirmed deposits to sequence" =>
@@ -619,7 +667,7 @@ async fn index() -> Json<Value> {
     }))
 }
 
-async fn events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn event_stream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     state.events.stream()
 }
 
@@ -714,14 +762,8 @@ async fn submit_transaction(
     State(state): State<Arc<AppState>>,
     Json(transaction): Json<Transfer>,
 ) -> Result<Json<Value>, ApiError> {
-    let submitted = DbSource {
-        pool: state.pool.clone(),
-        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
-    }
-    .submit_transaction(transaction)
-    .await?;
+    let submitted = state.service().submit_transaction(transaction).await?;
     state.cache_clear();
-    state.publish_event(AppEventType::TransactionSubmitted, &submitted);
     serde_json::to_value(submitted)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -745,14 +787,8 @@ async fn sequence_rollup_batch(
         )));
     }
 
-    let sequenced = DbSource {
-        pool: state.pool.clone(),
-        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
-    }
-    .sequence_rollup_batch(limit)
-    .await?;
+    let sequenced = state.service().sequence_rollup_batch(limit).await?;
     state.cache_clear();
-    state.publish_event(AppEventType::RollupBatchSequenced, &sequenced);
     serde_json::to_value(sequenced)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -863,14 +899,11 @@ async fn update_rollup_batch_settlement(
             ));
         }
     }
-    let updated = DbSource {
-        pool: state.pool.clone(),
-        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
-    }
-    .update_rollup_batch_settlement(batch_number, update)
-    .await?;
+    let updated = state
+        .service()
+        .update_rollup_batch_settlement(batch_number, update)
+        .await?;
     state.cache_clear();
-    state.publish_event(AppEventType::RollupBatchSettlementUpdated, &updated);
     serde_json::to_value(updated)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -919,14 +952,8 @@ async fn observe_l1_deposit(
         }
     }
 
-    let deposit = DbSource {
-        pool: state.pool.clone(),
-        l1_deposit_inbox: state.l1_deposit_inbox.clone(),
-    }
-    .observe_l1_deposit(observation)
-    .await?;
+    let deposit = state.service().observe_l1_deposit(observation).await?;
     state.cache_clear();
-    state.publish_l1_deposit_event(&deposit);
     serde_json::to_value(deposit)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
@@ -984,6 +1011,16 @@ where
 }
 
 impl AppState {
+    fn service(&self) -> ExplorerService {
+        ExplorerService {
+            source: DbSource {
+                pool: self.pool.clone(),
+                l1_deposit_inbox: self.l1_deposit_inbox.clone(),
+            },
+            events: self.events.clone(),
+        }
+    }
+
     fn cache_get(&self, key: &str) -> Option<Value> {
         let now = Instant::now();
         let mut cache = self.cache.lock().ok()?;
@@ -1013,6 +1050,45 @@ impl AppState {
         if let Ok(mut cache) = self.cache.lock() {
             cache.entries.clear();
         }
+    }
+}
+
+impl ExplorerService {
+    async fn submit_transaction(
+        &self,
+        transaction: Transfer,
+    ) -> Result<SubmittedTransaction, ApiError> {
+        let submitted = self.source.submit_transaction(transaction).await?;
+        self.publish_event(AppEventType::TransactionSubmitted, &submitted);
+        Ok(submitted)
+    }
+
+    async fn sequence_rollup_batch(&self, limit: usize) -> Result<SequencedBatch, ApiError> {
+        let sequenced = self.source.sequence_rollup_batch(limit).await?;
+        self.publish_event(AppEventType::RollupBatchSequenced, &sequenced);
+        Ok(sequenced)
+    }
+
+    async fn update_rollup_batch_settlement(
+        &self,
+        batch_number: u64,
+        update: SettlementStatusUpdate,
+    ) -> Result<RollupBatchSummary, ApiError> {
+        let updated = self
+            .source
+            .update_rollup_batch_settlement(batch_number, update)
+            .await?;
+        self.publish_event(AppEventType::RollupBatchSettlementUpdated, &updated);
+        Ok(updated)
+    }
+
+    async fn observe_l1_deposit(
+        &self,
+        observation: L1DepositObservation,
+    ) -> Result<L1DepositView, ApiError> {
+        let deposit = self.source.observe_l1_deposit(observation).await?;
+        self.publish_l1_deposit_event(&deposit);
+        Ok(deposit)
     }
 
     fn publish_event<T: Serialize>(&self, event_type: AppEventType, payload: &T) {
