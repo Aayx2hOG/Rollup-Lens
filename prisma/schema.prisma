@@ -131,6 +131,45 @@ model ErrorEvent {
   @@map("error_events")
 }
 
+model Job {
+  id             BigInt    @id @default(autoincrement())
+  jobType        String    @map("job_type")
+  subjectId      String    @map("subject_id")
+  status         String    @default("queued")
+  priority       Int       @default(0)
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(3) @map("max_attempts")
+  lockedBy       String?   @map("locked_by")
+  lockedAt       DateTime? @map("locked_at")
+  runAfter       DateTime  @default(now()) @map("run_after")
+  payload        Json      @default("{}")
+  lastError      String?   @map("last_error")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @default(now()) @map("updated_at")
+
+  @@unique([jobType, subjectId])
+  @@index([status, runAfter, priority, id])
+  @@index([lockedAt])
+  @@map("jobs")
+}
+
+model SystemAlert {
+  id         BigInt    @id @default(autoincrement())
+  service    String
+  severity   String
+  alertType  String    @map("alert_type")
+  subjectId  String?   @map("subject_id")
+  message    String
+  context    Json      @default("{}")
+  resolvedAt DateTime? @map("resolved_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([severity, resolvedAt])
+  @@index([alertType, subjectId])
+  @@map("system_alerts")
+}
+
 model RollupBatch {
   batchNumber     BigInt                    @id @map("batch_number")
   startBlockHeight BigInt                   @map("start_block_height")

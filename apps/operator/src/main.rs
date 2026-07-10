@@ -16,6 +16,7 @@ const BATCH_FINALIZED_TOPIC: &str =
 const DEPOSIT_ACCEPTED_TOPIC: &str =
     "0x68ae3cc39a6751f1e465dbc1b9daec09ddcfd3200f67d8b3e1cbf1166fa914d2";
 const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
+const WORK_AVAILABLE_CHANNEL: &str = "rollup_work_available";
 
 #[derive(Debug, Parser)]
 #[command(about = "Automate rollup sequencing, proving, submission, and L1 indexing")]
@@ -239,10 +240,18 @@ async fn main() -> Result<()> {
         .listen(TRANSACTION_PENDING_CHANNEL)
         .await
         .context("failed to subscribe to pending transaction notifications")?;
+    listener
+        .listen(WORK_AVAILABLE_CHANNEL)
+        .await
+        .context("failed to subscribe to rollup work notifications")?;
 
     println!(
-        "operator started for chain {} contract {} with {} confirmations; subscribed to {}",
-        operator.chain_id, operator.contract, operator.confirmations, TRANSACTION_PENDING_CHANNEL
+        "operator started for chain {} contract {} with {} confirmations; subscribed to {} and {}",
+        operator.chain_id,
+        operator.contract,
+        operator.confirmations,
+        TRANSACTION_PENDING_CHANNEL,
+        WORK_AVAILABLE_CHANNEL
     );
     let mut interval = tokio::time::interval(Duration::from_secs(args.poll_seconds));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -356,12 +365,15 @@ impl Operator {
         .bind(i64::try_from(onchain_next)?)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(|row| {
-            Ok(ClaimedBatch {
-                batch_number: u64::try_from(row.get::<i64, _>("batch_number"))?,
-            })
-        })
-        .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let batch = ClaimedBatch {
+            batch_number: u64::try_from(row.get::<i64, _>("batch_number"))?,
+        };
+        self.mark_job_running("prove_batch", &batch.batch_number.to_string())
+            .await?;
+        Ok(Some(batch))
     }
 
     async fn prove_and_submit(&self, batch: &ClaimedBatch) -> Result<()> {
@@ -399,6 +411,8 @@ impl Operator {
         .bind(i64::try_from(batch.batch_number)?)
         .execute(&self.pool)
         .await?;
+        self.mark_job_succeeded("prove_batch", &batch.batch_number.to_string())
+            .await?;
 
         self.submit_proof(batch).await
     }
@@ -468,6 +482,78 @@ impl Operator {
             "UPDATE rollup_batches SET operator_status = 'retry', operator_last_error = $2, operator_updated_at = now() WHERE batch_number = $1",
         )
         .bind(i64::try_from(batch_number)?)
+        .bind(truncate(&format!("{error:#}"), 4000))
+        .execute(&self.pool)
+        .await?;
+        self.mark_job_failed("prove_batch", &batch_number.to_string(), error)
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_job_running(&self, job_type: &str, subject_id: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE jobs
+            SET status = 'running',
+                attempts = attempts + 1,
+                locked_by = 'operator',
+                locked_at = now(),
+                last_error = NULL,
+                updated_at = now()
+            WHERE job_type = $1
+              AND subject_id = $2
+              AND status IN ('queued', 'retry', 'running')
+            "#,
+        )
+        .bind(job_type)
+        .bind(subject_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_job_succeeded(&self, job_type: &str, subject_id: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE jobs
+            SET status = 'succeeded',
+                locked_by = NULL,
+                locked_at = NULL,
+                last_error = NULL,
+                updated_at = now()
+            WHERE job_type = $1 AND subject_id = $2
+            "#,
+        )
+        .bind(job_type)
+        .bind(subject_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_job_failed(
+        &self,
+        job_type: &str,
+        subject_id: &str,
+        error: &anyhow::Error,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE jobs
+            SET status = CASE
+                    WHEN attempts >= max_attempts THEN 'failed'
+                    ELSE 'retry'
+                END,
+                locked_by = NULL,
+                locked_at = NULL,
+                last_error = $3,
+                run_after = now() + interval '30 seconds',
+                updated_at = now()
+            WHERE job_type = $1 AND subject_id = $2
+            "#,
+        )
+        .bind(job_type)
+        .bind(subject_id)
         .bind(truncate(&format!("{error:#}"), 4000))
         .execute(&self.pool)
         .await?;
@@ -784,10 +870,20 @@ impl Operator {
     }
 
     async fn record_error(&self, error: &anyhow::Error) {
+        let message = truncate(&format!("{error:#}"), 4000);
         let _ = sqlx::query(
             "INSERT INTO error_events (service, severity, message, context) VALUES ('operator', 'error', $1, '{}'::jsonb)",
         )
-        .bind(truncate(&format!("{error:#}"), 4000))
+        .bind(&message)
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO system_alerts (service, severity, alert_type, message, context)
+            VALUES ('operator', 'error', 'operator_tick_failed', $1, '{}'::jsonb)
+            "#,
+        )
+        .bind(message)
         .execute(&self.pool)
         .await;
     }

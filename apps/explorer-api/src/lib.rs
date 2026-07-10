@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     future::Future,
     sync::{Arc, Mutex},
@@ -372,6 +372,37 @@ struct ErrorEventView {
 }
 
 #[derive(Debug, Serialize)]
+struct JobView {
+    id: i64,
+    job_type: String,
+    subject_id: String,
+    status: String,
+    priority: i32,
+    attempts: i32,
+    max_attempts: i32,
+    locked_by: Option<String>,
+    locked_at: Option<String>,
+    run_after: String,
+    payload: Value,
+    last_error: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SystemAlertView {
+    id: i64,
+    service: String,
+    severity: String,
+    alert_type: String,
+    subject_id: Option<String>,
+    message: String,
+    context: Value,
+    created_at: String,
+    resolved_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct RollupBatchSummary {
     batch_number: u64,
     start_block_height: u64,
@@ -579,6 +610,8 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox_and_events(
         .route("/withdrawals/:hash", get(withdrawal_by_hash))
         .route("/errors", get(errors))
         .route("/errors/latest", get(latest_error))
+        .route("/jobs", get(jobs))
+        .route("/alerts", get(alerts))
         .route(
             "/rollup/batches",
             get(rollup_batches).post(sequence_rollup_batch),
@@ -715,6 +748,8 @@ async fn index() -> Json<Value> {
             "POST /rollup/transactions",
             "GET /errors",
             "GET /errors/latest",
+            "GET /jobs",
+            "GET /alerts",
             "GET /rollup/batches",
             "POST /rollup/batches",
             "GET /rollup/batches/:batch_number",
@@ -906,6 +941,28 @@ async fn latest_error(State(state): State<Arc<AppState>>) -> Result<Json<Value>,
             .latest_error()
             .await?
             .ok_or_else(|| ApiError::NotFound("no error events found".to_string()))
+    })
+    .await
+}
+
+async fn jobs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = query.page_params()?;
+    cached_json(state, format!("jobs:{page}"), |source| async move {
+        source.jobs(page).await
+    })
+    .await
+}
+
+async fn alerts(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = query.page_params()?;
+    cached_json(state, format!("alerts:{page}"), |source| async move {
+        source.alerts(page).await
     })
     .await
 }
@@ -1774,7 +1831,7 @@ impl DbSource {
             )
             .await?;
         }
-        replace_accounts_tx(&mut tx, &accounts).await?;
+        upsert_touched_accounts_tx(&mut tx, &accounts, &touched_accounts(&block)).await?;
         sqlx::query(
             r#"
             INSERT INTO indexer_checkpoints (id, last_indexed_height)
@@ -1935,6 +1992,79 @@ impl DbSource {
         .map_err(database_error)?;
 
         row.map(error_event_from_row).transpose()
+    }
+
+    async fn jobs(&self, page: PageParams) -> Result<Page<JobView>, ApiError> {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                job_type,
+                subject_id,
+                status,
+                priority,
+                attempts,
+                max_attempts,
+                locked_by,
+                locked_at::text AS locked_at,
+                run_after::text AS run_after,
+                payload,
+                last_error,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM jobs
+            ORDER BY id DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(to_i64_from_usize(page.limit, "page limit")?)
+        .bind(to_i64_from_usize(page.offset, "page offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
+        let items = rows
+            .into_iter()
+            .map(job_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(page_from_items(items, usize_from_i64(total, "job count")?, page))
+    }
+
+    async fn alerts(&self, page: PageParams) -> Result<Page<SystemAlertView>, ApiError> {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM system_alerts")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                service,
+                severity,
+                alert_type,
+                subject_id,
+                message,
+                context,
+                created_at::text AS created_at,
+                resolved_at::text AS resolved_at
+            FROM system_alerts
+            ORDER BY created_at DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(to_i64_from_usize(page.limit, "page limit")?)
+        .bind(to_i64_from_usize(page.offset, "page offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
+        let items = rows
+            .into_iter()
+            .map(system_alert_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(page_from_items(items, usize_from_i64(total, "alert count")?, page))
     }
 
     async fn rollup_batches(&self, page: PageParams) -> Result<Page<RollupBatchSummary>, ApiError> {
@@ -2826,19 +2956,24 @@ async fn insert_indexed_withdrawal_tx(
     Ok(())
 }
 
-async fn replace_accounts_tx(
+async fn upsert_touched_accounts_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     accounts: &BTreeMap<String, Account>,
+    touched_addresses: &BTreeSet<String>,
 ) -> Result<(), ApiError> {
-    sqlx::query("DELETE FROM accounts")
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-    for account in accounts.values() {
+    for address in touched_addresses {
+        let account = accounts.get(address).ok_or_else(|| {
+            ApiError::InvalidIndexedData(format!(
+                "touched account {address} is missing from post-state"
+            ))
+        })?;
         sqlx::query(
             r#"
             INSERT INTO accounts (address, balance, nonce)
             VALUES ($1, $2, $3)
+            ON CONFLICT (address) DO UPDATE SET
+                balance = EXCLUDED.balance,
+                nonce = EXCLUDED.nonce
             "#,
         )
         .bind(&account.address)
@@ -2849,6 +2984,21 @@ async fn replace_accounts_tx(
         .map_err(database_error)?;
     }
     Ok(())
+}
+
+fn touched_accounts(block: &Block) -> BTreeSet<String> {
+    let mut touched = BTreeSet::new();
+    for deposit in &block.deposits {
+        touched.insert(deposit.recipient_l2_address.clone());
+    }
+    for transaction in &block.transactions {
+        touched.insert(transaction.from.clone());
+        touched.insert(transaction.to.clone());
+    }
+    for withdrawal in &block.withdrawals {
+        touched.insert(withdrawal.from.clone());
+    }
+    touched
 }
 
 async fn append_rollup_batch_tx(
@@ -2903,6 +3053,37 @@ async fn append_rollup_batch_tx(
     }
 
     insert_rollup_batch_tx(tx, &commitment, "built", &witness).await?;
+    enqueue_job_tx(
+        tx,
+        "prove_batch",
+        &commitment.batch_number.to_string(),
+        json!({
+            "batch_number": commitment.batch_number,
+            "start_block_height": commitment.start_block_height,
+            "end_block_height": commitment.end_block_height,
+            "withdrawal_count": commitment.withdrawal_count,
+        }),
+    )
+    .await?;
+    if commitment.withdrawal_count > 0 {
+        enqueue_job_tx(
+            tx,
+            "generate_withdrawal_proofs",
+            &commitment.batch_number.to_string(),
+            json!({
+                "batch_number": commitment.batch_number,
+                "withdrawal_count": commitment.withdrawal_count,
+                "withdrawal_root": commitment.withdrawal_root,
+            }),
+        )
+        .await?;
+    }
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(WORK_AVAILABLE_CHANNEL)
+        .bind(format!("batch:{}", commitment.batch_number))
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
     for (deposit_index, deposit) in deposits.iter().enumerate() {
         sqlx::query(
             r#"
@@ -3171,6 +3352,43 @@ async fn insert_rollup_batch_tx(
     Ok(())
 }
 
+async fn enqueue_job_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_type: &str,
+    subject_id: &str,
+    payload: Value,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            job_type,
+            subject_id,
+            status,
+            payload
+        )
+        VALUES ($1, $2, 'queued', $3)
+        ON CONFLICT (job_type, subject_id) DO UPDATE SET
+            payload = EXCLUDED.payload,
+            status = CASE
+                WHEN jobs.status IN ('failed', 'cancelled') THEN 'retry'
+                ELSE jobs.status
+            END,
+            run_after = CASE
+                WHEN jobs.status IN ('failed', 'cancelled') THEN now()
+                ELSE jobs.run_after
+            END,
+            updated_at = now()
+        "#,
+    )
+    .bind(job_type)
+    .bind(subject_id)
+    .bind(payload)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
 async fn load_failed_pool_entries(
     pool: &PgPool,
     failed_ids: Vec<(u64, String)>,
@@ -3362,6 +3580,39 @@ fn error_event_from_row(row: sqlx::postgres::PgRow) -> Result<ErrorEventView, Ap
         id: row.get("id"),
         service: row.get("service"),
         severity: row.get("severity"),
+        message: row.get("message"),
+        context: row.get("context"),
+        created_at: row.get("created_at"),
+        resolved_at: row.get("resolved_at"),
+    })
+}
+
+fn job_from_row(row: sqlx::postgres::PgRow) -> Result<JobView, ApiError> {
+    Ok(JobView {
+        id: row.get("id"),
+        job_type: row.get("job_type"),
+        subject_id: row.get("subject_id"),
+        status: row.get("status"),
+        priority: row.get("priority"),
+        attempts: row.get("attempts"),
+        max_attempts: row.get("max_attempts"),
+        locked_by: row.get("locked_by"),
+        locked_at: row.get("locked_at"),
+        run_after: row.get("run_after"),
+        payload: row.get("payload"),
+        last_error: row.get("last_error"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn system_alert_from_row(row: sqlx::postgres::PgRow) -> Result<SystemAlertView, ApiError> {
+    Ok(SystemAlertView {
+        id: row.get("id"),
+        service: row.get("service"),
+        severity: row.get("severity"),
+        alert_type: row.get("alert_type"),
+        subject_id: row.get("subject_id"),
         message: row.get("message"),
         context: row.get("context"),
         created_at: row.get("created_at"),

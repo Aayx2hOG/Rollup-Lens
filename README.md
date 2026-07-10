@@ -211,6 +211,8 @@ GET  /rollup/batches/:batch_number/validity-witness
 GET  /rollup/batches/:batch_number/withdrawals/:withdrawal_hash/proof
 GET  /errors
 GET  /errors/latest
+GET  /jobs
+GET  /alerts
 GET  /search/:query
 ```
 
