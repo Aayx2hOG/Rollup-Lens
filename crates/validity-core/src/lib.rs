@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chain_core::{
     account_state_value, apply_deposit_to_state, apply_transaction_to_state,
+    apply_withdrawal_to_state,
     rollup_batch_commitment_from_blocks, validate_deposit_sequence, Account, Block, ChainError,
     RollupBatchCommitment,
 };
@@ -37,15 +38,19 @@ pub struct BatchValidityPublicValues {
     pub first_deposit_id: Option<u64>,
     #[serde(default)]
     pub last_deposit_id: Option<u64>,
+    #[serde(default)]
+    pub withdrawal_count: usize,
+    #[serde(default)]
+    pub withdrawal_root: String,
     #[serde(default = "default_l1_deposit_inbox")]
     pub l1_deposit_inbox: String,
 }
 
-pub const EVM_PUBLIC_VALUES_LENGTH: usize = 12 * 32;
+pub const EVM_PUBLIC_VALUES_LENGTH: usize = 14 * 32;
 
 impl BatchValidityPublicValues {
     /// Solidity ABI encoding of
-    /// `(uint256,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,address)`.
+    /// `(uint256,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,uint256,bytes32,uint256,address)`.
     pub fn encode_evm(&self) -> Result<[u8; EVM_PUBLIC_VALUES_LENGTH], ValidityError> {
         let mut encoded = [0u8; EVM_PUBLIC_VALUES_LENGTH];
         encoded[24..32].copy_from_slice(&self.batch_number.to_be_bytes());
@@ -73,7 +78,12 @@ impl BatchValidityPublicValues {
             ValidityError::InvalidPublicValues("transaction count exceeds u64".into())
         })?;
         encoded[10 * 32 + 24..11 * 32].copy_from_slice(&count.to_be_bytes());
-        encoded[11 * 32..12 * 32].copy_from_slice(&decode_address_word(&self.l1_deposit_inbox)?);
+        encoded[11 * 32..12 * 32].copy_from_slice(&decode_root(&self.withdrawal_root)?);
+        let withdrawal_count = u64::try_from(self.withdrawal_count).map_err(|_| {
+            ValidityError::InvalidPublicValues("withdrawal count exceeds u64".into())
+        })?;
+        encoded[12 * 32 + 24..13 * 32].copy_from_slice(&withdrawal_count.to_be_bytes());
+        encoded[13 * 32..14 * 32].copy_from_slice(&decode_address_word(&self.l1_deposit_inbox)?);
         Ok(encoded)
     }
 }
@@ -132,6 +142,10 @@ pub fn verify_batch_witness(
             changed_addresses.insert(transaction.from.as_str());
             changed_addresses.insert(transaction.to.as_str());
         }
+        for withdrawal in &block.withdrawals {
+            apply_withdrawal_to_state(&mut accounts, withdrawal).map_err(invalid_batch)?;
+            changed_addresses.insert(withdrawal.from.as_str());
+        }
         for address in changed_addresses {
             let account = accounts
                 .get(address)
@@ -164,6 +178,8 @@ fn public_values(
         deposit_root: commitment.deposit_root,
         first_deposit_id: commitment.first_deposit_id,
         last_deposit_id: commitment.last_deposit_id,
+        withdrawal_count: commitment.withdrawal_count,
+        withdrawal_root: commitment.withdrawal_root,
         l1_deposit_inbox,
     }
 }
@@ -344,14 +360,17 @@ mod tests {
             deposit_root: "00".repeat(32),
             first_deposit_id: None,
             last_deposit_id: None,
+            withdrawal_count: 0,
+            withdrawal_root: "66".repeat(32),
             l1_deposit_inbox: L1_DEPOSIT_INBOX.to_string(),
         };
 
         let encoded = values.encode_evm().unwrap();
-        assert_eq!(encoded.len(), 384);
+        assert_eq!(encoded.len(), 448);
         assert_eq!(&encoded[24..32], &7u64.to_be_bytes());
         assert_eq!(&encoded[32..64], &[0x11; 32]);
         assert_eq!(&encoded[10 * 32 + 24..11 * 32], &9u64.to_be_bytes());
-        assert_eq!(&encoded[11 * 32 + 12..12 * 32], &[0x22; 20]);
+        assert_eq!(&encoded[11 * 32..12 * 32], &[0x66; 32]);
+        assert_eq!(&encoded[13 * 32 + 12..14 * 32], &[0x22; 20]);
     }
 }

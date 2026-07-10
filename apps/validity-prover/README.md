@@ -65,9 +65,9 @@ The JSON artifact contains:
 
 - `program_vkey`: the verification-key commitment that must equal the
   `programVKey` configured in `ValidityRollupSettlement`
-- `public_values`: 384 bytes containing the ABI encoding of batch number, five
+- `public_values`: 448 bytes containing the ABI encoding of batch number, five
   roots/commitments, deposit root, processed deposit range/count, transaction
-  count, and the L1 deposit inbox
+  count, withdrawal root/count, and the L1 deposit inbox
 - `proof`: the selector-prefixed Groth16 proof bytes expected by SP1's
   version-matched Solidity verifier
 - `decoded`: a human-readable copy for inspection

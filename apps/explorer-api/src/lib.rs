@@ -14,12 +14,14 @@ use axum::{
     Json, Router,
 };
 use chain_core::{
-    apply_transaction_to_state, finalize_genesis, new_chain,
-    produce_block_from_indexed_state_with_deposits, rollup_batch_commitment_from_blocks,
-    state_root, transaction_hash, Account, Block, L1Deposit, RollupBatchCommitment, Transfer,
+    apply_transaction_to_state, apply_withdrawal_to_state, finalize_genesis, new_chain,
+    produce_block_from_indexed_state_with_operations, rollup_batch_commitment_from_blocks,
+    state_root, transaction_hash, withdrawal_hash, withdrawal_leaf_hash, Account, Block, L1Deposit,
+    RollupBatchCommitment, Transfer, Withdrawal,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use tower_http::cors::CorsLayer;
 use validity_core::{verify_batch_witness, BatchValidityWitness};
@@ -35,6 +37,7 @@ const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAX_PAGE_LIMIT: usize = 100;
 const GENESIS_INITIALIZATION_LOCK: i64 = 8_739_912_441;
 const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
+const WORK_AVAILABLE_CHANNEL: &str = "rollup_work_available";
 const DEFAULT_L1_DEPOSIT_INBOX: &str = "0x0000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -297,10 +300,40 @@ struct TransactionPoolEntryView {
 }
 
 #[derive(Debug, Serialize)]
+struct WithdrawalView {
+    hash: String,
+    block_height: Option<u64>,
+    withdrawal_index: usize,
+    withdrawal: Withdrawal,
+    l1_claim_tx_hash: Option<String>,
+    claimed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WithdrawalPoolEntryView {
+    id: u64,
+    hash: String,
+    status: String,
+    failure_reason: Option<String>,
+    included_block_height: Option<u64>,
+    included_withdrawal_index: Option<usize>,
+    created_at: String,
+    updated_at: String,
+    withdrawal: Withdrawal,
+}
+
+#[derive(Debug, Serialize)]
 struct SubmittedTransaction {
     hash: String,
     status: String,
     transfer: Transfer,
+}
+
+#[derive(Debug, Serialize)]
+struct SubmittedWithdrawal {
+    hash: String,
+    status: String,
+    withdrawal: Withdrawal,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,7 +342,9 @@ struct SequencedBatch {
     rollup_batch: Option<RollupBatchSummary>,
     included_deposits: Vec<L1DepositView>,
     included_transactions: Vec<TransactionPoolEntryView>,
+    included_withdrawals: Vec<WithdrawalPoolEntryView>,
     failed_transactions: Vec<TransactionPoolEntryView>,
+    failed_withdrawals: Vec<WithdrawalPoolEntryView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -318,9 +353,11 @@ struct BlockView {
     parent_hash: String,
     deposits: Vec<L1Deposit>,
     transactions: Vec<Transfer>,
+    withdrawals: Vec<Withdrawal>,
     state_root: String,
     block_hash: String,
     transaction_views: Vec<TransactionView>,
+    withdrawal_views: Vec<WithdrawalView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,6 +386,8 @@ struct RollupBatchSummary {
     deposit_root: String,
     first_deposit_id: Option<u64>,
     last_deposit_id: Option<u64>,
+    withdrawal_count: usize,
+    withdrawal_root: String,
     status: String,
     l1_chain_id: Option<u64>,
     l1_contract_address: Option<String>,
@@ -369,6 +408,18 @@ struct RollupBatchView {
     #[serde(flatten)]
     summary: RollupBatchSummary,
     transactions: Vec<TransactionView>,
+    withdrawals: Vec<WithdrawalView>,
+}
+
+#[derive(Debug, Serialize)]
+struct WithdrawalClaimProof {
+    batch_number: u64,
+    withdrawal_hash: String,
+    withdrawal_index: usize,
+    withdrawal_root: String,
+    leaf_hash: String,
+    proof: Vec<String>,
+    sibling_is_left: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -424,6 +475,7 @@ enum SearchResult {
     Block(BlockView),
     Account(Account),
     Transaction(TransactionView),
+    Withdrawal(WithdrawalView),
 }
 
 #[derive(Debug)]
@@ -520,6 +572,11 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox_and_events(
             "/rollup/transactions",
             get(transaction_pool).post(submit_transaction),
         )
+        .route(
+            "/rollup/withdrawals",
+            get(withdrawal_pool).post(submit_withdrawal),
+        )
+        .route("/withdrawals/:hash", get(withdrawal_by_hash))
         .route("/errors", get(errors))
         .route("/errors/latest", get(latest_error))
         .route(
@@ -534,6 +591,10 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox_and_events(
         .route(
             "/rollup/batches/:batch_number/validity-witness",
             get(rollup_batch_validity_witness),
+        )
+        .route(
+            "/rollup/batches/:batch_number/withdrawals/:withdrawal_hash/proof",
+            get(rollup_batch_withdrawal_proof),
         )
         .route(
             "/rollup/batches/:batch_number/settlement",
@@ -658,6 +719,7 @@ async fn index() -> Json<Value> {
             "POST /rollup/batches",
             "GET /rollup/batches/:batch_number",
             "GET /rollup/batches/:batch_number/settlement-calldata",
+            "GET /rollup/batches/:batch_number/withdrawals/:withdrawal_hash/proof",
             "POST /rollup/batches/:batch_number/settlement",
             "GET /l1/deposits",
             "POST /l1/deposits",
@@ -758,6 +820,19 @@ async fn transaction_pool(
     .await
 }
 
+async fn withdrawal_pool(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let page = query.page_params()?;
+    cached_json(
+        state,
+        format!("rollup:withdrawals:{page}"),
+        |source| async move { source.withdrawal_pool(page).await },
+    )
+    .await
+}
+
 async fn submit_transaction(
     State(state): State<Arc<AppState>>,
     Json(transaction): Json<Transfer>,
@@ -767,6 +842,30 @@ async fn submit_transaction(
     serde_json::to_value(submitted)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
+}
+
+async fn submit_withdrawal(
+    State(state): State<Arc<AppState>>,
+    Json(withdrawal): Json<Withdrawal>,
+) -> Result<Json<Value>, ApiError> {
+    let submitted = state.service().submit_withdrawal(withdrawal).await?;
+    state.cache_clear();
+    serde_json::to_value(submitted)
+        .map(Json)
+        .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
+}
+
+async fn withdrawal_by_hash(
+    State(state): State<Arc<AppState>>,
+    Path(hash): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    cached_json(state, format!("withdrawals:{hash}"), |source| async move {
+        source
+            .withdrawal_by_hash(&hash)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("withdrawal {hash} not found")))
+    })
+    .await
 }
 
 async fn sequence_rollup_batch(
@@ -883,6 +982,18 @@ async fn rollup_batch_validity_witness(
     Ok(Json(witness))
 }
 
+async fn rollup_batch_withdrawal_proof(
+    State(state): State<Arc<AppState>>,
+    Path((batch_number, withdrawal_hash)): Path<(u64, String)>,
+) -> Result<Json<Value>, ApiError> {
+    cached_json(
+        state,
+        format!("rollup:batches:{batch_number}:withdrawals:{withdrawal_hash}:proof"),
+        |source| async move { source.withdrawal_claim_proof(batch_number, &withdrawal_hash).await },
+    )
+    .await
+}
+
 async fn update_rollup_batch_settlement(
     State(state): State<Arc<AppState>>,
     Path(batch_number): Path<u64>,
@@ -978,6 +1089,9 @@ async fn search(
         if let Some(transaction) = source.transaction_by_hash(&query).await? {
             return Ok(SearchResult::Transaction(transaction));
         }
+        if let Some(withdrawal) = source.withdrawal_by_hash(&query).await? {
+            return Ok(SearchResult::Withdrawal(withdrawal));
+        }
 
         Err(ApiError::NotFound(format!("no result for {query}")))
     })
@@ -1060,6 +1174,15 @@ impl ExplorerService {
     ) -> Result<SubmittedTransaction, ApiError> {
         let submitted = self.source.submit_transaction(transaction).await?;
         self.publish_event(AppEventType::TransactionSubmitted, &submitted);
+        Ok(submitted)
+    }
+
+    async fn submit_withdrawal(
+        &self,
+        withdrawal: Withdrawal,
+    ) -> Result<SubmittedWithdrawal, ApiError> {
+        let submitted = self.source.submit_withdrawal(withdrawal).await?;
+        self.publish_event(AppEventType::WithdrawalSubmitted, &submitted);
         Ok(submitted)
     }
 
@@ -1207,6 +1330,28 @@ impl DbSource {
         row.map(transaction_from_row).transpose()
     }
 
+    async fn withdrawal_by_hash(&self, hash: &str) -> Result<Option<WithdrawalView>, ApiError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                hash,
+                block_height,
+                withdrawal_index,
+                raw_withdrawal,
+                l1_claim_tx_hash,
+                claimed_at::text AS claimed_at
+            FROM withdrawals
+            WHERE hash = $1
+            "#,
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database_error)?;
+
+        row.map(withdrawal_from_row).transpose()
+    }
+
     async fn transaction_pool(
         &self,
         page: PageParams,
@@ -1245,6 +1390,48 @@ impl DbSource {
         Ok(page_from_items(
             items,
             usize_from_i64(total, "transaction pool count")?,
+            page,
+        ))
+    }
+
+    async fn withdrawal_pool(
+        &self,
+        page: PageParams,
+    ) -> Result<Page<WithdrawalPoolEntryView>, ApiError> {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM withdrawal_pool")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(database_error)?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hash,
+                status,
+                failure_reason,
+                included_block_height,
+                included_withdrawal_index,
+                raw_withdrawal,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM withdrawal_pool
+            ORDER BY id DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(to_i64_from_usize(page.limit, "page limit")?)
+        .bind(to_i64_from_usize(page.offset, "page offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
+
+        let items = rows
+            .into_iter()
+            .map(withdrawal_pool_entry_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(page_from_items(
+            items,
+            usize_from_i64(total, "withdrawal pool count")?,
             page,
         ))
     }
@@ -1324,12 +1511,103 @@ impl DbSource {
             .execute(&mut *tx)
             .await
             .map_err(database_error)?;
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(WORK_AVAILABLE_CHANNEL)
+            .bind(&hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
         tx.commit().await.map_err(database_error)?;
 
         Ok(SubmittedTransaction {
             hash,
             status: "pending".to_string(),
             transfer: transaction,
+        })
+    }
+
+    async fn submit_withdrawal(
+        &self,
+        withdrawal: Withdrawal,
+    ) -> Result<SubmittedWithdrawal, ApiError> {
+        let hash = withdrawal_hash(&withdrawal);
+        let duplicate_indexed: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM withdrawals WHERE hash = $1")
+                .bind(&hash)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(database_error)?;
+        if duplicate_indexed.is_some() {
+            return Err(ApiError::Conflict(format!(
+                "withdrawal {hash} is already indexed"
+            )));
+        }
+
+        let duplicate_pool: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM withdrawal_pool WHERE hash = $1")
+                .bind(&hash)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(database_error)?;
+        if duplicate_pool.is_some() {
+            return Err(ApiError::Conflict(format!(
+                "withdrawal {hash} is already in the pool"
+            )));
+        }
+
+        let mut accounts = load_accounts(&self.pool).await?;
+        for pending in load_pending_pool_transfers(&self.pool).await? {
+            apply_transaction_to_state(&mut accounts, &pending)
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        }
+        for pending in load_pending_pool_withdrawals(&self.pool).await? {
+            apply_withdrawal_to_state(&mut accounts, &pending)
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+        }
+        apply_withdrawal_to_state(&mut accounts, &withdrawal)
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+        let mut tx = self.pool.begin().await.map_err(database_error)?;
+        sqlx::query(
+            r#"
+            INSERT INTO withdrawal_pool (
+                hash,
+                from_address,
+                l1_recipient,
+                amount,
+                nonce,
+                signature,
+                status,
+                raw_withdrawal
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+            "#,
+        )
+        .bind(&hash)
+        .bind(&withdrawal.from)
+        .bind(&withdrawal.l1_recipient)
+        .bind(to_i64(withdrawal.amount, "withdrawal amount")?)
+        .bind(to_i64(withdrawal.nonce, "withdrawal nonce")?)
+        .bind(&withdrawal.signature)
+        .bind(serde_json::to_value(&withdrawal).map_err(|error| {
+            ApiError::InvalidIndexedData(format!("invalid withdrawal json: {error}"))
+        })?)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
+
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(WORK_AVAILABLE_CHANNEL)
+            .bind(&hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+
+        Ok(SubmittedWithdrawal {
+            hash,
+            status: "pending".to_string(),
+            withdrawal,
         })
     }
 
@@ -1361,10 +1639,35 @@ impl DbSource {
 
         let executable_deposits =
             load_executable_deposits_tx(&mut tx, limit, &self.l1_deposit_inbox).await?;
+        let withdrawal_rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hash,
+                status,
+                failure_reason,
+                included_block_height,
+                included_withdrawal_index,
+                raw_withdrawal,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM withdrawal_pool
+            WHERE status = 'pending'
+            ORDER BY id ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(to_i64_from_usize(limit, "sequencer limit")?)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(database_error)?;
 
-        if pending_rows.is_empty() && executable_deposits.is_empty() {
+        if pending_rows.is_empty() && executable_deposits.is_empty() && withdrawal_rows.is_empty()
+        {
             return Err(ApiError::BadRequest(
-                "no pending transactions or confirmed deposits to sequence".to_string(),
+                "no pending transactions, withdrawals, or confirmed deposits to sequence"
+                    .to_string(),
             ));
         }
 
@@ -1372,13 +1675,22 @@ impl DbSource {
         let latest_block = latest_block_for_update(&mut tx).await?;
         let mut next_accounts = accounts.clone();
         let mut accepted = Vec::new();
+        let mut accepted_withdrawals = Vec::new();
         let mut failed_ids = Vec::new();
+        let mut failed_withdrawal_ids = Vec::new();
 
         for row in pending_rows {
             let entry = transaction_pool_entry_from_row(row)?;
             match apply_transaction_to_state(&mut next_accounts, &entry.transfer) {
                 Ok(()) => accepted.push(entry),
                 Err(error) => failed_ids.push((entry.id, error.to_string())),
+            }
+        }
+        for row in withdrawal_rows {
+            let entry = withdrawal_pool_entry_from_row(row)?;
+            match apply_withdrawal_to_state(&mut next_accounts, &entry.withdrawal) {
+                Ok(()) => accepted_withdrawals.push(entry),
+                Err(error) => failed_withdrawal_ids.push((entry.id, error.to_string())),
             }
         }
 
@@ -1396,11 +1708,26 @@ impl DbSource {
             .await
             .map_err(database_error)?;
         }
+        for (id, reason) in &failed_withdrawal_ids {
+            sqlx::query(
+                r#"
+                UPDATE withdrawal_pool
+                SET status = 'failed', failure_reason = $2, updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(to_i64(*id, "withdrawal pool id")?)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
 
-        if accepted.is_empty() && executable_deposits.is_empty() {
+        if accepted.is_empty() && executable_deposits.is_empty() && accepted_withdrawals.is_empty()
+        {
             tx.commit().await.map_err(database_error)?;
             return Err(ApiError::BadRequest(
-                "all pending transactions failed validation".to_string(),
+                "all pending transactions and withdrawals failed validation".to_string(),
             ));
         }
 
@@ -1412,12 +1739,17 @@ impl DbSource {
             .iter()
             .map(|entry| entry.transfer.clone())
             .collect::<Vec<_>>();
+        let withdrawals = accepted_withdrawals
+            .iter()
+            .map(|entry| entry.withdrawal.clone())
+            .collect::<Vec<_>>();
         let accounts_before = accounts.clone();
-        let block = produce_block_from_indexed_state_with_deposits(
+        let block = produce_block_from_indexed_state_with_operations(
             &mut accounts,
             &latest_block,
             deposits,
             transactions,
+            withdrawals,
         )
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
 
@@ -1429,6 +1761,16 @@ impl DbSource {
                 block.height,
                 transaction_index,
                 transaction,
+            )
+            .await?;
+        }
+        for (withdrawal_index, withdrawal) in block.withdrawals.iter().enumerate() {
+            insert_indexed_withdrawal_tx(
+                &mut tx,
+                &withdrawal_hash(withdrawal),
+                block.height,
+                withdrawal_index,
+                withdrawal,
             )
             .await?;
         }
@@ -1469,6 +1811,29 @@ impl DbSource {
             .await
             .map_err(database_error)?;
         }
+        for (withdrawal_index, entry) in accepted_withdrawals.iter().enumerate() {
+            sqlx::query(
+                r#"
+                UPDATE withdrawal_pool
+                SET
+                    status = 'included',
+                    failure_reason = NULL,
+                    included_block_height = $2,
+                    included_withdrawal_index = $3,
+                    updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(to_i64(entry.id, "withdrawal pool id")?)
+            .bind(to_i64(block.height, "included block height")?)
+            .bind(to_i32_from_usize(
+                withdrawal_index,
+                "included withdrawal index",
+            )?)
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        }
 
         let rollup_batch = append_rollup_batch_tx(
             &mut tx,
@@ -1499,14 +1864,29 @@ impl DbSource {
                 entry
             })
             .collect();
+        let included_withdrawals = accepted_withdrawals
+            .into_iter()
+            .enumerate()
+            .map(|(withdrawal_index, mut entry)| {
+                entry.status = "included".to_string();
+                entry.failure_reason = None;
+                entry.included_block_height = Some(block.height);
+                entry.included_withdrawal_index = Some(withdrawal_index);
+                entry
+            })
+            .collect();
         let failed_transactions = load_failed_pool_entries(&self.pool, failed_ids).await?;
+        let failed_withdrawals =
+            load_failed_withdrawal_pool_entries(&self.pool, failed_withdrawal_ids).await?;
 
         Ok(SequencedBatch {
             block: block_view(&block),
             rollup_batch,
             included_deposits,
             included_transactions,
+            included_withdrawals,
             failed_transactions,
+            failed_withdrawals,
         })
     }
 
@@ -1578,6 +1958,8 @@ impl DbSource {
                 deposit_root,
                 first_deposit_id,
                 last_deposit_id,
+                withdrawal_count,
+                withdrawal_root,
                 status,
                 l1_chain_id,
                 l1_contract_address,
@@ -1633,6 +2015,8 @@ impl DbSource {
                 deposit_root,
                 first_deposit_id,
                 last_deposit_id,
+                withdrawal_count,
+                withdrawal_root,
                 status,
                 l1_chain_id,
                 l1_contract_address,
@@ -1676,11 +2060,92 @@ impl DbSource {
             .into_iter()
             .map(transaction_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let withdrawal_rows = sqlx::query(
+            r#"
+            SELECT
+                w.hash,
+                w.block_height,
+                w.withdrawal_index,
+                w.raw_withdrawal,
+                w.l1_claim_tx_hash,
+                w.claimed_at::text AS claimed_at
+            FROM rollup_batch_withdrawals rbw
+            JOIN withdrawals w ON w.hash = rbw.withdrawal_hash
+            WHERE rbw.batch_number = $1
+            ORDER BY rbw.block_height ASC, rbw.withdrawal_index ASC
+            "#,
+        )
+        .bind(to_i64(batch_number, "rollup batch number")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(database_error)?;
+        let withdrawals = withdrawal_rows
+            .into_iter()
+            .map(withdrawal_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Some(RollupBatchView {
             summary,
             transactions,
+            withdrawals,
         }))
+    }
+
+    async fn withdrawal_claim_proof(
+        &self,
+        batch_number: u64,
+        withdrawal_hash_value: &str,
+    ) -> Result<WithdrawalClaimProof, ApiError> {
+        let normalized_withdrawal_hash = withdrawal_hash_value.trim_start_matches("0x");
+        if normalized_withdrawal_hash.len() != 64
+            || !normalized_withdrawal_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(ApiError::BadRequest(
+                "withdrawal hash must be a 32-byte hex string".to_string(),
+            ));
+        }
+        let batch = self
+            .rollup_batch_by_number(batch_number)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("rollup batch {batch_number} not found")))?;
+        if batch.summary.withdrawal_count == 0 {
+            return Err(ApiError::NotFound(format!(
+                "rollup batch {batch_number} has no withdrawals"
+            )));
+        }
+
+        let mut target_index = None;
+        let mut leaf_hashes = Vec::with_capacity(batch.withdrawals.len());
+        for (index, withdrawal) in batch.withdrawals.iter().enumerate() {
+            if withdrawal.hash.eq_ignore_ascii_case(normalized_withdrawal_hash) {
+                target_index = Some(index);
+            }
+            leaf_hashes.push(withdrawal_leaf_hash(&withdrawal.withdrawal).map_err(|error| {
+                ApiError::InvalidIndexedData(format!("invalid withdrawal leaf: {error}"))
+            })?);
+        }
+        let target_index = target_index.ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "withdrawal {withdrawal_hash_value} not found in batch {batch_number}"
+            ))
+        })?;
+        let leaf_hash = leaf_hashes[target_index];
+        let (proof, sibling_is_left) = withdrawal_merkle_path(&leaf_hashes, target_index)?;
+
+        Ok(WithdrawalClaimProof {
+            batch_number,
+            withdrawal_hash: format!("0x{}", normalized_withdrawal_hash.to_ascii_lowercase()),
+            withdrawal_index: target_index,
+            withdrawal_root: bytes32_hex(&batch.summary.withdrawal_root, "withdrawal root")?,
+            leaf_hash: format!("0x{}", hex::encode(leaf_hash)),
+            proof: proof
+                .into_iter()
+                .map(|hash| format!("0x{}", hex::encode(hash)))
+                .collect(),
+            sibling_is_left,
+        })
     }
 
     async fn l1_deposits(
@@ -1934,6 +2399,8 @@ impl DbSource {
                         deposit_root,
                         first_deposit_id,
                         last_deposit_id,
+                        withdrawal_count,
+                        withdrawal_root,
                         status,
                         l1_chain_id,
                         l1_contract_address,
@@ -2026,6 +2493,8 @@ impl DbSource {
                             deposit_root,
                             first_deposit_id,
                             last_deposit_id,
+                            withdrawal_count,
+                            withdrawal_root,
                             status,
                             l1_chain_id,
                             l1_contract_address,
@@ -2205,6 +2674,24 @@ async fn load_pending_pool_transfers(pool: &PgPool) -> Result<Vec<Transfer>, Api
         .collect()
 }
 
+async fn load_pending_pool_withdrawals(pool: &PgPool) -> Result<Vec<Withdrawal>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT raw_withdrawal
+        FROM withdrawal_pool
+        WHERE status = 'pending'
+        ORDER BY id ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(database_error)?;
+
+    rows.into_iter()
+        .map(|row| parse_json_value(row.get("raw_withdrawal"), "withdrawal pool withdrawal"))
+        .collect()
+}
+
 async fn latest_block_for_update(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<Block, ApiError> {
@@ -2298,6 +2785,47 @@ async fn insert_indexed_transaction_tx(
     Ok(())
 }
 
+async fn insert_indexed_withdrawal_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    hash: &str,
+    block_height: u64,
+    withdrawal_index: usize,
+    withdrawal: &Withdrawal,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        INSERT INTO withdrawals (
+            hash,
+            block_height,
+            withdrawal_index,
+            from_address,
+            l1_recipient,
+            amount,
+            nonce,
+            signature,
+            raw_withdrawal
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(hash)
+    .bind(to_i64(block_height, "withdrawal block height")?)
+    .bind(to_i32_from_usize(withdrawal_index, "withdrawal index")?)
+    .bind(&withdrawal.from)
+    .bind(&withdrawal.l1_recipient)
+    .bind(to_i64(withdrawal.amount, "withdrawal amount")?)
+    .bind(to_i64(withdrawal.nonce, "withdrawal nonce")?)
+    .bind(&withdrawal.signature)
+    .bind(
+        serde_json::to_value(withdrawal)
+            .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
 async fn replace_accounts_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     accounts: &BTreeMap<String, Account>,
@@ -2361,6 +2889,13 @@ async fn append_rollup_batch_tx(
             "validity witness does not match rebuilt deposit commitment".to_string(),
         ));
     }
+    if public_values.withdrawal_count != commitment.withdrawal_count
+        || public_values.withdrawal_root != commitment.withdrawal_root
+    {
+        return Err(ApiError::InvalidIndexedData(
+            "validity witness does not match rebuilt withdrawal commitment".to_string(),
+        ));
+    }
     if public_values.l1_deposit_inbox != l1_deposit_inbox {
         return Err(ApiError::InvalidIndexedData(
             "validity witness does not match configured L1 deposit inbox".to_string(),
@@ -2422,6 +2957,30 @@ async fn append_rollup_batch_tx(
         )?)
         .execute(&mut **tx)
         .await
+            .map_err(database_error)?;
+    }
+    for (withdrawal_index, withdrawal) in block.withdrawals.iter().enumerate() {
+        let hash = withdrawal_hash(withdrawal);
+        sqlx::query(
+            r#"
+                INSERT INTO rollup_batch_withdrawals (
+                    batch_number, withdrawal_hash, block_height, withdrawal_index
+                )
+                VALUES ($1, $2, $3, $4)
+                "#,
+        )
+        .bind(to_i64(commitment.batch_number, "rollup batch number")?)
+        .bind(&hash)
+        .bind(to_i64(
+            block.height,
+            "rollup batch withdrawal block height",
+        )?)
+        .bind(to_i32_from_usize(
+            withdrawal_index,
+            "rollup batch withdrawal index",
+        )?)
+        .execute(&mut **tx)
+        .await
         .map_err(database_error)?;
     }
 
@@ -2439,6 +2998,8 @@ async fn append_rollup_batch_tx(
         deposit_root: commitment.deposit_root,
         first_deposit_id: commitment.first_deposit_id,
         last_deposit_id: commitment.last_deposit_id,
+        withdrawal_count: commitment.withdrawal_count,
+        withdrawal_root: commitment.withdrawal_root,
         status: "built".to_string(),
         l1_chain_id: None,
         l1_contract_address: None,
@@ -2546,11 +3107,13 @@ async fn insert_rollup_batch_tx(
             deposit_root,
             first_deposit_id,
             last_deposit_id,
+            withdrawal_count,
+            withdrawal_root,
             status,
             raw_commitment,
             validity_witness
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         "#,
     )
     .bind(to_i64(commitment.batch_number, "rollup batch number")?)
@@ -2588,6 +3151,11 @@ async fn insert_rollup_batch_tx(
             .map(|deposit_id| to_i64(deposit_id, "last deposit id"))
             .transpose()?,
     )
+    .bind(to_i32_from_usize(
+        commitment.withdrawal_count,
+        "rollup batch withdrawal count",
+    )?)
+    .bind(&commitment.withdrawal_root)
     .bind(status)
     .bind(
         serde_json::to_value(commitment)
@@ -2634,12 +3202,44 @@ async fn load_failed_pool_entries(
     Ok(entries)
 }
 
+async fn load_failed_withdrawal_pool_entries(
+    pool: &PgPool,
+    failed_ids: Vec<(u64, String)>,
+) -> Result<Vec<WithdrawalPoolEntryView>, ApiError> {
+    let mut entries = Vec::new();
+    for (id, _) in failed_ids {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                hash,
+                status,
+                failure_reason,
+                included_block_height,
+                included_withdrawal_index,
+                raw_withdrawal,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at
+            FROM withdrawal_pool
+            WHERE id = $1
+            "#,
+        )
+        .bind(to_i64(id, "withdrawal pool id")?)
+        .fetch_one(pool)
+        .await
+        .map_err(database_error)?;
+        entries.push(withdrawal_pool_entry_from_row(row)?);
+    }
+    Ok(entries)
+}
+
 fn block_view(block: &Block) -> BlockView {
     BlockView {
         height: block.height,
         parent_hash: block.parent_hash.clone(),
         deposits: block.deposits.clone(),
         transactions: block.transactions.clone(),
+        withdrawals: block.withdrawals.clone(),
         state_root: block.state_root.clone(),
         block_hash: block.block_hash.clone(),
         transaction_views: block
@@ -2651,6 +3251,19 @@ fn block_view(block: &Block) -> BlockView {
                 block_height: Some(block.height),
                 transaction_index,
                 transfer: transaction.clone(),
+            })
+            .collect(),
+        withdrawal_views: block
+            .withdrawals
+            .iter()
+            .enumerate()
+            .map(|(withdrawal_index, withdrawal)| WithdrawalView {
+                hash: withdrawal_hash(withdrawal),
+                block_height: Some(block.height),
+                withdrawal_index,
+                withdrawal: withdrawal.clone(),
+                l1_claim_tx_hash: None,
+                claimed_at: None,
             })
             .collect(),
     }
@@ -2708,6 +3321,42 @@ fn transaction_pool_entry_from_row(
     })
 }
 
+fn withdrawal_from_row(row: sqlx::postgres::PgRow) -> Result<WithdrawalView, ApiError> {
+    Ok(WithdrawalView {
+        hash: row.get("hash"),
+        block_height: row
+            .get::<Option<i64>, _>("block_height")
+            .map(|height| from_i64(height, "withdrawal block height"))
+            .transpose()?,
+        withdrawal_index: usize_from_i32(row.get("withdrawal_index"), "withdrawal index")?,
+        withdrawal: parse_json_value(row.get("raw_withdrawal"), "withdrawal")?,
+        l1_claim_tx_hash: row.get("l1_claim_tx_hash"),
+        claimed_at: row.get("claimed_at"),
+    })
+}
+
+fn withdrawal_pool_entry_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<WithdrawalPoolEntryView, ApiError> {
+    Ok(WithdrawalPoolEntryView {
+        id: from_i64(row.get("id"), "withdrawal pool id")?,
+        hash: row.get("hash"),
+        status: row.get("status"),
+        failure_reason: row.get("failure_reason"),
+        included_block_height: row
+            .get::<Option<i64>, _>("included_block_height")
+            .map(|height| from_i64(height, "included block height"))
+            .transpose()?,
+        included_withdrawal_index: row
+            .get::<Option<i32>, _>("included_withdrawal_index")
+            .map(|index| usize_from_i32(index, "included withdrawal index"))
+            .transpose()?,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        withdrawal: parse_json_value(row.get("raw_withdrawal"), "withdrawal pool withdrawal")?,
+    })
+}
+
 fn error_event_from_row(row: sqlx::postgres::PgRow) -> Result<ErrorEventView, ApiError> {
     Ok(ErrorEventView {
         id: row.get("id"),
@@ -2746,6 +3395,8 @@ fn rollup_batch_summary_from_row(
             .get::<Option<i64>, _>("last_deposit_id")
             .map(|deposit_id| from_i64(deposit_id, "last deposit id"))
             .transpose()?,
+        withdrawal_count: usize_from_i32(row.get("withdrawal_count"), "withdrawal count")?,
+        withdrawal_root: row.get("withdrawal_root"),
         status: row.get("status"),
         l1_chain_id: row
             .get::<Option<i64>, _>("l1_chain_id")
@@ -2854,6 +3505,48 @@ fn bytes32_hex(value: &str, label: &str) -> Result<String, ApiError> {
     }
 
     Ok(format!("0x{}", hex.to_ascii_lowercase()))
+}
+
+fn withdrawal_merkle_path(
+    leaves: &[[u8; 32]],
+    index: usize,
+) -> Result<(Vec<[u8; 32]>, Vec<bool>), ApiError> {
+    if leaves.is_empty() || index >= leaves.len() {
+        return Err(ApiError::InvalidIndexedData(
+            "invalid withdrawal proof index".to_string(),
+        ));
+    }
+
+    let mut proof = Vec::new();
+    let mut sibling_is_left = Vec::new();
+    let mut level = leaves.to_vec();
+    let mut current_index = index;
+    while level.len() > 1 {
+        let is_right_child = current_index % 2 == 1;
+        let sibling_index = if is_right_child {
+            current_index - 1
+        } else {
+            (current_index + 1).min(level.len() - 1)
+        };
+        proof.push(level[sibling_index]);
+        sibling_is_left.push(is_right_child);
+
+        level = level
+            .chunks(2)
+            .map(|chunk| {
+                let left = chunk[0];
+                let right = *chunk.get(1).unwrap_or(&left);
+                let mut hasher = Sha256::new();
+                hasher.update([0x01]);
+                hasher.update(left);
+                hasher.update(right);
+                hasher.finalize().into()
+            })
+            .collect();
+        current_index /= 2;
+    }
+
+    Ok((proof, sibling_is_left))
 }
 
 fn validate_prefixed_hex(value: &str, hex_len: usize, label: &str) -> Result<(), ApiError> {

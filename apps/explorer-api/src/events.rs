@@ -28,6 +28,7 @@ struct AppEvent {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum AppEventType {
     TransactionSubmitted,
+    WithdrawalSubmitted,
     RollupBatchSequenced,
     RollupBatchSettlementUpdated,
     L1DepositObserved,
@@ -88,6 +89,7 @@ impl AppEventType {
     fn name(self) -> &'static str {
         match self {
             AppEventType::TransactionSubmitted => "transaction_submitted",
+            AppEventType::WithdrawalSubmitted => "withdrawal_submitted",
             AppEventType::RollupBatchSequenced => "rollup_batch_sequenced",
             AppEventType::RollupBatchSettlementUpdated => "rollup_batch_settlement_updated",
             AppEventType::L1DepositObserved => "l1_deposit_observed",

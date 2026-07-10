@@ -132,8 +132,8 @@ export async function submitBatchWithProof(
   const normalizedFrom = normalizeAddress(from);
   const publicValues = normalizeHexBytes(artifact.public_values, "proof public values");
   const proof = normalizeHexBytes(artifact.proof, "Groth16 proof");
-  if (byteLength(publicValues) !== 384) {
-    throw new Error("Proof public values must be exactly 384 bytes");
+  if (byteLength(publicValues) !== 448) {
+    throw new Error("Proof public values must be exactly 448 bytes");
   }
   assertPublicValuesMatchBatch(publicValues, batch);
 

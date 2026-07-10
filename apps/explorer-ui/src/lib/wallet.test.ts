@@ -142,9 +142,11 @@ function batchFixture(): RollupBatchSummary {
     transaction_root: `0x${"33".repeat(32)}`,
     block_hash_root: `0x${"44".repeat(32)}`,
     deposit_root: `0x${"55".repeat(32)}`,
+    withdrawal_root: `0x${"77".repeat(32)}`,
     data_hash: `0x${"66".repeat(32)}`,
     transaction_count: 1,
     deposit_count: 1,
+    withdrawal_count: 0,
     first_deposit_id: 0,
     last_deposit_id: 0,
     status: "built",
@@ -178,6 +180,8 @@ function publicValuesFixture() {
     "0".repeat(64),
     batch.deposit_count.toString(16).padStart(64, "0"),
     batch.transaction_count.toString(16).padStart(64, "0"),
+    batch.withdrawal_root.slice(2),
+    batch.withdrawal_count.toString(16).padStart(64, "0"),
     `${"0".repeat(24)}${"22".repeat(20)}`,
   ].join("");
 }

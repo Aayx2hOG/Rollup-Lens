@@ -201,11 +201,14 @@ GET  /accounts/:address
 GET  /transactions/:hash
 GET  /rollup/transactions
 POST /rollup/transactions
+GET  /rollup/withdrawals
+POST /rollup/withdrawals
 GET  /rollup/batches
 POST /rollup/batches
 GET  /rollup/batches/:batch_number
 GET  /rollup/batches/:batch_number/settlement-calldata
 GET  /rollup/batches/:batch_number/validity-witness
+GET  /rollup/batches/:batch_number/withdrawals/:withdrawal_hash/proof
 GET  /errors
 GET  /errors/latest
 GET  /search/:query

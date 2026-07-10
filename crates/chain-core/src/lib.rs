@@ -14,6 +14,8 @@ pub const EIP712_DOMAIN_NAME: &str = "ZK Rollup";
 pub const EIP712_DOMAIN_VERSION: &str = "1";
 pub const ROLLUP_ID: &str = "zk-rollup-local-v1";
 const TRANSACTION_HASH_DOMAIN: &str = "zk-rollup-transaction-v1";
+const WITHDRAWAL_HASH_DOMAIN: &str = "zk-rollup-withdrawal-v1";
+const WITHDRAWAL_LEAF_DOMAIN: &[u8] = b"zk-rollup-withdrawal-leaf-v1";
 const BLOCK_HASH_DOMAIN: &str = "zk-rollup-block-v1";
 const BATCH_DATA_HASH_DOMAIN: &str = "zk-rollup-batch-data-v1";
 const LOCAL_CHAIN_ID: &str = ROLLUP_ID;
@@ -39,6 +41,16 @@ pub struct Transfer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct Withdrawal {
+    pub from: String,
+    pub l1_recipient: String,
+    pub amount: u64,
+    pub nonce: u64,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct L1Deposit {
     pub chain_id: u64,
     pub inbox_address: String,
@@ -57,6 +69,8 @@ pub struct Block {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deposits: Vec<L1Deposit>,
     pub transactions: Vec<Transfer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withdrawals: Vec<Withdrawal>,
     pub state_root: String,
     pub block_hash: String,
 }
@@ -109,6 +123,10 @@ pub struct RollupBatchCommitment {
     pub first_deposit_id: Option<u64>,
     #[serde(default)]
     pub last_deposit_id: Option<u64>,
+    #[serde(default)]
+    pub withdrawal_count: usize,
+    #[serde(default)]
+    pub withdrawal_root: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -120,6 +138,8 @@ struct BlockCommitment<'a> {
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     deposits: &'a [L1Deposit],
     transactions: &'a [Transfer],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    withdrawals: &'a [Withdrawal],
     state_root: &'a str,
 }
 
@@ -161,6 +181,8 @@ pub enum ChainError {
     InvalidDepositInboxAddress(String),
     #[error("invalid L1 depositor address {0}")]
     InvalidL1DepositorAddress(String),
+    #[error("invalid L1 withdrawal recipient address {0}")]
+    InvalidL1WithdrawalRecipientAddress(String),
     #[error("invalid rolling deposit commitment {0}")]
     InvalidDepositCommitment(String),
     #[error("duplicate deposit id {0}")]
@@ -263,12 +285,21 @@ pub fn finalize_genesis(chain: &mut Chain) -> Result<Block, ChainError> {
     let state_root = chain.account_state_tree.root_hex();
     let deposits = Vec::new();
     let transactions = Vec::new();
-    let block_hash = block_hash(0, NULL_PARENT_HASH, &deposits, &transactions, &state_root);
+    let withdrawals = Vec::new();
+    let block_hash = block_hash(
+        0,
+        NULL_PARENT_HASH,
+        &deposits,
+        &transactions,
+        &withdrawals,
+        &state_root,
+    );
     let block = Block {
         height: 0,
         parent_hash: NULL_PARENT_HASH.to_owned(),
         deposits,
         transactions,
+        withdrawals,
         state_root,
         block_hash,
     };
@@ -297,6 +328,27 @@ pub fn sign_transfer(
     })
 }
 
+pub fn sign_withdrawal(
+    secret_key_hex: &str,
+    l1_recipient: String,
+    amount: u64,
+    nonce: u64,
+) -> Result<Withdrawal, ChainError> {
+    let from = address_from_secret(secret_key_hex)?;
+    let l1_recipient = normalize_address(&l1_recipient)
+        .map_err(|_| ChainError::InvalidL1WithdrawalRecipientAddress(l1_recipient.clone()))?;
+    let digest = withdrawal_eip712_digest(&from, &l1_recipient, amount, nonce)?;
+    let signature = sign_digest(secret_key_hex, &digest)?;
+
+    Ok(Withdrawal {
+        from,
+        l1_recipient,
+        amount,
+        nonce,
+        signature,
+    })
+}
+
 pub fn add_pending_transaction(chain: &mut Chain, transaction: Transfer) -> Result<(), ChainError> {
     ensure_genesis_finalized(chain)?;
     let pending_state = pending_state(chain)?;
@@ -319,6 +371,7 @@ pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
     ensure_account_state_tree(chain);
     let mut next_accounts = chain.accounts.clone();
     let deposits = Vec::new();
+    let withdrawals = Vec::new();
     for transaction in &chain.pending_transactions {
         apply_transaction_to_state(&mut next_accounts, transaction)?;
     }
@@ -337,13 +390,21 @@ pub fn produce_block(chain: &mut Chain) -> Result<Block, ChainError> {
         .expect("genesis finalization ensures at least one block")
         .clone();
     let transactions = std::mem::take(&mut chain.pending_transactions);
-    let block_hash = block_hash(height, &parent_hash, &deposits, &transactions, &state_root);
+    let block_hash = block_hash(
+        height,
+        &parent_hash,
+        &deposits,
+        &transactions,
+        &withdrawals,
+        &state_root,
+    );
 
     let block = Block {
         height,
         parent_hash,
         deposits,
         transactions,
+        withdrawals,
         state_root,
         block_hash,
     };
@@ -368,6 +429,22 @@ pub fn produce_block_from_indexed_state_with_deposits(
     deposits: Vec<L1Deposit>,
     transactions: Vec<Transfer>,
 ) -> Result<Block, ChainError> {
+    produce_block_from_indexed_state_with_operations(
+        accounts,
+        parent_block,
+        deposits,
+        transactions,
+        Vec::new(),
+    )
+}
+
+pub fn produce_block_from_indexed_state_with_operations(
+    accounts: &mut BTreeMap<String, Account>,
+    parent_block: &Block,
+    deposits: Vec<L1Deposit>,
+    transactions: Vec<Transfer>,
+    withdrawals: Vec<Withdrawal>,
+) -> Result<Block, ChainError> {
     let mut next_accounts = accounts.clone();
     validate_deposit_sequence(&deposits)?;
     for deposit in &deposits {
@@ -375,6 +452,9 @@ pub fn produce_block_from_indexed_state_with_deposits(
     }
     for transaction in &transactions {
         apply_transaction_to_state(&mut next_accounts, transaction)?;
+    }
+    for withdrawal in &withdrawals {
+        apply_withdrawal_to_state(&mut next_accounts, withdrawal)?;
     }
 
     let state_root = state_root(&next_accounts);
@@ -384,6 +464,7 @@ pub fn produce_block_from_indexed_state_with_deposits(
         &parent_block.block_hash,
         &deposits,
         &transactions,
+        &withdrawals,
         &state_root,
     );
     let block = Block {
@@ -391,6 +472,7 @@ pub fn produce_block_from_indexed_state_with_deposits(
         parent_hash: parent_block.block_hash.clone(),
         deposits,
         transactions,
+        withdrawals,
         state_root,
         block_hash,
     };
@@ -430,6 +512,9 @@ pub fn validate_chain(chain: &Chain) -> Result<(), ChainError> {
             for transaction in &block.transactions {
                 apply_transaction_to_state(&mut accounts, transaction)?;
             }
+            for withdrawal in &block.withdrawals {
+                apply_withdrawal_to_state(&mut accounts, withdrawal)?;
+            }
         }
 
         let expected_state_root = state_root(&accounts);
@@ -444,6 +529,7 @@ pub fn validate_chain(chain: &Chain) -> Result<(), ChainError> {
             &block.parent_hash,
             &block.deposits,
             &block.transactions,
+            &block.withdrawals,
             &block.state_root,
         );
         if block.block_hash != expected_block_hash {
@@ -524,6 +610,31 @@ pub fn transaction_hash(transaction: &Transfer) -> String {
     encode_hex(&Sha256::digest(payload))
 }
 
+pub fn withdrawal_hash(withdrawal: &Withdrawal) -> String {
+    let payload = serde_json::to_vec(&json!({
+        "domain": WITHDRAWAL_HASH_DOMAIN,
+        "chain_id": LOCAL_CHAIN_ID,
+        "withdrawal": withdrawal,
+    }))
+    .expect("serializing a withdrawal commitment should not fail");
+    encode_hex(&Sha256::digest(payload))
+}
+
+pub fn withdrawal_leaf_hash(withdrawal: &Withdrawal) -> Result<[u8; 32], ChainError> {
+    let withdrawal_hash = decode_hex32(&withdrawal_hash(withdrawal))
+        .map_err(|_| ChainError::InvalidSignature)?;
+    let from = address_word(&withdrawal.from)?;
+    let l1_recipient = address_word(&withdrawal.l1_recipient)?;
+    let mut payload = Vec::with_capacity(WITHDRAWAL_LEAF_DOMAIN.len() + 32 + 20 + 20 + 32 + 32);
+    payload.extend_from_slice(WITHDRAWAL_LEAF_DOMAIN);
+    payload.extend_from_slice(&withdrawal_hash);
+    payload.extend_from_slice(&from[12..]);
+    payload.extend_from_slice(&l1_recipient[12..]);
+    payload.extend_from_slice(&uint_word(withdrawal.amount));
+    payload.extend_from_slice(&uint_word(withdrawal.nonce));
+    Ok(Sha256::digest(payload).into())
+}
+
 pub fn rollup_batch_commitment(
     chain: &Chain,
     batch_number: u64,
@@ -567,6 +678,7 @@ pub fn rollup_batch_commitment(
             })
             .collect::<Vec<_>>();
     let deposit_leaves = deposit_leaves(&blocks);
+    let withdrawal_leaves = withdrawal_leaves(&blocks);
     let block_hash_leaves = blocks
         .iter()
         .map(|block| {
@@ -604,6 +716,8 @@ pub fn rollup_batch_commitment(
         deposit_root: root_hex(&deposit_leaves),
         first_deposit_id: first_deposit_id(&deposit_leaves),
         last_deposit_id: last_deposit_id(&deposit_leaves),
+        withdrawal_count: withdrawal_leaves.len(),
+        withdrawal_root: withdrawal_root_hex(&withdrawal_leaves),
     })
 }
 
@@ -649,6 +763,7 @@ pub fn rollup_batch_commitment_from_blocks(
             &block.parent_hash,
             &block.deposits,
             &block.transactions,
+            &block.withdrawals,
             &block.state_root,
         );
         if block.block_hash != expected_block_hash {
@@ -679,6 +794,7 @@ pub fn rollup_batch_commitment_from_blocks(
             })
             .collect::<Vec<_>>();
     let deposit_leaves = deposit_leaves(blocks);
+    let withdrawal_leaves = withdrawal_leaves(blocks);
     let block_hash_leaves = blocks
         .iter()
         .map(|block| {
@@ -716,6 +832,8 @@ pub fn rollup_batch_commitment_from_blocks(
         deposit_root: root_hex(&deposit_leaves),
         first_deposit_id: first_deposit_id(&deposit_leaves),
         last_deposit_id: last_deposit_id(&deposit_leaves),
+        withdrawal_count: withdrawal_leaves.len(),
+        withdrawal_root: withdrawal_root_hex(&withdrawal_leaves),
     })
 }
 
@@ -827,6 +945,57 @@ pub fn validate_deposit_sequence(deposits: &[L1Deposit]) -> Result<(), ChainErro
     Ok(())
 }
 
+pub fn validate_withdrawal(
+    accounts: &BTreeMap<String, Account>,
+    withdrawal: &Withdrawal,
+) -> Result<(), ChainError> {
+    if withdrawal.amount == 0 {
+        return Err(ChainError::ZeroAmount);
+    }
+
+    let from = normalize_address(&withdrawal.from)?;
+    if from != withdrawal.from {
+        return Err(ChainError::InvalidAccountAddress(withdrawal.from.clone()));
+    }
+    let l1_recipient = normalize_address(&withdrawal.l1_recipient).map_err(|_| {
+        ChainError::InvalidL1WithdrawalRecipientAddress(withdrawal.l1_recipient.clone())
+    })?;
+    if l1_recipient != withdrawal.l1_recipient {
+        return Err(ChainError::InvalidL1WithdrawalRecipientAddress(
+            withdrawal.l1_recipient.clone(),
+        ));
+    }
+    let digest = withdrawal_eip712_digest(
+        &withdrawal.from,
+        &withdrawal.l1_recipient,
+        withdrawal.amount,
+        withdrawal.nonce,
+    )?;
+    if recover_address(&digest, &withdrawal.signature)? != withdrawal.from {
+        return Err(ChainError::InvalidSignature);
+    }
+
+    let sender = accounts
+        .get(&withdrawal.from)
+        .ok_or_else(|| ChainError::MissingSender(withdrawal.from.clone()))?;
+    if sender.nonce != withdrawal.nonce {
+        return Err(ChainError::InvalidNonce {
+            address: withdrawal.from.clone(),
+            expected: sender.nonce,
+            actual: withdrawal.nonce,
+        });
+    }
+    if sender.balance < withdrawal.amount {
+        return Err(ChainError::InsufficientFunds {
+            address: withdrawal.from.clone(),
+            balance: sender.balance,
+            amount: withdrawal.amount,
+        });
+    }
+
+    Ok(())
+}
+
 pub fn apply_transaction_to_state(
     accounts: &mut BTreeMap<String, Account>,
     transaction: &Transfer,
@@ -850,6 +1019,21 @@ pub fn apply_transaction_to_state(
         .balance
         .checked_add(transaction.amount)
         .ok_or_else(|| ChainError::BalanceOverflow(transaction.to.clone()))?;
+
+    Ok(())
+}
+
+pub fn apply_withdrawal_to_state(
+    accounts: &mut BTreeMap<String, Account>,
+    withdrawal: &Withdrawal,
+) -> Result<(), ChainError> {
+    validate_withdrawal(accounts, withdrawal)?;
+
+    let sender = accounts
+        .get_mut(&withdrawal.from)
+        .expect("validated sender must exist");
+    sender.balance -= withdrawal.amount;
+    sender.nonce += 1;
 
     Ok(())
 }
@@ -942,6 +1126,36 @@ pub fn transfer_eip712_digest(
     Ok(keccak(&encoded))
 }
 
+pub fn withdrawal_eip712_digest(
+    from: &str,
+    l1_recipient: &str,
+    amount: u64,
+    nonce: u64,
+) -> Result<[u8; 32], ChainError> {
+    let domain_type = keccak(b"EIP712Domain(string name,string version)");
+    let withdrawal_type = keccak(
+        b"Withdrawal(address from,address l1Recipient,uint256 amount,uint256 nonce,string rollupId)",
+    );
+    let domain_separator = keccak_words(&[
+        domain_type,
+        keccak(EIP712_DOMAIN_NAME.as_bytes()),
+        keccak(EIP712_DOMAIN_VERSION.as_bytes()),
+    ]);
+    let withdrawal_hash = keccak_words(&[
+        withdrawal_type,
+        address_word(from)?,
+        address_word(l1_recipient)?,
+        uint_word(amount),
+        uint_word(nonce),
+        keccak(ROLLUP_ID.as_bytes()),
+    ]);
+    let mut encoded = Vec::with_capacity(66);
+    encoded.extend_from_slice(b"\x19\x01");
+    encoded.extend_from_slice(&domain_separator);
+    encoded.extend_from_slice(&withdrawal_hash);
+    Ok(keccak(&encoded))
+}
+
 fn keccak(value: &[u8]) -> [u8; 32] {
     Keccak256::digest(value).into()
 }
@@ -988,6 +1202,69 @@ fn deposit_leaves(blocks: &[Block]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn withdrawal_leaves(blocks: &[Block]) -> Vec<serde_json::Value> {
+    blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .withdrawals
+                .iter()
+                .enumerate()
+                .map(move |(withdrawal_index, withdrawal)| {
+                    json!({
+                        "block_height": block.height,
+                        "withdrawal_index": withdrawal_index,
+                        "withdrawal_hash": withdrawal_hash(withdrawal),
+                        "withdrawal": withdrawal,
+                    })
+                })
+        })
+        .collect()
+}
+
+fn withdrawal_root_hex(withdrawal_leaves: &[serde_json::Value]) -> String {
+    if withdrawal_leaves.is_empty() {
+        return encode_hex(&Sha256::digest(b"zk-rollup-merkle-empty-v1"));
+    }
+
+    let mut level = withdrawal_leaves
+        .iter()
+        .map(|leaf| {
+            let withdrawal: Withdrawal = serde_json::from_value(leaf["withdrawal"].clone())
+                .expect("withdrawal leaves are built from Withdrawal values");
+            withdrawal_leaf_hash(&withdrawal).expect("valid block withdrawals must hash")
+        })
+        .collect::<Vec<_>>();
+
+    while level.len() > 1 {
+        level = level
+            .chunks(2)
+            .map(|chunk| {
+                let left = chunk[0];
+                let right = *chunk.get(1).unwrap_or(&left);
+                let mut hasher = Sha256::new();
+                hasher.update([0x01]);
+                hasher.update(left);
+                hasher.update(right);
+                hasher.finalize().into()
+            })
+            .collect();
+    }
+
+    encode_hex(&level[0])
+}
+
+fn decode_hex32(value: &str) -> Result<[u8; 32], ()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    let mut result = [0u8; 32];
+    for index in 0..32 {
+        result[index] = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| ())?;
+    }
+    Ok(result)
+}
+
 fn first_deposit_id(deposit_leaves: &[serde_json::Value]) -> Option<u64> {
     deposit_leaves
         .first()
@@ -1005,6 +1282,7 @@ fn block_hash(
     parent_hash: &str,
     deposits: &[L1Deposit],
     transactions: &[Transfer],
+    withdrawals: &[Withdrawal],
     state_root: &str,
 ) -> String {
     let payload = serde_json::to_vec(&BlockCommitment {
@@ -1014,6 +1292,7 @@ fn block_hash(
         parent_hash,
         deposits,
         transactions,
+        withdrawals,
         state_root,
     })
     .expect("serializing a block commitment should not fail");
@@ -1087,6 +1366,44 @@ mod tests {
         assert_eq!(accounts[&alice_address].nonce, 1);
         assert_eq!(accounts[&bob_address].balance, 40);
         assert_eq!(block.state_root, state_root(&accounts));
+    }
+
+    #[test]
+    fn indexed_withdrawals_debit_l2_state_after_transfers() {
+        let alice = create_keypair();
+        let bob = create_keypair();
+        let alice_address = alice.address.clone();
+        let bob_address = bob.address.clone();
+        let mut chain = new_chain(vec![Account {
+            address: alice_address.clone(),
+            balance: 100,
+            nonce: 0,
+        }])
+        .unwrap();
+        let genesis = finalize_genesis(&mut chain).unwrap();
+        let mut accounts = chain.accounts.clone();
+        let transfer = sign_transfer(&alice.secret_key_hex, bob_address.clone(), 40, 0).unwrap();
+        let withdrawal =
+            sign_withdrawal(&alice.secret_key_hex, alice_address.clone(), 25, 1).unwrap();
+
+        let block = produce_block_from_indexed_state_with_operations(
+            &mut accounts,
+            &genesis,
+            Vec::new(),
+            vec![transfer],
+            vec![withdrawal.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(block.withdrawals, vec![withdrawal]);
+        assert_eq!(accounts[&alice_address].balance, 35);
+        assert_eq!(accounts[&alice_address].nonce, 2);
+        assert_eq!(accounts[&bob_address].balance, 40);
+        assert_eq!(block.state_root, state_root(&accounts));
+        let commitment = rollup_batch_commitment_from_blocks(0, &genesis, &[block]).unwrap();
+        assert_eq!(commitment.withdrawal_count, 1);
+        let empty: Vec<serde_json::Value> = Vec::new();
+        assert_ne!(commitment.withdrawal_root, root_hex(&empty));
     }
 
     #[test]

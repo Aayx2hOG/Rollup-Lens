@@ -14,6 +14,7 @@ model Block {
   transactionCount Int                @map("transaction_count")
   rawBlock         Json               @map("raw_block")
   transactions     ChainTransaction[]
+  withdrawals      Withdrawal[]
 
   @@map("blocks")
 }
@@ -59,6 +60,49 @@ model TransactionPoolEntry {
   @@map("transaction_pool")
 }
 
+model WithdrawalPoolEntry {
+  id                       BigInt   @id @default(autoincrement())
+  hash                     String   @unique
+  fromAddress              String   @map("from_address")
+  l1Recipient              String   @map("l1_recipient")
+  amount                   BigInt
+  nonce                    BigInt
+  signature                String
+  status                   String
+  failureReason            String?  @map("failure_reason")
+  includedBlockHeight      BigInt?  @map("included_block_height")
+  includedWithdrawalIndex  Int?     @map("included_withdrawal_index")
+  rawWithdrawal            Json     @map("raw_withdrawal")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @default(now()) @map("updated_at")
+
+  @@index([status, id])
+  @@index([fromAddress, nonce])
+  @@index([createdAt])
+  @@map("withdrawal_pool")
+}
+
+model Withdrawal {
+  hash              String  @id
+  blockHeight       BigInt  @map("block_height")
+  withdrawalIndex   Int     @map("withdrawal_index")
+  fromAddress       String  @map("from_address")
+  l1Recipient       String  @map("l1_recipient")
+  amount            BigInt
+  nonce             BigInt
+  signature         String
+  rawWithdrawal     Json    @map("raw_withdrawal")
+  l1ClaimTxHash     String? @map("l1_claim_tx_hash")
+  claimedAt         DateTime? @map("claimed_at")
+  block             Block   @relation(fields: [blockHeight], references: [height], onDelete: Cascade)
+  rollupBatches     RollupBatchWithdrawal[]
+
+  @@index([blockHeight])
+  @@index([fromAddress])
+  @@index([l1Recipient])
+  @@map("withdrawals")
+}
+
 model Account {
   address String @id
   balance BigInt
@@ -101,6 +145,8 @@ model RollupBatch {
   depositRoot    String                    @default("0000000000000000000000000000000000000000000000000000000000000000") @map("deposit_root")
   firstDepositId BigInt?                   @map("first_deposit_id")
   lastDepositId  BigInt?                   @map("last_deposit_id")
+  withdrawalCount Int                      @default(0) @map("withdrawal_count")
+  withdrawalRoot  String                   @default("0000000000000000000000000000000000000000000000000000000000000000") @map("withdrawal_root")
   status          String
   l1ChainId       BigInt?                   @map("l1_chain_id")
   l1ContractAddress String?                 @map("l1_contract_address")
@@ -125,6 +171,7 @@ model RollupBatch {
   operatorUpdatedAt DateTime                @default(now()) @map("operator_updated_at")
   transactions    RollupBatchTransaction[]
   deposits        RollupBatchDeposit[]
+  withdrawals     RollupBatchWithdrawal[]
 
   @@index([startBlockHeight])
   @@index([endBlockHeight])
@@ -193,4 +240,18 @@ model RollupBatchTransaction {
   @@index([transactionHash])
   @@index([blockHeight])
   @@map("rollup_batch_transactions")
+}
+
+model RollupBatchWithdrawal {
+  batchNumber      BigInt     @map("batch_number")
+  withdrawalHash   String     @map("withdrawal_hash")
+  blockHeight      BigInt     @map("block_height")
+  withdrawalIndex  Int        @map("withdrawal_index")
+  batch            RollupBatch @relation(fields: [batchNumber], references: [batchNumber], onDelete: Cascade)
+  withdrawal       Withdrawal @relation(fields: [withdrawalHash], references: [hash], onDelete: Cascade)
+
+  @@id([batchNumber, withdrawalHash])
+  @@index([withdrawalHash])
+  @@index([blockHeight])
+  @@map("rollup_batch_withdrawals")
 }

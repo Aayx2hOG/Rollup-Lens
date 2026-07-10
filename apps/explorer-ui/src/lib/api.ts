@@ -89,9 +89,11 @@ export type RollupBatchSummary = {
   transaction_root: string;
   block_hash_root: string;
   deposit_root: string;
+  withdrawal_root: string;
   data_hash: string;
   transaction_count: number;
   deposit_count: number;
+  withdrawal_count: number;
   first_deposit_id: number | null;
   last_deposit_id: number | null;
   status: string;

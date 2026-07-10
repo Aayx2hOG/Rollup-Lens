@@ -15,6 +15,9 @@ contract ValidityRollupSettlement {
     error InvalidBatchNumber();
     error InvalidStateTransition();
     error InvalidPublicValues();
+    error InvalidWithdrawalProof();
+    error WithdrawalAlreadyClaimed();
+    error WithdrawalTransferFailed();
 
     event SequencerUpdated(address indexed sequencer);
     event BatchFinalized(
@@ -29,8 +32,17 @@ contract ValidityRollupSettlement {
         uint256 lastDepositId,
         uint256 depositCount,
         uint256 transactionCount,
+        bytes32 withdrawalRoot,
+        uint256 withdrawalCount,
         address l1DepositInbox,
         bytes32 batchCommitment
+    );
+
+    event WithdrawalClaimed(
+        uint256 indexed batchNumber,
+        bytes32 indexed withdrawalId,
+        address indexed l1Recipient,
+        uint256 amount
     );
 
     address public immutable owner;
@@ -42,8 +54,10 @@ contract ValidityRollupSettlement {
     bytes32 public finalizedStateRoot;
     uint256 public nextBatchNumber;
 
-    /// @notice keccak256 of the complete 384-byte SP1 public-values payload.
+    /// @notice keccak256 of the complete 448-byte SP1 public-values payload.
     mapping(uint256 => bytes32) public batchCommitments;
+    mapping(uint256 => bytes32) public withdrawalRoots;
+    mapping(bytes32 => bool) public claimedWithdrawals;
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -92,7 +106,7 @@ contract ValidityRollupSettlement {
         ) {
             revert InvalidRoot();
         }
-        if (publicValues.length != 384) revert InvalidPublicValues();
+        if (publicValues.length != 448) revert InvalidPublicValues();
         if (
             keccak256(publicValues[:192])
                 != keccak256(
@@ -106,7 +120,9 @@ contract ValidityRollupSettlement {
         uint256 lastDepositId = uint256(bytes32(publicValues[256:288]));
         uint256 depositCount = uint256(bytes32(publicValues[288:320]));
         uint256 transactionCount = uint256(bytes32(publicValues[320:352]));
-        address publicInbox = address(uint160(uint256(bytes32(publicValues[352:384]))));
+        bytes32 withdrawalRoot = bytes32(publicValues[352:384]);
+        uint256 withdrawalCount = uint256(bytes32(publicValues[384:416]));
+        address publicInbox = address(uint160(uint256(bytes32(publicValues[416:448]))));
         if (publicInbox != l1DepositInbox) revert InvalidPublicValues();
         if (depositCount == 0) {
             if (firstDepositId != 0 || lastDepositId != 0) revert InvalidPublicValues();
@@ -118,6 +134,7 @@ contract ValidityRollupSettlement {
 
         bytes32 batchCommitment = keccak256(publicValues);
         batchCommitments[batchNumber] = batchCommitment;
+        withdrawalRoots[batchNumber] = withdrawalRoot;
         finalizedStateRoot = newStateRoot;
         nextBatchNumber = batchNumber + 1;
 
@@ -133,8 +150,64 @@ contract ValidityRollupSettlement {
             lastDepositId,
             depositCount,
             transactionCount,
+            withdrawalRoot,
+            withdrawalCount,
             publicInbox,
             batchCommitment
         );
     }
+
+    function claimWithdrawal(
+        uint256 batchNumber,
+        uint256 withdrawalIndex,
+        bytes32 withdrawalHash,
+        address l2Sender,
+        address payable l1Recipient,
+        uint256 amount,
+        uint256 nonce,
+        bytes32[] calldata proof,
+        bool[] calldata siblingIsLeft
+    ) external {
+        bytes32 root = withdrawalRoots[batchNumber];
+        if (root == bytes32(0)) revert InvalidWithdrawalProof();
+        if (proof.length != siblingIsLeft.length) revert InvalidWithdrawalProof();
+        bytes32 leafHash = sha256(
+            abi.encodePacked(
+                "zk-rollup-withdrawal-leaf-v1",
+                withdrawalHash,
+                l2Sender,
+                l1Recipient,
+                amount,
+                nonce
+            )
+        );
+        if (!_verifyWithdrawalProof(root, leafHash, proof, siblingIsLeft)) {
+            revert InvalidWithdrawalProof();
+        }
+
+        bytes32 withdrawalId = keccak256(abi.encode(batchNumber, withdrawalIndex, leafHash));
+        if (claimedWithdrawals[withdrawalId]) revert WithdrawalAlreadyClaimed();
+        claimedWithdrawals[withdrawalId] = true;
+
+        (bool ok,) = l1Recipient.call{value: amount}("");
+        if (!ok) revert WithdrawalTransferFailed();
+        emit WithdrawalClaimed(batchNumber, withdrawalId, l1Recipient, amount);
+    }
+
+    function _verifyWithdrawalProof(
+        bytes32 root,
+        bytes32 leafHash,
+        bytes32[] calldata proof,
+        bool[] calldata siblingIsLeft
+    ) private pure returns (bool) {
+        bytes32 computed = leafHash;
+        for (uint256 i = 0; i < proof.length; i++) {
+            computed = siblingIsLeft[i]
+                ? sha256(abi.encodePacked(bytes1(0x01), proof[i], computed))
+                : sha256(abi.encodePacked(bytes1(0x01), computed, proof[i]));
+        }
+        return computed == root;
+    }
+
+    receive() external payable {}
 }

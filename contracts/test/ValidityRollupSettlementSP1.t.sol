@@ -118,7 +118,7 @@ contract ValidityRollupSettlementSP1Test {
         proof = vm.envOr("SP1_PROOF", bytes(""));
         if (proof.length != 0) {
             require(programVKey != bytes32(0), "missing SP1_PROGRAM_VKEY");
-            require(publicValues.length == 384, "invalid SP1_PUBLIC_VALUES");
+            require(publicValues.length == 448, "invalid SP1_PUBLIC_VALUES");
         }
     }
 
@@ -136,14 +136,26 @@ contract ValidityRollupSettlementSP1Test {
             address l1DepositInbox
         )
     {
+        bytes32 depositRoot;
+        uint256 firstDepositId;
+        uint256 lastDepositId;
+        uint256 depositCount;
+        bytes32 withdrawalRoot;
+        uint256 withdrawalCount;
         (
             batchNumber,
             prevStateRoot,
             newStateRoot,
             transactionRoot,
             blockHashRoot,
-            dataHash,,,,,
+            dataHash,
+            depositRoot,
+            firstDepositId,
+            lastDepositId,
+            depositCount,
             transactionCount,
+            withdrawalRoot,
+            withdrawalCount,
             l1DepositInbox
         ) =
             abi.decode(
@@ -159,6 +171,8 @@ contract ValidityRollupSettlementSP1Test {
                     uint256,
                     uint256,
                     uint256,
+                    uint256,
+                    bytes32,
                     uint256,
                     address
                 )

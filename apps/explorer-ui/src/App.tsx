@@ -2206,6 +2206,7 @@ function RollupView({
               <HashLine label="Transaction root" value={selectedBatch.transaction_root} />
               <HashLine label="Block hash root" value={selectedBatch.block_hash_root} />
               <HashLine label="Deposit root" value={selectedBatch.deposit_root} />
+              <HashLine label="Withdrawal root" value={selectedBatch.withdrawal_root} />
               <HashLine label="Batch data hash" value={selectedBatch.data_hash} />
             </div>
             {selectedBatch.status === "built" ? (
