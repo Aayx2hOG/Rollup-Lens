@@ -1,13 +1,21 @@
-import type { RollupBatchSummary, Transfer } from "./api";
+import type { RollupBatchSummary, Transfer, Withdrawal, WithdrawalClaimProof } from "./api";
 
 const DOMAIN = { name: "ZK Rollup", version: "1" } as const;
 const ROLLUP_ID = "zk-rollup-local-v1";
 const DEPOSIT_SELECTOR = "0xf340fa01";
 const SUBMIT_BATCH_WITH_PROOF_SELECTOR = "0x59cc2189";
+const CLAIM_WITHDRAWAL_SELECTOR = "0x6d7015bb";
 const viteEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
 const TRANSFER_FIELDS = [
   { name: "from", type: "address" },
   { name: "to", type: "address" },
+  { name: "amount", type: "uint256" },
+  { name: "nonce", type: "uint256" },
+  { name: "rollupId", type: "string" },
+] as const;
+const WITHDRAWAL_FIELDS = [
+  { name: "from", type: "address" },
+  { name: "l1Recipient", type: "address" },
   { name: "amount", type: "uint256" },
   { name: "nonce", type: "uint256" },
   { name: "rollupId", type: "string" },
@@ -77,6 +85,42 @@ export async function signTransfer(
     throw new Error("Wallet returned an invalid Ethereum signature");
   }
   return { from: normalizedFrom, to: normalizedTo, amount, nonce, signature };
+}
+
+export async function signWithdrawal(
+  from: string,
+  l1Recipient: string,
+  amount: number,
+  nonce: number,
+): Promise<Withdrawal> {
+  const normalizedFrom = normalizeAddress(from);
+  const normalizedRecipient = normalizeAddress(l1Recipient);
+  if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("Amount must be a positive integer");
+  if (!Number.isSafeInteger(nonce) || nonce < 0) throw new Error("Nonce must be a non-negative integer");
+
+  const typedData = {
+    types: { EIP712Domain: [
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+    ], Withdrawal: WITHDRAWAL_FIELDS },
+    primaryType: "Withdrawal",
+    domain: DOMAIN,
+    message: {
+      from: normalizedFrom,
+      l1Recipient: normalizedRecipient,
+      amount: String(amount),
+      nonce: String(nonce),
+      rollupId: ROLLUP_ID,
+    },
+  };
+  const signature = await provider().request({
+    method: "eth_signTypedData_v4",
+    params: [normalizedFrom, JSON.stringify(typedData)],
+  });
+  if (typeof signature !== "string" || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+    throw new Error("Wallet returned an invalid Ethereum signature");
+  }
+  return { from: normalizedFrom, l1_recipient: normalizedRecipient, amount, nonce, signature };
 }
 
 export const l1DepositInboxAddress = normalizeOptionalAddress(
@@ -151,6 +195,36 @@ export async function submitBatchWithProof(
   return txHash.toLowerCase();
 }
 
+export async function claimWithdrawalOnL1(
+  from: string,
+  withdrawal: Withdrawal,
+  claimProof: WithdrawalClaimProof,
+  contractAddress = settlementContractAddress,
+) {
+  const contract = normalizeOptionalAddress(contractAddress);
+  if (!contract) throw new Error("Settlement contract is not configured");
+  const normalizedFrom = normalizeAddress(from);
+  const l2Sender = normalizeAddress(withdrawal.from);
+  const l1Recipient = normalizeAddress(withdrawal.l1_recipient);
+  const withdrawalHash = abiBytes32(claimProof.withdrawal_hash, "withdrawal hash");
+  if (claimProof.proof.length !== claimProof.sibling_is_left.length) {
+    throw new Error("Withdrawal proof and side flags must have the same length");
+  }
+
+  const txHash = await provider().request({
+    method: "eth_sendTransaction",
+    params: [{
+      from: normalizedFrom,
+      to: contract,
+      data: encodeClaimWithdrawal(withdrawal, claimProof, withdrawalHash, l2Sender, l1Recipient),
+    }],
+  });
+  if (typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+    throw new Error("Wallet returned an invalid transaction hash");
+  }
+  return txHash.toLowerCase();
+}
+
 export function parseProofArtifact(input: string): ValidityProofArtifact {
   let parsed: unknown;
   try {
@@ -204,6 +278,33 @@ function encodeSubmitBatchWithProof(batch: RollupBatchSummary, publicValues: str
   ].join("");
 }
 
+function encodeClaimWithdrawal(
+  withdrawal: Withdrawal,
+  claimProof: WithdrawalClaimProof,
+  withdrawalHash: string,
+  l2Sender: string,
+  l1Recipient: string,
+) {
+  const staticWordCount = 9;
+  const proofPayload = encodeBytes32Array(claimProof.proof);
+  const siblingPayload = encodeBoolArray(claimProof.sibling_is_left);
+  const siblingOffset = staticWordCount * 32 + byteLength(proofPayload);
+  return [
+    CLAIM_WITHDRAWAL_SELECTOR,
+    abiUint(claimProof.batch_number),
+    abiUint(claimProof.withdrawal_index),
+    withdrawalHash,
+    abiAddress(l2Sender),
+    abiAddress(l1Recipient),
+    abiUint(withdrawal.amount),
+    abiUint(withdrawal.nonce),
+    abiUint(staticWordCount * 32),
+    abiUint(siblingOffset),
+    stripHex(proofPayload),
+    stripHex(siblingPayload),
+  ].join("");
+}
+
 function assertPublicValuesMatchBatch(publicValues: string, batch: RollupBatchSummary) {
   const expected = [
     abiUint(batch.batch_number),
@@ -225,6 +326,14 @@ function encodeBytes(value: string) {
   return `0x${abiUint(byteLength(normalized))}${hex}${"0".repeat(paddingLength)}`;
 }
 
+function encodeBytes32Array(values: string[]) {
+  return `0x${abiUint(values.length)}${values.map((value) => abiBytes32(value, "withdrawal proof node")).join("")}`;
+}
+
+function encodeBoolArray(values: boolean[]) {
+  return `0x${abiUint(values.length)}${values.map((value) => abiUint(value ? 1 : 0)).join("")}`;
+}
+
 function abiUint(value: number) {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error("ABI integer must be a non-negative safe integer");
   return value.toString(16).padStart(64, "0");
@@ -234,6 +343,11 @@ function abiBytes32(value: string, label: string) {
   const normalized = normalizeHexBytes(value, label);
   if (byteLength(normalized) !== 32) throw new Error(`${label} must be exactly 32 bytes`);
   return stripHex(normalized);
+}
+
+function abiAddress(value: string) {
+  const normalized = normalizeAddress(value);
+  return `${"0".repeat(24)}${normalized.slice(2)}`;
 }
 
 function normalizeHexBytes(value: string, label: string) {

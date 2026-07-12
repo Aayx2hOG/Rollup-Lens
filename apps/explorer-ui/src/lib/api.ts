@@ -47,14 +47,24 @@ export type Transfer = {
   signature: string;
 };
 
+export type Withdrawal = {
+  from: string;
+  l1_recipient: string;
+  amount: number;
+  nonce: number;
+  signature: string;
+};
+
 export type Block = {
   height: number;
   parent_hash: string;
   transactions: Transfer[];
+  withdrawals: Withdrawal[];
   deposits: L1Deposit[];
   state_root: string;
   block_hash: string;
   transaction_views: TransactionView[];
+  withdrawal_views: WithdrawalView[];
 };
 
 export type Account = {
@@ -68,6 +78,15 @@ export type TransactionView = {
   block_height: number | null;
   transaction_index: number;
   transfer: Transfer;
+};
+
+export type WithdrawalView = {
+  hash: string;
+  block_height: number | null;
+  withdrawal_index: number | null;
+  withdrawal: Withdrawal;
+  l1_claim_tx_hash: string | null;
+  claimed_at: string | null;
 };
 
 export type ErrorEvent = {
@@ -116,6 +135,7 @@ export type RollupBatchSummary = {
 
 export type RollupBatch = RollupBatchSummary & {
   transactions: TransactionView[];
+  withdrawals: WithdrawalView[];
   deposits?: L1Deposit[];
 };
 
@@ -150,18 +170,48 @@ export type TransactionPoolEntry = {
   transfer: Transfer;
 };
 
+export type WithdrawalPoolEntry = {
+  id: number;
+  hash: string;
+  status: "pending" | "included" | "failed" | "expired" | string;
+  failure_reason: string | null;
+  included_block_height: number | null;
+  included_withdrawal_index: number | null;
+  created_at: string;
+  updated_at: string;
+  withdrawal: Withdrawal;
+};
+
 export type SubmittedTransaction = {
   hash: string;
   status: string;
   transfer: Transfer;
 };
 
+export type SubmittedWithdrawal = {
+  hash: string;
+  status: string;
+  withdrawal: Withdrawal;
+};
+
+export type WithdrawalClaimProof = {
+  batch_number: number;
+  withdrawal_hash: string;
+  withdrawal_index: number;
+  withdrawal_root: string;
+  leaf_hash: string;
+  proof: string[];
+  sibling_is_left: boolean[];
+};
+
 export type SequencedBatch = {
   block: Block;
   rollup_batch: RollupBatchSummary | null;
   included_transactions: TransactionPoolEntry[];
+  included_withdrawals: WithdrawalPoolEntry[];
   included_deposits: L1Deposit[];
   failed_transactions: TransactionPoolEntry[];
+  failed_withdrawals: WithdrawalPoolEntry[];
 };
 
 export type SettlementStatusUpdate = {
@@ -222,10 +272,16 @@ export const api = {
   account: (address: string) => request<Account>(`/accounts/${encodeURIComponent(address)}`),
   transaction: (hash: string) => request<TransactionView>(`/transactions/${encodeURIComponent(hash)}`),
   transactionPool: (limit = 50, offset = 0) => request<Page<TransactionPoolEntry>>(`/rollup/transactions?limit=${limit}&offset=${offset}`),
+  withdrawalPool: (limit = 50, offset = 0) => request<Page<WithdrawalPoolEntry>>(`/rollup/withdrawals?limit=${limit}&offset=${offset}`),
   submitTransaction: (transfer: Transfer) => request<SubmittedTransaction>("/rollup/transactions", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(transfer),
+  }),
+  submitWithdrawal: (withdrawal: Withdrawal) => request<SubmittedWithdrawal>("/rollup/withdrawals", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(withdrawal),
   }),
   sequenceBatch: (limit = 100) => request<SequencedBatch>("/rollup/batches", {
     method: "POST",
@@ -235,6 +291,8 @@ export const api = {
   errors: () => request<ErrorEvent[]>("/errors"),
   rollupBatches: (limit = 50, offset = 0) => request<Page<RollupBatchSummary>>(`/rollup/batches?limit=${limit}&offset=${offset}`),
   rollupBatch: (batchNumber: number) => request<RollupBatch>(`/rollup/batches/${batchNumber}`),
+  withdrawalClaimProof: (batchNumber: number, withdrawalHash: string) =>
+    request<WithdrawalClaimProof>(`/rollup/batches/${batchNumber}/withdrawals/${encodeURIComponent(withdrawalHash)}/proof`),
   l1Deposits: (limit = 50, offset = 0) => request<Page<L1Deposit>>(`/l1/deposits?limit=${limit}&offset=${offset}`),
   l1DepositsByRecipient: (address: string, limit = 50, offset = 0) =>
     request<Page<L1Deposit>>(`/l1/deposits/recipient/${encodeURIComponent(address)}?limit=${limit}&offset=${offset}`),

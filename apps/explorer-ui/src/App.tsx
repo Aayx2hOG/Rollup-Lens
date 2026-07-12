@@ -37,6 +37,8 @@ import {
   type Transfer,
   type TransactionView,
   type TransactionPoolEntry,
+  type WithdrawalPoolEntry,
+  type WithdrawalView,
 } from "./lib/api";
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
 import {
@@ -45,7 +47,9 @@ import {
   hasWalletProvider,
   l1DepositInboxAddress,
   parseProofArtifact,
+  claimWithdrawalOnL1,
   settlementContractAddress,
+  signWithdrawal,
   signTransfer,
   submitBatchWithProof,
 } from "./lib/wallet";
@@ -120,6 +124,7 @@ export function App() {
   const rollupBatches = useQuery({ queryKey: ["rollup-batches"], queryFn: () => api.rollupBatches() });
   const l1Deposits = useQuery({ queryKey: ["l1-deposits"], queryFn: () => api.l1Deposits() });
   const transactionPool = useQuery({ queryKey: ["transaction-pool"], queryFn: () => api.transactionPool() });
+  const withdrawalPool = useQuery({ queryKey: ["withdrawal-pool"], queryFn: () => api.withdrawalPool() });
   const block = useQuery({
     queryKey: ["block", selectedHeight],
     queryFn: () => api.block(selectedHeight!),
@@ -468,19 +473,26 @@ export function App() {
         <div className="grid gap-5">
           <PageIntro
             icon={<Send className="h-5 w-5" />}
-            title="Send funds"
-            description="Connect an Ethereum wallet, choose a recipient, and sign an EIP-712 L2 transfer."
+            title="Move funds"
+            description="Connect an Ethereum wallet to sign L2 transfers, request exits, and claim finalized withdrawals on L1."
           />
           <SendTransferView
             wallet={walletAddress}
             recipient={sendRecipient}
             pool={transactionPool.data?.items ?? []}
+            withdrawalPool={withdrawalPool.data?.items ?? []}
+            batches={batchItems}
+            selectedBatchNumber={selectedBatch}
+            selectedBatch={rollupBatch.data}
             onWalletChange={setWalletAddress}
             onRecipientChange={setSendRecipient}
+            onSelectBatch={setSelectedBatch}
             onSubmitted={async (hash) => {
               setSelectedTx(hash);
               await refreshAll();
             }}
+            onWithdrawalSubmitted={refreshAll}
+            onClaimed={refreshAll}
           />
         </div>
       )}
@@ -495,6 +507,7 @@ export function App() {
           />
           <SequencerView
             pool={transactionPool.data?.items ?? []}
+            withdrawals={withdrawalPool.data?.items ?? []}
             deposits={l1Deposits.data?.items ?? []}
             errors={errors.data ?? []}
             onRefresh={refreshAll}
@@ -1660,18 +1673,35 @@ function SendTransferView({
   wallet,
   recipient,
   pool,
+  withdrawalPool,
+  batches,
+  selectedBatchNumber,
+  selectedBatch,
   onWalletChange,
   onRecipientChange,
+  onSelectBatch,
   onSubmitted,
+  onWithdrawalSubmitted,
+  onClaimed,
 }: {
   wallet: string | null;
   recipient: string;
   pool: TransactionPoolEntry[];
+  withdrawalPool: WithdrawalPoolEntry[];
+  batches: RollupBatchSummary[];
+  selectedBatchNumber: number | null;
+  selectedBatch?: RollupBatch;
   onWalletChange: (wallet: string | null) => void;
   onRecipientChange: (recipient: string) => void;
+  onSelectBatch: (batchNumber: number) => void;
   onSubmitted: (hash: string) => Promise<void>;
+  onWithdrawalSubmitted: () => Promise<void>;
+  onClaimed: () => Promise<void>;
 }) {
+  const [mode, setMode] = useState<"transfer" | "withdraw">("transfer");
   const [amount, setAmount] = useState(1);
+  const [withdrawAmount, setWithdrawAmount] = useState(1);
+  const [l1Recipient, setL1Recipient] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
   const walletAddress = wallet;
@@ -1684,7 +1714,28 @@ function SendTransferView({
   const pendingFromWallet = walletAddress
     ? pool.filter((entry) => entry.status === "pending" && entry.transfer.from === walletAddress).length
     : 0;
-  const nextNonce = (walletAccount.data?.nonce ?? 0) + pendingFromWallet;
+  const pendingWithdrawalsFromWallet = walletAddress
+    ? withdrawalPool.filter((entry) => entry.status === "pending" && entry.withdrawal.from === walletAddress).length
+    : 0;
+  const nextNonce = (walletAccount.data?.nonce ?? 0) + pendingFromWallet + pendingWithdrawalsFromWallet;
+  const pendingWithdrawals = walletAddress
+    ? withdrawalPool.filter((entry) => entry.withdrawal.from === walletAddress).slice(0, 6)
+    : withdrawalPool.slice(0, 6);
+  const finalizedWithdrawalBatches = batches.filter((batch) => batch.status === "finalized" && batch.withdrawal_count > 0);
+  const firstFinalizedWithdrawalBatch = finalizedWithdrawalBatches[0]?.batch_number;
+  const claimBatch = selectedBatch?.status === "finalized" && selectedBatch.withdrawal_count > 0
+    ? selectedBatch
+    : undefined;
+
+  useEffect(() => {
+    if (wallet && !l1Recipient.trim()) setL1Recipient(wallet);
+  }, [wallet, l1Recipient]);
+
+  useEffect(() => {
+    if (!claimBatch && firstFinalizedWithdrawalBatch !== undefined) {
+      onSelectBatch(firstFinalizedWithdrawalBatch);
+    }
+  }, [claimBatch, firstFinalizedWithdrawalBatch, onSelectBatch]);
 
   async function sendTransfer() {
     if (!wallet || !walletAccount.data) return;
@@ -1706,14 +1757,33 @@ function SendTransferView({
     }
   }
 
+  async function requestWithdrawal() {
+    if (!wallet || !walletAccount.data) return;
+    setSubmitting(true);
+    setNotice(null);
+    try {
+      const withdrawal = await signWithdrawal(wallet, l1Recipient.trim(), withdrawAmount, nextNonce);
+      const submitted = await api.submitWithdrawal(withdrawal);
+      setNotice({
+        tone: "good",
+        message: `Withdrawal ${shortHash(submitted.hash, 10, 8)} submitted. It becomes claimable after its batch finalizes on L1.`,
+      });
+      await onWithdrawalSubmitted();
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Withdrawal failed" });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
       <Panel className="overflow-hidden">
         <div className="pb-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="font-heading text-lg font-semibold text-white">Send L2 funds</div>
-              <div className="mt-1 text-sm text-white/48">Your private key stays inside your wallet.</div>
+              <div className="font-heading text-lg font-semibold text-white">Transfer or exit</div>
+              <div className="mt-1 text-sm text-white/48">Sign L2 messages locally, then claim finalized exits on L1.</div>
             </div>
             {wallet && <Badge tone="good">Ethereum wallet connected</Badge>}
           </div>
@@ -1724,10 +1794,10 @@ function SendTransferView({
             <div className="grid gap-3 rounded-xl bg-white/[0.03] p-4">
               <div className="flex items-center gap-3">
                 <Wallet className="h-4 w-4 text-mint/70" />
-                <div className="text-sm text-white/52">Connect wallet in the header to send L2 funds.</div>
+                <div className="text-sm text-white/52">Connect wallet in the header to move L2 funds.</div>
               </div>
               <div className="text-xs text-white/36">
-                Once connected, this page will show your balance, recipient, amount, and nonce in one place.
+                Once connected, this page will show your balance, nonce, transfer form, and exit form in one place.
               </div>
             </div>
           ) : (
@@ -1758,38 +1828,96 @@ function SendTransferView({
                 </div>
               ) : (
                 <div className="grid gap-4">
-                  <label className="grid gap-2 text-sm font-medium text-white/70">
-                    Recipient
-                    <input
-                      value={recipient}
-                      onChange={(event) => onRecipientChange(event.target.value)}
-                      placeholder="Paste recipient wallet address"
-                      className="h-12 rounded-lg bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:ring-2 focus:ring-mint/10"
-                    />
-                  </label>
-                  <label className="grid gap-2 text-sm font-medium text-white/70">
-                    Amount
-                    <input
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={amount}
-                      onChange={(event) => setAmount(Number(event.target.value))}
-                      className="h-12 rounded-lg bg-white/[0.06] px-3 text-lg text-white outline-none focus:ring-2 focus:ring-mint/10"
-                    />
-                  </label>
-                  <Button
-                    onClick={sendTransfer}
-                    disabled={submitting || recipient.trim().length === 0 || amount < 1}
-                    variant="primary"
-                    size="lg"
-                    className="h-12 text-base"
-                  >
-                    <Send className="h-5 w-5" />
-                    {submitting ? "Sending…" : "Send transfer"}
-                  </Button>
+                  <div className="grid grid-cols-2 gap-2 rounded-xl bg-white/[0.035] p-1">
+                    <button
+                      onClick={() => setMode("transfer")}
+                      className={cn(
+                        "h-10 rounded-lg text-sm font-medium transition",
+                        mode === "transfer" ? "bg-mint/14 text-mint" : "text-white/48 hover:bg-white/[0.04] hover:text-white",
+                      )}
+                    >
+                      Transfer
+                    </button>
+                    <button
+                      onClick={() => setMode("withdraw")}
+                      className={cn(
+                        "h-10 rounded-lg text-sm font-medium transition",
+                        mode === "withdraw" ? "bg-amber/14 text-amber" : "text-white/48 hover:bg-white/[0.04] hover:text-white",
+                      )}
+                    >
+                      Withdraw
+                    </button>
+                  </div>
+
+                  {mode === "transfer" ? (
+                    <>
+                      <label className="grid gap-2 text-sm font-medium text-white/70">
+                        L2 recipient
+                        <input
+                          value={recipient}
+                          onChange={(event) => onRecipientChange(event.target.value)}
+                          placeholder="Paste recipient wallet address"
+                          className="h-12 rounded-lg bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:ring-2 focus:ring-mint/10"
+                        />
+                      </label>
+                      <label className="grid gap-2 text-sm font-medium text-white/70">
+                        Amount
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={amount}
+                          onChange={(event) => setAmount(Number(event.target.value))}
+                          className="h-12 rounded-lg bg-white/[0.06] px-3 text-lg text-white outline-none focus:ring-2 focus:ring-mint/10"
+                        />
+                      </label>
+                      <Button
+                        onClick={sendTransfer}
+                        disabled={submitting || recipient.trim().length === 0 || amount < 1}
+                        variant="primary"
+                        size="lg"
+                        className="h-12 text-base"
+                      >
+                        <Send className="h-5 w-5" />
+                        {submitting ? "Sending..." : "Send transfer"}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <label className="grid gap-2 text-sm font-medium text-white/70">
+                        L1 recipient
+                        <input
+                          value={l1Recipient}
+                          onChange={(event) => setL1Recipient(event.target.value)}
+                          placeholder="0x..."
+                          className="h-12 rounded-lg bg-white/[0.06] px-3 font-mono text-sm text-white outline-none placeholder:text-white/30 focus:ring-2 focus:ring-amber/10"
+                        />
+                      </label>
+                      <label className="grid gap-2 text-sm font-medium text-white/70">
+                        Amount
+                        <input
+                          type="number"
+                          min={1}
+                          step={1}
+                          value={withdrawAmount}
+                          onChange={(event) => setWithdrawAmount(Number(event.target.value))}
+                          className="h-12 rounded-lg bg-white/[0.06] px-3 text-lg text-white outline-none focus:ring-2 focus:ring-amber/10"
+                        />
+                      </label>
+                      <Button
+                        onClick={requestWithdrawal}
+                        disabled={submitting || l1Recipient.trim().length === 0 || withdrawAmount < 1}
+                        variant="warning"
+                        size="lg"
+                        className="h-12 text-base"
+                      >
+                        <Download className="h-5 w-5" />
+                        {submitting ? "Requesting..." : "Request withdrawal"}
+                      </Button>
+                    </>
+                  )}
                   <div className="text-center text-xs text-white/38">
-                    The next nonce ({nextNonce}) is selected automatically.
+                    The next nonce ({nextNonce}) includes pending transfers and withdrawals.
                   </div>
                 </div>
               )}
@@ -1811,23 +1939,161 @@ function SendTransferView({
         </div>
       </Panel>
 
-      <Panel className="overflow-hidden">
-        <div className="pb-4">
-          <div className="font-heading text-lg font-semibold text-white">Before you send</div>
-          <div className="mt-1 text-sm text-white/48">Minimal checklist for a transfer.</div>
+      <div className="grid content-start gap-4">
+        <Panel className="overflow-hidden">
+          <div className="pb-4">
+            <div className="font-heading text-lg font-semibold text-white">Exit status</div>
+            <div className="mt-1 text-sm text-white/48">Pending and finalized withdrawals for this wallet.</div>
+          </div>
+          <div className="grid gap-2">
+            {pendingWithdrawals.length === 0 ? (
+              <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/48">No withdrawal requests yet.</div>
+            ) : (
+              pendingWithdrawals.map((entry) => (
+                <WithdrawalQueueRow key={entry.id} entry={entry} />
+              ))
+            )}
+          </div>
+        </Panel>
+
+        <Panel className="overflow-hidden">
+          <div className="pb-4">
+            <div className="font-heading text-lg font-semibold text-white">Claim finalized exits</div>
+            <div className="mt-1 text-sm text-white/48">Use the batch proof endpoint to claim ETH from the settlement contract.</div>
+          </div>
+          <div className="grid gap-3">
+            {finalizedWithdrawalBatches.length > 0 ? (
+              <label className="grid gap-1.5 text-xs text-white/46">
+                Finalized batch
+                <select
+                  value={claimBatch?.batch_number ?? selectedBatchNumber ?? finalizedWithdrawalBatches[0].batch_number}
+                  onChange={(event) => onSelectBatch(Number(event.target.value))}
+                  className="h-10 min-w-0 rounded-md bg-ink px-3 text-sm text-white outline-none focus:ring-2 focus:ring-mint/10"
+                >
+                  {finalizedWithdrawalBatches.map((batch) => (
+                    <option key={batch.batch_number} value={batch.batch_number}>
+                      Batch {batch.batch_number} / {batch.withdrawal_count} exits
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/48">No finalized withdrawal batches yet.</div>
+            )}
+
+            {claimBatch?.withdrawals.length ? (
+              <div className="grid gap-2">
+                {claimBatch.withdrawals.map((withdrawal) => (
+                  <WithdrawalClaimRow
+                    key={withdrawal.hash}
+                    wallet={wallet}
+                    batchNumber={claimBatch.batch_number}
+                    withdrawal={withdrawal}
+                    onClaimed={onClaimed}
+                    onNotice={setNotice}
+                  />
+                ))}
+              </div>
+            ) : finalizedWithdrawalBatches.length > 0 ? (
+              <div className="rounded-xl bg-amber/10 px-3 py-3 text-sm text-amber">
+                Select a finalized withdrawal batch to load its claim data.
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function WithdrawalQueueRow({ entry }: { entry: WithdrawalPoolEntry }) {
+  return (
+    <div className="grid gap-2 rounded-xl bg-white/[0.03] px-3 py-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="hash min-w-0 text-white/78">{shortHash(entry.hash, 10, 8)}</span>
+        <Badge tone={entry.status === "failed" ? "bad" : entry.status === "included" ? "good" : "warn"}>
+          {entry.status}
+        </Badge>
+      </div>
+      <div className="grid gap-1 text-xs text-white/44">
+        <span>amount {entry.withdrawal.amount} / nonce {entry.withdrawal.nonce}</span>
+        <span className="hash">recipient {shortHash(entry.withdrawal.l1_recipient, 8, 6)}</span>
+        {entry.included_block_height !== null && <span>included in block {entry.included_block_height}</span>}
+      </div>
+    </div>
+  );
+}
+
+function WithdrawalClaimRow({
+  wallet,
+  batchNumber,
+  withdrawal,
+  onClaimed,
+  onNotice,
+}: {
+  wallet: string | null;
+  batchNumber: number;
+  withdrawal: WithdrawalView;
+  onClaimed: () => Promise<void>;
+  onNotice: (notice: { tone: "good" | "bad" | "neutral"; message: string } | null) => void;
+}) {
+  const [claiming, setClaiming] = useState(false);
+  const [localClaimTxHash, setLocalClaimTxHash] = useState<string | null>(null);
+  const claimableByWallet = !wallet || withdrawal.withdrawal.l1_recipient === wallet || withdrawal.withdrawal.from === wallet;
+  const claimTxHash = withdrawal.l1_claim_tx_hash ?? localClaimTxHash;
+  const claimed = Boolean(claimTxHash || withdrawal.claimed_at);
+
+  async function claim() {
+    if (!wallet) return;
+    setClaiming(true);
+    onNotice(null);
+    try {
+      const proof = await api.withdrawalClaimProof(batchNumber, withdrawal.hash);
+      const txHash = await claimWithdrawalOnL1(wallet, withdrawal.withdrawal, proof);
+      setLocalClaimTxHash(txHash);
+      onNotice({ tone: "good", message: `Withdrawal claim sent: ${shortHash(txHash, 10, 8)}.` });
+      await onClaimed();
+    } catch (error) {
+      onNotice({ tone: "bad", message: error instanceof Error ? error.message : "Withdrawal claim failed" });
+    } finally {
+      setClaiming(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-3 rounded-xl bg-white/[0.03] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="hash text-sm text-white/78">{shortHash(withdrawal.hash, 10, 8)}</div>
+          <div className="mt-1 text-xs text-white/44">
+            amount {withdrawal.withdrawal.amount} / index {withdrawal.withdrawal_index ?? "pending"}
+          </div>
         </div>
-        <div className="space-y-2">
-          <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/76">Connect a wallet from the header.</div>
-          <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/76">Enter a recipient and amount.</div>
-          <div className="rounded-xl bg-white/[0.03] px-3 py-3 text-sm text-white/76">The nonce is filled automatically from your account state.</div>
-        </div>
-      </Panel>
+        <Button
+          onClick={claim}
+          disabled={claimed || !wallet || claiming || !settlementContractAddress || !claimableByWallet}
+          variant="warning"
+          size="sm"
+        >
+          <ReceiptText className="h-3.5 w-3.5" />
+          {claimed ? "Claimed" : claiming ? "Claiming" : "Claim"}
+        </Button>
+      </div>
+      <div className="grid gap-1 text-xs text-white/40">
+        <span className="hash">L2 {shortHash(withdrawal.withdrawal.from, 8, 6)}</span>
+        <span className="hash">L1 {shortHash(withdrawal.withdrawal.l1_recipient, 8, 6)}</span>
+        {claimTxHash && <span className="hash text-mint">claim tx {shortHash(claimTxHash, 10, 8)}</span>}
+        {withdrawal.claimed_at && <span className="text-mint">claimed {withdrawal.claimed_at}</span>}
+        {!settlementContractAddress && <span className="text-amber">Settlement contract is not configured.</span>}
+        {wallet && !claimableByWallet && <span className="text-amber">Connected wallet is not the sender or L1 recipient.</span>}
+      </div>
     </div>
   );
 }
 
 function SequencerView({
   pool,
+  withdrawals,
   deposits,
   errors,
   onRefresh,
@@ -1836,6 +2102,7 @@ function SequencerView({
   onSequenced,
 }: {
   pool: TransactionPoolEntry[];
+  withdrawals: WithdrawalPoolEntry[];
   deposits: L1Deposit[];
   errors: Array<{ id: number; severity: string; message: string; service: string; created_at: string; resolved_at: string | null }>;
   onRefresh: () => Promise<void>;
@@ -1850,8 +2117,9 @@ function SequencerView({
   const [sequencing, setSequencing] = useState(false);
   const [notice, setNotice] = useState<{ tone: "good" | "bad" | "neutral"; message: string } | null>(null);
   const pendingTotal = pool.filter((entry) => entry.status === "pending").length;
+  const pendingWithdrawalTotal = withdrawals.filter((entry) => entry.status === "pending").length;
   const confirmedDeposits = deposits.filter((deposit) => deposit.status === "confirmed").length;
-  const sequenceableTotal = pendingTotal + confirmedDeposits;
+  const sequenceableTotal = pendingTotal + pendingWithdrawalTotal + confirmedDeposits;
   const pendingEntries = pool.filter((entry) => entry.status === "pending");
   const recentIncluded = pool.filter((entry) => entry.status === "included").slice(0, 5);
   async function submitTransfer() {
@@ -1877,7 +2145,7 @@ function SequencerView({
       const result = await api.sequenceBatch(limit);
       setNotice({
         tone: "good",
-        message: `Built activity group ${result.block.height} with ${pluralize(result.included_transactions.length, "transfer")} and ${pluralize(result.included_deposits.length, "deposit")}.`,
+        message: `Built activity group ${result.block.height} with ${pluralize(result.included_transactions.length, "transfer")}, ${pluralize(result.included_withdrawals.length, "withdrawal")}, and ${pluralize(result.included_deposits.length, "deposit")}.`,
       });
       await onSequenced(result.block.height);
     } catch (error) {
@@ -1926,11 +2194,11 @@ function SequencerView({
           <SectionTitle
             icon={<Play className="h-4 w-4" />}
             title="Build the next L2 block"
-            action={`${pluralize(pendingTotal, "pending transfer")} / ${pluralize(confirmedDeposits, "confirmed deposit")}`}
+            action={`${pluralize(pendingTotal, "pending transfer")} / ${pluralize(pendingWithdrawalTotal, "pending withdrawal")} / ${pluralize(confirmedDeposits, "confirmed deposit")}`}
             flush
           />
           <p className="mt-2 text-sm leading-6 text-white/48">
-            Sequence pending transfers and confirmed L1 deposits into the next block.
+            Sequence pending transfers, withdrawal requests, and confirmed L1 deposits into the next block.
           </p>
           <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
             <label className="grid gap-2 text-sm text-white/62">
@@ -1956,7 +2224,7 @@ function SequencerView({
           </div>
           {pendingTotal === 0 && (
             <div className="mt-3 text-xs text-white/40">
-              {confirmedDeposits > 0 ? "Confirmed deposits are ready to sequence." : "Waiting for a submitted transfer or confirmed deposit."}
+              {confirmedDeposits + pendingWithdrawalTotal > 0 ? "Confirmed deposits or withdrawals are ready to sequence." : "Waiting for a submitted transfer, withdrawal, or confirmed deposit."}
             </div>
           )}
         </Panel>
@@ -2403,7 +2671,7 @@ function RollupView({
                   <Badge tone={settlementStatusTone(batch.status)}>{settlementStatusLabel(batch.status)}</Badge>
                 </div>
                 <div className="mt-2 text-xs text-white/46">
-                  groups {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "transfer")} / {pluralize(batch.deposit_count, "deposit")}
+                  groups {batch.start_block_height}-{batch.end_block_height} / {pluralize(batch.transaction_count, "transfer")} / {pluralize(batch.withdrawal_count, "withdrawal")} / {pluralize(batch.deposit_count, "deposit")}
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-white/48">
                   <span>{batch.l1_chain_id ? `chain ${batch.l1_chain_id}` : "L1 not selected"}</span>
@@ -2435,10 +2703,11 @@ function RollupView({
           <Skeleton className="mt-4 h-80" />
         ) : selectedBatch ? (
           <div className="mt-4 grid gap-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
               <MetricLine label="First group" value={selectedBatch.start_block_height} />
               <MetricLine label="Last group" value={selectedBatch.end_block_height} />
               <MetricLine label="Transfers" value={selectedBatch.transaction_count} />
+              <MetricLine label="Withdrawals" value={selectedBatch.withdrawal_count} />
             </div>
             <SettlementProgress batch={selectedBatch} />
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -2536,6 +2805,33 @@ function RollupView({
                         <ExternalLink className="h-3 w-3" />
                         View
                       </Button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            <div className="overflow-hidden rounded-2xl bg-white/[0.025] p-2">
+              <div className="grid grid-cols-[auto_1fr_auto] gap-3 rounded-xl bg-white/[0.05] px-3 py-2 text-xs uppercase tracking-[0.14em] text-white/38 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+                <span>Index</span>
+                <span>Withdrawal</span>
+                <span>Status</span>
+              </div>
+              <div className="space-y-2 pt-2">
+                {selectedBatch.withdrawals.length === 0 ? (
+                  <div className="px-3 py-5 text-sm text-white/48">This package has no withdrawals.</div>
+                ) : (
+                  selectedBatch.withdrawals.map((withdrawal) => (
+                    <div
+                      key={withdrawal.hash}
+                      className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl bg-white/[0.03] px-3 py-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                    >
+                      <span className="rounded-md bg-white/[0.06] px-2 py-1 text-xs font-semibold text-white/72">
+                        {withdrawal.withdrawal_index ?? "pending"}
+                      </span>
+                      <span className="hash min-w-0 text-white/72">{withdrawal.hash}</span>
+                      <Badge tone={withdrawal.l1_claim_tx_hash ? "neutral" : selectedBatch.status === "finalized" ? "good" : "warn"}>
+                        {withdrawal.l1_claim_tx_hash ? "claimed" : selectedBatch.status === "finalized" ? "claimable" : "waiting"}
+                      </Badge>
                     </div>
                   ))
                 )}

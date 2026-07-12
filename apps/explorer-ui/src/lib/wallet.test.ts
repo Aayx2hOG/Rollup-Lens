@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { RollupBatchSummary } from "./api";
 import {
   connectWallet,
+  claimWithdrawalOnL1,
   depositToL2,
   parseProofArtifact,
+  signWithdrawal,
   signTransfer,
   submitBatchWithProof,
 } from "./wallet";
@@ -49,6 +51,31 @@ describe("Ethereum rollup wallet", () => {
       rollupId: "zk-rollup-local-v1",
     });
     expect(transfer.signature).toHaveLength(132);
+  });
+
+  test("requests the canonical EIP-712 withdrawal", async () => {
+    let params: unknown[] | undefined;
+    window.ethereum = {
+      request: async (request) => {
+        params = request.params;
+        return `0x${"12".repeat(65)}`;
+      },
+    };
+    const withdrawal = await signWithdrawal(
+      "0x1111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222",
+      12,
+      3,
+    );
+    const typedData = JSON.parse(String(params?.[1]));
+    expect(typedData.primaryType).toBe("Withdrawal");
+    expect(typedData.message).toMatchObject({
+      l1Recipient: "0x2222222222222222222222222222222222222222",
+      amount: "12",
+      nonce: "3",
+      rollupId: "zk-rollup-local-v1",
+    });
+    expect(withdrawal.signature).toHaveLength(132);
   });
 
   test("rejects malformed recipient addresses before signing", async () => {
@@ -109,6 +136,45 @@ describe("Ethereum rollup wallet", () => {
       from: "0x1111111111111111111111111111111111111111",
       to: "0x3333333333333333333333333333333333333333",
       data: expect.stringMatching(/^0x59cc2189/),
+    }]);
+  });
+
+  test("claims a finalized withdrawal on the settlement contract", async () => {
+    let params: unknown[] | undefined;
+    window.ethereum = {
+      request: async (request) => {
+        expect(request.method).toBe("eth_sendTransaction");
+        params = request.params;
+        return `0x${"55".repeat(32)}`;
+      },
+    };
+
+    const txHash = await claimWithdrawalOnL1(
+      "0x1111111111111111111111111111111111111111",
+      {
+        from: "0x1111111111111111111111111111111111111111",
+        l1_recipient: "0x2222222222222222222222222222222222222222",
+        amount: 5,
+        nonce: 4,
+        signature: `0x${"33".repeat(65)}`,
+      },
+      {
+        batch_number: 7,
+        withdrawal_hash: `0x${"66".repeat(32)}`,
+        withdrawal_index: 2,
+        withdrawal_root: `0x${"77".repeat(32)}`,
+        leaf_hash: `0x${"88".repeat(32)}`,
+        proof: [`0x${"99".repeat(32)}`],
+        sibling_is_left: [true],
+      },
+      "0x3333333333333333333333333333333333333333",
+    );
+
+    expect(txHash).toBe(`0x${"55".repeat(32)}`);
+    expect(params).toEqual([{
+      from: "0x1111111111111111111111111111111111111111",
+      to: "0x3333333333333333333333333333333333333333",
+      data: expect.stringMatching(/^0x6d7015bb/),
     }]);
   });
 
