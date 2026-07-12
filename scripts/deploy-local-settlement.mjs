@@ -1,23 +1,31 @@
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const envFile = resolve(root, ".env.operator.local");
+loadLocalEnv(resolve(root, "local_testing/state.env"));
+
 const apiUrl = (process.env.SETTLEMENT_API_URL ?? "http://127.0.0.1:3000").replace(/\/$/, "");
 const rpcUrl = process.env.EVM_RPC_URL ?? "http://127.0.0.1:8545";
 const privateKey = process.env.EVM_PRIVATE_KEY;
 const databaseUrl = process.env.DATABASE_URL;
 const directDatabaseUrl = process.env.DIRECT_DATABASE_URL ?? databaseUrl;
 const l1DepositInbox = process.env.L1_DEPOSIT_INBOX;
+const l1DepositDeploymentBlock = process.env.L1_DEPOSIT_DEPLOYMENT_BLOCK ?? "0";
 
 if (!privateKey || !databaseUrl || !l1DepositInbox) {
   fail("Set EVM_PRIVATE_KEY, DATABASE_URL, and L1_DEPOSIT_INBOX before running this command.");
 }
+if (!/^\d+$/.test(l1DepositDeploymentBlock)) {
+  fail("L1_DEPOSIT_DEPLOYMENT_BLOCK must be a non-negative integer.");
+}
 
 await requireJsonRpc();
+await requireContractCode(l1DepositInbox, "L1_DEPOSIT_INBOX");
 const summary = await fetchJson(`${apiUrl}/chain/summary`, "explorer API");
 if (!summary.genesis_finalized || !summary.state_root) {
-  fail("Genesis is not initialized. Run `bun run genesis:init` first.");
+  fail("Genesis is not initialized. Run `cargo run -p explorer-api -- --initialize-genesis genesis.json` first.");
 }
 
 console.log("Building the prover, settlement client, and operator...");
@@ -63,6 +71,10 @@ const env = [
   `EVM_PRIVATE_KEY=${quote(privateKey)}`,
   `EVM_DEPLOYMENT_BLOCK=${settlement.blockNumber}`,
   "EVM_CONFIRMATIONS=0",
+  `L1_DEPOSIT_DEPLOYMENT_BLOCK=${l1DepositDeploymentBlock}`,
+  "L1_DEPOSIT_REORG_LOOKBACK=12",
+  `VITE_L1_DEPOSIT_INBOX=${quote(l1DepositInbox)}`,
+  `VITE_ROLLUP_SETTLEMENT_CONTRACT=${quote(settlement.address)}`,
   `VALIDITY_PROVER_BIN=${quote(resolve(root, "target/release/validity-prover"))}`,
   `SETTLEMENT_CLIENT_BIN=${quote(resolve(root, "target/release/settlement-client"))}`,
   "",
@@ -74,7 +86,7 @@ console.log(`\nLocal settlement deployment complete (chain ${chainId}).`);
 console.log(`Verifier:   ${verifier.address}`);
 console.log(`Settlement: ${settlement.address}`);
 console.log(`Config:     ${envFile}`);
-console.log("Start automation with: bun run operator:local");
+console.log("Start automation with: set -a; source .env.operator.local; set +a; cargo run -p operator");
 
 async function deploy(contract, constructorArgs) {
   const output = await run("forge", [
@@ -121,6 +133,13 @@ async function requireJsonRpc() {
   }
 }
 
+async function requireContractCode(address, name) {
+  const code = await jsonRpc("eth_getCode", [address, "latest"]);
+  if (!code || code === "0x") {
+    fail(`${name}=${address} has no code on ${rpcUrl}. Start Anvil with the persisted state file or deploy L1DepositInbox and update local_testing/state.env.`);
+  }
+}
+
 async function jsonRpc(method, params) {
   const response = await fetch(rpcUrl, {
     method: "POST",
@@ -160,6 +179,30 @@ async function run(command, args, capture = false) {
 
 function processEnv() {
   return { ...process.env, CARGO_TERM_COLOR: "always" };
+}
+
+function loadLocalEnv(filePath) {
+  if (!existsSync(filePath)) return;
+  const content = readFileSync(filePath, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator === -1) continue;
+    const key = trimmed.slice(0, separator).trim();
+    if (!/^[A-Z0-9_]+$/.test(key) || process.env[key]) continue;
+    process.env[key] = unquoteEnvValue(trimmed.slice(separator + 1).trim());
+  }
+}
+
+function unquoteEnvValue(value) {
+  if (
+    (value.startsWith("'") && value.endsWith("'"))
+    || (value.startsWith('"') && value.endsWith('"'))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 function withHexPrefix(value) {

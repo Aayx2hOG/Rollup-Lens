@@ -15,7 +15,7 @@ wallet discovery and WalletConnect are the next connection-layer milestone.
 On a new database, initialize genesis once with funded Ethereum addresses:
 
 ```bash
-bun run genesis:init
+cargo run -p explorer-api -- --initialize-genesis genesis.json
 ```
 
 Start the UI from `apps/explorer-ui`:
@@ -25,8 +25,13 @@ bun install
 bun run dev
 ```
 
-This starts the Explorer API, waits until it is healthy, and starts Vite. To
-point the UI at another API:
+This starts Vite only. Start the Explorer API separately before opening the UI:
+
+```bash
+cargo run -p explorer-api -- --bind 127.0.0.1:3000
+```
+
+To point the UI at another API:
 
 ```bash
 VITE_EXPLORER_API_BASE=http://127.0.0.1:3000 bun run dev
@@ -37,6 +42,14 @@ contracts to Vite:
 
 ```bash
 VITE_L1_DEPOSIT_INBOX=0x... VITE_ROLLUP_SETTLEMENT_CONTRACT=0x... bun run dev
+```
+
+For local development, keep `VITE_L1_DEPOSIT_INBOX` aligned with
+`L1_DEPOSIT_INBOX`, and run Anvil with:
+
+```bash
+mkdir -p local_testing
+anvil --host 127.0.0.1 --port 8545 --state local_testing/anvil-state.json
 ```
 
 ## Checks

@@ -79,14 +79,23 @@ For local Anvil testing, the repository can deploy and configure the complete
 settlement environment:
 
 ```bash
+mkdir -p local_testing
+anvil --host 127.0.0.1 --port 8545 --state local_testing/anvil-state.json
 export EVM_PRIVATE_KEY='0x<private-key printed by anvil>'
 export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/zk_rollup'
 bun run settlement:deploy:local
-bun run operator:local
+set -a
+source .env.operator.local
+set +a
+cargo run -p operator
 ```
 
 This writes the ignored, owner-readable `.env.operator.local` file used by
-`operator:local`. See the root README for prerequisites and generated values.
+the local operator command. See the root README for prerequisites and generated
+values. `bun run settlement:deploy:local` also reads `local_testing/state.env`
+when present, checks that `L1_DEPOSIT_INBOX` has code on `EVM_RPC_URL`, and
+writes `L1_DEPOSIT_DEPLOYMENT_BLOCK` plus `VITE_L1_DEPOSIT_INBOX` into
+`.env.operator.local`.
 
 ## Deposit index-only mode
 
@@ -94,12 +103,9 @@ For hosted demos, RollupLens can index `L1DepositInbox` evidence without running
 the sequencer, prover, or settlement client:
 
 ```bash
-bun run operator:index-deposits:local
-```
-
-The underlying command is:
-
-```bash
+set -a
+source .env.operator.local
+set +a
 cargo run -p operator -- --once --index-deposits-only
 ```
 
@@ -120,6 +126,17 @@ For Anvil, use `EVM_CONFIRMATIONS=0` for deposit indexing. In production, set
 used by the operator must support `eth_getBlockByNumber` with `safe` and
 `finalized` tags. Omit `L1_DEPOSIT_INBOX` when a deployment does not have an
 inbox yet.
+
+Before indexing deposits, verify that the configured inbox exists on the active
+RPC:
+
+```bash
+cast code "$L1_DEPOSIT_INBOX" --rpc-url "$EVM_RPC_URL"
+```
+
+The result must be non-empty bytecode, not `0x`. If local Anvil was reset,
+delete stale addresses from `local_testing/state.env`, deploy a new
+`L1DepositInbox`, and rerun `bun run settlement:deploy:local`.
 
 Proof artifacts are retained under `operator-artifacts/` by default. Move the
 directory with `OPERATOR_ARTIFACT_DIR`; it should not be committed.

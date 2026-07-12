@@ -5,11 +5,7 @@
     "db:migrate:deploy": "bun scripts/migrate-deploy.mjs",
     "db:migrate:neon": "bun scripts/migrate-deploy.mjs --neon",
     "db:status": "bunx prisma migrate status --schema prisma/schema.prisma",
-    "genesis:init": "cargo run -p explorer-api -- --initialize-genesis genesis.json",
-    "operator:dev": "cargo run -p operator",
     "settlement:deploy:local": "bun scripts/deploy-local-settlement.mjs",
-    "operator:local": "bun --env-file=.env.operator.local run operator:dev",
-    "operator:index-deposits:local": "bun --env-file=.env.operator.local run operator:dev -- --once --index-deposits-only",
     "dev": "bun run --cwd apps/explorer-ui dev"
   },
   "dependencies": {

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "bun scripts/dev.mjs",
+    "dev": "vite --host 127.0.0.1",
     "build": "bunx tsc && bunx vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "bun test"

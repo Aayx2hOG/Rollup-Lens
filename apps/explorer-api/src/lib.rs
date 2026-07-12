@@ -683,13 +683,14 @@ async fn sequence_pending_transactions_with_optional_events(
     };
     match service.sequence_rollup_batch(limit).await {
         Ok(_) => Ok(true),
-        Err(ApiError::BadRequest(message))
-            if message == "no pending transactions or confirmed deposits to sequence" =>
-        {
-            Ok(false)
-        }
+        Err(ApiError::BadRequest(message)) if is_empty_sequence_message(&message) => Ok(false),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn is_empty_sequence_message(message: &str) -> bool {
+    message.starts_with("no pending transactions")
+        && message.ends_with("confirmed deposits to sequence")
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {

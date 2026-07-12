@@ -29,7 +29,7 @@ apps/
   operator/         Automated sequencing, proving, submission, and L1 indexing
 prisma/
   schema.prisma     Postgres schema for blocks, transactions, accounts,
-                    rollup batches, transaction pool, and error events
+                    rollup batches, pools, L1 evidence, and operator state
 ```
 
 `chain-core` remains a pure deterministic execution library. Runtime state lives
@@ -70,7 +70,7 @@ restart independently. PostgreSQL must provide a persistent direct connection
 for `LISTEN`; a transaction-pooler-only connection is insufficient.
 
 See the expanded
-[attachment and data-flow diagram](docs/system-design-flowchart.svg).
+[attachment/data-flow diagram](docs/system-design-flowchart.svg).
 
 ## Setup
 
@@ -113,7 +113,7 @@ Required pieces:
 Vercel: explorer UI
 Render: explorer API
 Neon: Postgres
-GitHub Actions: cargo run -p operator -- --once --index-deposits-only
+GitHub Actions or another scheduler: lightweight deposit indexer
 ```
 
 Configure the scheduled indexer with `DATABASE_URL`, `EVM_RPC_URL`,
@@ -127,14 +127,64 @@ Use this mode to run the DB/API/UI, connect a wallet, inspect deposits, submit
 L2 transfers, sequence batches, and run mock operator tests. The basic explorer
 demo does not require the full prover.
 
+Run local Anvil with a persisted state file so deployed L1 contracts survive
+restarts:
+
 ```bash
-bun run db:migrate
-cargo run -p explorer-api -- --bind 127.0.0.1:3000
-bun run --cwd apps/explorer-ui dev
-bun run operator:index-deposits:local
+mkdir -p local_testing
+anvil --host 127.0.0.1 --port 8545 --state local_testing/anvil-state.json
 ```
 
-`operator:index-deposits:local` runs one lightweight deposit indexing tick.
+Keep local contract and service values in `local_testing/state.env`. The local
+deployment helper copies those values into `.env.operator.local`; use that file
+when starting services that need L1 deposit configuration.
+
+```bash
+bun run db:migrate
+set -a
+source .env.operator.local
+set +a
+cargo run -p explorer-api -- --bind 127.0.0.1:3000
+```
+
+Start the UI in a second terminal:
+
+```bash
+bun run --cwd apps/explorer-ui dev
+```
+
+After making an L1 deposit, run one lightweight indexing tick, refresh the UI,
+and use **Operate -> Build block** to sequence confirmed deposits into an L2
+batch:
+
+```bash
+set -a
+source .env.operator.local
+set +a
+cargo run -p operator -- --once --index-deposits-only
+```
+
+This deposit-only operator mode is safe for low-memory local demos. It indexes
+`DepositAccepted` logs only; it does not run the SP1 prover, submit settlement
+transactions, or finalize batches on L1.
+
+The API must be started with the same `L1_DEPOSIT_INBOX` that appears on the
+deposit rows. If the API starts without `.env.operator.local`, it falls back to
+the zero address and **Operate -> Build block** will report that there are no
+confirmed deposits to sequence. Stale zero-address dummy deposits should be
+orphaned or removed from the local database.
+
+Before depositing from the UI, verify that the configured inbox exists on the
+current Anvil state:
+
+```bash
+set -a
+source local_testing/state.env
+set +a
+cast code "$L1_DEPOSIT_INBOX" --rpc-url "$EVM_RPC_URL"
+```
+
+The result must be non-empty bytecode, not `0x`.
 
 ### Full Proof Mode
 
@@ -142,13 +192,10 @@ Use this mode only when you need end-to-end settlement evidence. It requires an
 Anvil or testnet RPC, deployed contracts, release binaries, the full operator,
 and SP1 Groth16 proving resources.
 
-```bash
-bun run settlement:deploy:local
-bun run operator:local
-```
-
 The full proof path can be RAM-heavy because it invokes
-`validity-prover groth16`.
+`validity-prover groth16`. See [`apps/operator/README.md`](apps/operator/README.md)
+and [`apps/settlement-client/README.md`](apps/settlement-client/README.md) for
+the full settlement commands.
 
 Do not run integration tests against the deployed application's production
 branch. Create a separate Neon test branch, then pass its connection string
@@ -200,12 +247,6 @@ migration, old Ed25519/base64 addresses are invalid here.
 ```
 
 Initialize the database:
-
-```bash
-bun run genesis:init
-```
-
-Or invoke the binary directly:
 
 ```bash
 cargo run -p explorer-api -- \
@@ -303,43 +344,25 @@ blocks have reached the RPC `safe` or `finalized` tags.
 See [`apps/operator/README.md`](apps/operator/README.md) for configuration and
 failure semantics.
 
-### One-command local settlement deployment
-
-For a reproducible local validity-settlement environment, start Anvil and the
-explorer API, then provide one funded Anvil key and the application database:
-
-```bash
-export EVM_PRIVATE_KEY='0x<private-key printed by anvil>'
-export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/zk_rollup'
-bun run settlement:deploy:local
-bun run operator:local
-```
-
-The deployment command builds the required release binaries, reads the
-initialized genesis root from the API, derives the validity guest's SP1 program
-key, deploys the matching SP1 Groth16 verifier and
-`ValidityRollupSettlement`, configures the key's address as sequencer, and
-writes `.env.operator.local`. That generated file contains the private key and
-database URL, is ignored by Git, and is created with owner-only permissions.
-
-The API must be available at `http://127.0.0.1:3000` and Anvil at
-`http://127.0.0.1:8545` by default. Override those locations with
-`SETTLEMENT_API_URL` and `EVM_RPC_URL`. Re-running the deployment intentionally
-creates a fresh settlement chain and replaces the local operator configuration.
-
 ## Explorer UI
 
-From the repository root, start the complete local application:
+From the repository root, start the Explorer UI:
 
 ```bash
 bun run dev
 ```
 
-This starts the Explorer API automatically, waits for its health endpoint,
-and then starts Vite. `Ctrl+C` stops both.
+This starts Vite only. Start the Explorer API separately first:
 
-You can run the same integrated launcher from `apps/explorer-ui` when you are
-already working in that folder:
+```bash
+set -a
+source .env.operator.local
+set +a
+cargo run -p explorer-api -- --bind 127.0.0.1:3000
+```
+
+You can run the same UI command from `apps/explorer-ui` when you are already
+working in that folder:
 
 ```bash
 cd apps/explorer-ui
