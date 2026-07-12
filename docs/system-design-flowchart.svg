@@ -125,7 +125,7 @@
   <text x="1302" y="260" class="small">LISTEN wake-up + OPERATOR_POLL_SECONDS recovery tick</text>
   <text x="1312" y="283" class="small">claims exactly the batch expected by the L1 contract</text>
   <text x="1310" y="306" class="small">coordinates sequencing, proving, submission and retries</text>
-  <text x="1300" y="329" class="small">indexes confirmed BatchFinalized logs and verifies roots</text>
+  <text x="1300" y="329" class="small">indexes safe/finalized BatchFinalized logs and verifies roots</text>
   <rect x="1260" y="400" width="460" height="300" class="boundary"/>
   <text x="1280" y="425" class="zone-note">CHILD PROCESSES ON THE OPERATOR HOST</text>
   <rect x="1290" y="455" width="190" height="145" class="box proof"/>
@@ -146,11 +146,11 @@
   <!-- External L1 -->
   <rect x="410" y="850" width="1340" height="330" class="external-zone"/>
   <text x="432" y="880" class="zone-title">EXTERNAL SERVICE BOUNDARY · EVM RPC AND L1 NETWORK</text>
-  <text x="432" y="900" class="zone-note">Not an owned rollup application server; availability and confirmation depth are external dependencies</text>
+  <text x="432" y="900" class="zone-note">Not an owned rollup application server; RPC availability and finality tags are external dependencies</text>
   <rect x="470" y="950" width="270" height="115" class="box chain"/>
   <text x="558" y="987" class="text">EVM RPC</text>
   <text x="500" y="1015" class="small">eth_call, broadcast, receipts</text>
-  <text x="501" y="1038" class="small">confirmed log range queries</text>
+  <text x="501" y="1038" class="small">safe/finalized log range queries</text>
   <rect x="825" y="935" width="350" height="145" class="box chain"/>
   <text x="871" y="972" class="text">ValidityRollupSettlement</text>
   <text x="863" y="1000" class="small">enforces sequential batch number</text>
@@ -161,7 +161,7 @@
   <text x="1293" y="1015" class="small">checks program vkey, public values</text>
   <text x="1307" y="1038" class="small">and Groth16 proof bytes</text>
   <rect x="470" y="1110" width="1060" height="45" class="note-box"/>
-  <text x="674" y="1138" class="small">Finality rule: Postgres is updated only after a confirmed successful receipt and a matching BatchFinalized event.</text>
+  <text x="674" y="1138" class="small">Finality rule: Postgres finalizes only after a successful receipt and a matching finalized BatchFinalized event.</text>
 
   <!-- Core request/data paths -->
   <path d="M205 300 L205 535" class="http"/>

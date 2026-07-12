@@ -197,6 +197,9 @@ model RollupBatch {
   l1FinalizeTxHash String?                  @map("l1_finalize_tx_hash")
   l1FinalizedAt   DateTime?                 @map("l1_finalized_at")
   l1FinalizeBlockNumber BigInt?             @map("l1_finalize_block_number")
+  l1FinalizeBlockHash String?                @map("l1_finalize_block_hash")
+  l1FinalizeLogIndex Int?                    @map("l1_finalize_log_index")
+  l1FinalityStatus String?                   @map("l1_finality_status")
   l1FinalizeGasUsed BigInt?                 @map("l1_finalize_gas_used")
   l1FinalizeReceipt Json?                   @map("l1_finalize_receipt")
   rawCommitment   Json                      @map("raw_commitment")
@@ -215,6 +218,34 @@ model RollupBatch {
   @@index([startBlockHeight])
   @@index([endBlockHeight])
   @@map("rollup_batches")
+}
+
+model L1BatchFinalizationEvent {
+  id                BigInt   @id @default(autoincrement())
+  chainId           BigInt   @map("chain_id")
+  contractAddress   String   @map("contract_address")
+  batchNumber       BigInt   @map("batch_number")
+  l1TxHash          String   @map("l1_tx_hash")
+  l1BlockNumber     BigInt   @map("l1_block_number")
+  l1BlockHash       String   @map("l1_block_hash")
+  l1LogIndex        Int      @map("l1_log_index")
+  prevStateRoot     String   @map("prev_state_root")
+  newStateRoot      String   @map("new_state_root")
+  transactionRoot   String   @map("transaction_root")
+  blockHashRoot     String   @map("block_hash_root")
+  dataHash          String   @map("data_hash")
+  transactionCount  Int      @map("transaction_count")
+  batchCommitment   String   @map("batch_commitment")
+  status            String  @default("observed")
+  l1GasUsed         BigInt?  @map("l1_gas_used")
+  l1Receipt         Json?    @map("l1_receipt")
+  observedAt        DateTime @default(now()) @map("observed_at")
+  updatedAt         DateTime @default(now()) @map("updated_at")
+
+  @@unique([chainId, contractAddress, batchNumber, l1BlockHash, l1TxHash, l1LogIndex])
+  @@index([chainId, contractAddress, l1BlockNumber])
+  @@index([status, batchNumber])
+  @@map("l1_batch_finalization_events")
 }
 
 model L1IndexerCheckpoint {

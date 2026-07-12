@@ -26,12 +26,14 @@ use tokio::{net::TcpListener, process::Command};
 
 const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
 const TX_HASH: &str = "0x7777777777777777777777777777777777777777777777777777777777777777";
+const BLOCK_HASH: &str = "0x8888888888888888888888888888888888888888888888888888888888888888";
 const FINALIZED_TOPIC: &str = "0xdc34f737c6cca7c2bef391debb7d95fe9db2db57eb450c20b4ad265834a91e24";
 
 #[derive(Clone)]
 struct MockState {
     emit_finalized: Arc<AtomicBool>,
     invalid_finalized: Arc<AtomicBool>,
+    finalized_tag_at_event: Arc<AtomicBool>,
 }
 
 #[tokio::test]
@@ -47,6 +49,7 @@ async fn once_drives_broadcast_then_indexes_finality() -> Result<()> {
     let state = MockState {
         emit_finalized: Arc::new(AtomicBool::new(false)),
         invalid_finalized: Arc::new(AtomicBool::new(false)),
+        finalized_tag_at_event: Arc::new(AtomicBool::new(true)),
     };
     let (port, server) = start_mock_server(state.clone()).await?;
 
@@ -105,12 +108,60 @@ exit 2
 
 #[tokio::test]
 #[ignore = "requires local Docker DATABASE_URL"]
+async fn safe_event_does_not_finalize_rollup_batch() -> Result<()> {
+    let TestDatabase { url, pool, cleanup } = test_database().await?;
+    insert_queued_batch(&pool).await?;
+    sqlx::query(
+        "UPDATE rollup_batches SET operator_status = 'broadcast', \
+         operator_broadcast_tx_hash = $1 WHERE batch_number = 0",
+    )
+    .bind(TX_HASH)
+    .execute(&pool)
+    .await?;
+    let state = MockState {
+        emit_finalized: Arc::new(AtomicBool::new(true)),
+        invalid_finalized: Arc::new(AtomicBool::new(false)),
+        finalized_tag_at_event: Arc::new(AtomicBool::new(false)),
+    };
+    let (port, server) = start_mock_server(state).await?;
+    let fixtures = TempDir::new()?;
+    let unused = fixtures.path().join("unused");
+    write_executable(&unused, "#!/bin/sh\nexit 99\n")?;
+
+    run_once(&url, port, fixtures.path(), &unused, &unused).await?;
+    let (batch_status, operator_status, finality_status): (String, String, Option<String>) =
+        sqlx::query_as(
+            "SELECT status, operator_status, l1_finality_status \
+             FROM rollup_batches WHERE batch_number = 0",
+        )
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(batch_status, "submitted");
+    assert_eq!(operator_status, "broadcast");
+    assert_eq!(finality_status.as_deref(), Some("safe"));
+
+    let event_status: String = sqlx::query_scalar(
+        "SELECT status FROM l1_batch_finalization_events WHERE batch_number = 0",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(event_status, "safe");
+
+    server.abort();
+    drop(pool);
+    cleanup.drop_schema().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires local Docker DATABASE_URL"]
 async fn prover_failure_retries_only_until_max_attempts() -> Result<()> {
     let TestDatabase { url, pool, cleanup } = test_database().await?;
     insert_queued_batch(&pool).await?;
     let state = MockState {
         emit_finalized: Arc::new(AtomicBool::new(false)),
         invalid_finalized: Arc::new(AtomicBool::new(false)),
+        finalized_tag_at_event: Arc::new(AtomicBool::new(true)),
     };
     let (port, server) = start_mock_server(state).await?;
     let fixtures = TempDir::new()?;
@@ -181,6 +232,7 @@ async fn invalid_finalized_event_never_updates_batch() -> Result<()> {
     let state = MockState {
         emit_finalized: Arc::new(AtomicBool::new(true)),
         invalid_finalized: Arc::new(AtomicBool::new(true)),
+        finalized_tag_at_event: Arc::new(AtomicBool::new(true)),
     };
     let (port, server) = start_mock_server(state).await?;
     let fixtures = TempDir::new()?;
@@ -314,9 +366,38 @@ async fn create_fixture_schema(pool: &PgPool) -> Result<()> {
             l1_finalize_tx_hash TEXT,
             l1_finalized_at TIMESTAMPTZ,
             l1_finalize_block_number BIGINT,
+            l1_finalize_block_hash TEXT,
+            l1_finalize_log_index INTEGER,
+            l1_finality_status TEXT,
             l1_finalize_gas_used BIGINT,
             l1_finalize_receipt JSONB
         );
+        CREATE TABLE l1_batch_finalization_events (
+            id BIGSERIAL PRIMARY KEY,
+            chain_id BIGINT NOT NULL,
+            contract_address TEXT NOT NULL,
+            batch_number BIGINT NOT NULL,
+            l1_tx_hash TEXT NOT NULL,
+            l1_block_number BIGINT NOT NULL,
+            l1_block_hash TEXT NOT NULL,
+            l1_log_index INTEGER NOT NULL,
+            prev_state_root TEXT NOT NULL,
+            new_state_root TEXT NOT NULL,
+            transaction_root TEXT NOT NULL,
+            block_hash_root TEXT NOT NULL,
+            data_hash TEXT NOT NULL,
+            transaction_count INTEGER NOT NULL,
+            batch_commitment TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'observed',
+            l1_gas_used BIGINT,
+            l1_receipt JSONB,
+            observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (chain_id, contract_address, batch_number, l1_block_hash, l1_tx_hash, l1_log_index)
+        );
+        CREATE UNIQUE INDEX l1_batch_finalization_events_canonical_idx
+        ON l1_batch_finalization_events(chain_id, contract_address, batch_number)
+        WHERE status <> 'orphaned';
         CREATE TABLE l1_indexer_checkpoints (
             chain_id BIGINT NOT NULL,
             contract_address TEXT NOT NULL,
@@ -431,10 +512,35 @@ async fn rpc(State(state): State<MockState>, Json(request): Json<Value>) -> Json
     let method = request["method"].as_str().unwrap_or_default();
     let finalized = state.emit_finalized.load(Ordering::SeqCst);
     let invalid_finalized = state.invalid_finalized.load(Ordering::SeqCst);
+    let finalized_tag_at_event = state.finalized_tag_at_event.load(Ordering::SeqCst);
     let result = match method {
         "eth_chainId" => json!("0x7a69"),
         "eth_blockNumber" => json!(if finalized { "0x10" } else { "0xf" }),
         "eth_call" => json!(word_u64(0)),
+        "eth_getBlockByNumber" => {
+            let tag = request["params"][0].as_str().unwrap_or_default();
+            let number = match tag {
+                "safe" => {
+                    if finalized {
+                        "0x10"
+                    } else {
+                        "0xf"
+                    }
+                }
+                "finalized" => {
+                    if finalized && finalized_tag_at_event {
+                        "0x10"
+                    } else {
+                        "0xf"
+                    }
+                }
+                other => other,
+            };
+            json!({
+                "number": number,
+                "hash": if number == "0x10" { BLOCK_HASH } else { "0x9999999999999999999999999999999999999999999999999999999999999999" }
+            })
+        }
         "eth_getLogs" if finalized => json!([finalized_log(invalid_finalized)]),
         "eth_getLogs" => json!([]),
         "eth_getTransactionReceipt" => json!({
@@ -474,7 +580,9 @@ fn finalized_log(invalid: bool) -> Value {
         ],
         "data": format!("0x{data}"),
         "blockNumber": "0x10",
+        "blockHash": BLOCK_HASH,
         "transactionHash": TX_HASH,
+        "logIndex": "0x0",
         "removed": false
     })
 }

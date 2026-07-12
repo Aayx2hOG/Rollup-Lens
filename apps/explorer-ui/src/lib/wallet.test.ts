@@ -160,6 +160,9 @@ function batchFixture(): RollupBatchSummary {
     l1_finalize_tx_hash: null,
     l1_finalized_at: null,
     l1_finalize_block_number: null,
+    l1_finalize_block_hash: null,
+    l1_finalize_log_index: null,
+    l1_finality_status: null,
     l1_finalize_gas_used: null,
     l1_finalize_receipt: null,
   };

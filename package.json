@@ -1,6 +1,5 @@
 {
   "scripts": {
-    "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "db:migrate": "bunx prisma migrate dev",
     "db:migrate:deploy": "bun scripts/migrate-deploy.mjs",

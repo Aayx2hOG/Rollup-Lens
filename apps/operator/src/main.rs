@@ -7,7 +7,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{
     postgres::{PgListener, PgPoolOptions},
-    PgPool, Row,
+    PgPool, Postgres, Row, Transaction,
 };
 use tokio::{fs, process::Command, time::MissedTickBehavior};
 
@@ -57,6 +57,8 @@ struct Args {
     deployment_block: u64,
     #[arg(long, env = "EVM_CONFIRMATIONS", default_value_t = 6)]
     confirmations: u64,
+    #[arg(long, env = "L1_BATCH_REORG_LOOKBACK", default_value_t = 64)]
+    l1_batch_reorg_lookback: u64,
     #[arg(long, env = "OPERATOR_POLL_SECONDS", default_value_t = 5)]
     poll_seconds: u64,
     #[arg(long, env = "OPERATOR_BATCH_LIMIT", default_value_t = 100)]
@@ -94,6 +96,7 @@ struct Operator {
     private_key: Option<String>,
     deployment_block: u64,
     confirmations: u64,
+    l1_batch_reorg_lookback: u64,
     batch_limit: usize,
     max_attempts: i32,
     artifact_dir: PathBuf,
@@ -135,6 +138,13 @@ struct RpcLog {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RpcBlock {
+    number: String,
+    hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Receipt {
     transaction_hash: String,
     block_number: String,
@@ -162,7 +172,9 @@ struct FinalizedEvent {
     transaction_count: u64,
     batch_commitment: String,
     block_number: u64,
+    block_hash: String,
     tx_hash: String,
+    log_index: u32,
 }
 
 #[derive(Debug)]
@@ -176,6 +188,12 @@ struct DepositEvent {
     block_hash: String,
     tx_hash: String,
     log_index: u32,
+}
+
+#[derive(Debug)]
+struct L1BlockRef {
+    number: u64,
+    hash: String,
 }
 
 #[tokio::main]
@@ -233,6 +251,7 @@ async fn main() -> Result<()> {
         private_key: args.private_key,
         deployment_block: args.deployment_block,
         confirmations: args.confirmations,
+        l1_batch_reorg_lookback: args.l1_batch_reorg_lookback,
         batch_limit: args.batch_limit,
         max_attempts: args.max_attempts,
         artifact_dir: args.artifact_dir,
@@ -626,13 +645,16 @@ impl Operator {
 
     async fn index_finalized_events(&self) -> Result<()> {
         let contract = self.settlement_contract()?;
-        let head = parse_hex_u64(
-            &rpc::<String>(&self.client, &self.rpc_url, "eth_blockNumber", json!([])).await?,
-            "head block",
-        )?;
-        let Some(confirmed_head) = head.checked_sub(self.confirmations) else {
-            return Ok(());
-        };
+        let safe_block = self
+            .block_by_tag("safe")
+            .await
+            .context("failed to read safe L1 block")?;
+        let finalized_block = self
+            .block_by_tag("finalized")
+            .await
+            .context("failed to read finalized L1 block")?;
+        let safe_head = safe_block.number;
+        let finalized_head = finalized_block.number.min(safe_head);
         let next: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO l1_indexer_checkpoints (chain_id, contract_address, next_block)
@@ -647,9 +669,19 @@ impl Operator {
         .bind(i64::try_from(self.deployment_block)?)
         .fetch_one(&self.pool)
         .await?;
-        let mut from = u64::try_from(next)?;
-        while from <= confirmed_head {
-            let to = confirmed_head.min(from.saturating_add(999));
+        let checkpoint = u64::try_from(next)?;
+        let mut from = checkpoint
+            .saturating_sub(self.l1_batch_reorg_lookback)
+            .max(self.deployment_block);
+        if from > safe_head {
+            self.promote_batch_finalization_events(contract, finalized_head)
+                .await?;
+            return Ok(());
+        }
+        self.orphan_reorged_batch_events(contract, from, safe_head)
+            .await?;
+        while from <= safe_head {
+            let to = safe_head.min(from.saturating_add(999));
             let logs: Vec<RpcLog> = rpc(
                 &self.client,
                 &self.rpc_url,
@@ -664,10 +696,16 @@ impl Operator {
             .await?;
             for log in logs {
                 if log.removed.unwrap_or(false) {
+                    self.orphan_removed_batch_log(contract, &log).await?;
                     continue;
                 }
                 let event = decode_event(&log)?;
-                self.apply_finalized_event(event).await?;
+                let status = if event.block_number <= finalized_head {
+                    "finalized"
+                } else {
+                    "safe"
+                };
+                self.apply_finalized_event(event, status).await?;
             }
             sqlx::query(
                 "UPDATE l1_indexer_checkpoints SET next_block = $3, updated_at = now() WHERE chain_id = $1 AND contract_address = $2",
@@ -679,6 +717,8 @@ impl Operator {
             .await?;
             from = to.saturating_add(1);
         }
+        self.promote_batch_finalization_events(contract, finalized_head)
+            .await?;
         Ok(())
     }
 
@@ -835,7 +875,7 @@ impl Operator {
         Ok(())
     }
 
-    async fn apply_finalized_event(&self, event: FinalizedEvent) -> Result<()> {
+    async fn apply_finalized_event(&self, event: FinalizedEvent, status: &str) -> Result<()> {
         let contract = self.settlement_contract()?;
         let row = sqlx::query(
             r#"
@@ -898,40 +938,441 @@ impl Operator {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
+            UPDATE l1_batch_finalization_events
+            SET status = 'orphaned', updated_at = now()
+            WHERE chain_id = $1
+              AND contract_address = $2
+              AND batch_number = $3
+              AND status NOT IN ('orphaned', 'finalized')
+              AND (l1_block_hash <> $4 OR l1_tx_hash <> $5 OR l1_log_index <> $6)
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(contract)
+        .bind(i64::try_from(event.batch_number)?)
+        .bind(&event.block_hash)
+        .bind(&event.tx_hash)
+        .bind(i32::try_from(event.log_index)?)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO l1_batch_finalization_events (
+                chain_id,
+                contract_address,
+                batch_number,
+                l1_tx_hash,
+                l1_block_number,
+                l1_block_hash,
+                l1_log_index,
+                prev_state_root,
+                new_state_root,
+                transaction_root,
+                block_hash_root,
+                data_hash,
+                transaction_count,
+                batch_commitment,
+                status,
+                l1_gas_used,
+                l1_receipt
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ON CONFLICT (chain_id, contract_address, batch_number, l1_block_hash, l1_tx_hash, l1_log_index)
+            DO UPDATE SET
+                status = CASE
+                    WHEN l1_batch_finalization_events.status = 'finalized' THEN 'finalized'
+                    WHEN EXCLUDED.status = 'finalized' THEN 'finalized'
+                    WHEN l1_batch_finalization_events.status = 'safe' THEN 'safe'
+                    WHEN EXCLUDED.status = 'safe' THEN 'safe'
+                    ELSE l1_batch_finalization_events.status
+                END,
+                l1_gas_used = EXCLUDED.l1_gas_used,
+                l1_receipt = EXCLUDED.l1_receipt,
+                updated_at = now()
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(contract)
+        .bind(i64::try_from(event.batch_number)?)
+        .bind(&event.tx_hash)
+        .bind(i64::try_from(event.block_number)?)
+        .bind(&event.block_hash)
+        .bind(i32::try_from(event.log_index)?)
+        .bind(&event.prev_state_root)
+        .bind(&event.new_state_root)
+        .bind(&event.transaction_root)
+        .bind(&event.block_hash_root)
+        .bind(&event.data_hash)
+        .bind(i32::try_from(event.transaction_count)?)
+        .bind(&event.batch_commitment)
+        .bind(status)
+        .bind(i64::try_from(gas_used)?)
+        .bind(receipt_value.clone())
+        .execute(&mut *tx)
+        .await?;
+
+        self.project_finalized_event(
+            &mut tx,
+            contract,
+            event.batch_number,
+            status,
+            &event.tx_hash,
+            event.block_number,
+            &event.block_hash,
+            event.log_index,
+            gas_used,
+            receipt_value,
+        )
+        .await?;
+        tx.commit().await?;
+        println!(
+            "indexed {status} batch {} at L1 block {} ({}) commitment {}",
+            event.batch_number, event.block_number, event.tx_hash, event.batch_commitment
+        );
+        Ok(())
+    }
+
+    async fn block_by_tag(&self, tag: &str) -> Result<L1BlockRef> {
+        let block: RpcBlock = rpc(
+            &self.client,
+            &self.rpc_url,
+            "eth_getBlockByNumber",
+            json!([tag, false]),
+        )
+        .await?;
+        Ok(L1BlockRef {
+            number: parse_hex_u64(&block.number, "block number")?,
+            hash: normalize_root(&block.hash),
+        })
+    }
+
+    async fn block_by_number(&self, number: u64) -> Result<L1BlockRef> {
+        let block: RpcBlock = rpc(
+            &self.client,
+            &self.rpc_url,
+            "eth_getBlockByNumber",
+            json!([hex_u64(number), false]),
+        )
+        .await?;
+        Ok(L1BlockRef {
+            number: parse_hex_u64(&block.number, "block number")?,
+            hash: normalize_root(&block.hash),
+        })
+    }
+
+    async fn orphan_reorged_batch_events(&self, contract: &str, from: u64, to: u64) -> Result<()> {
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT l1_block_number, l1_block_hash
+            FROM l1_batch_finalization_events
+            WHERE chain_id = $1
+              AND contract_address = $2
+              AND status NOT IN ('orphaned', 'finalized')
+              AND l1_block_number BETWEEN $3 AND $4
+            ORDER BY l1_block_number
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(contract)
+        .bind(i64::try_from(from)?)
+        .bind(i64::try_from(to)?)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for row in rows {
+            let block_number = u64::try_from(row.get::<i64, _>("l1_block_number"))?;
+            let stored_hash: String = row.get("l1_block_hash");
+            let changed = match self.block_by_number(block_number).await {
+                Ok(current) => current.hash != stored_hash,
+                Err(_) => true,
+            };
+            if changed {
+                self.orphan_events_at_block(contract, block_number, &stored_hash)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn orphan_events_at_block(
+        &self,
+        contract: &str,
+        block_number: u64,
+        block_hash: &str,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            UPDATE l1_batch_finalization_events
+            SET status = 'orphaned', updated_at = now()
+            WHERE chain_id = $1
+              AND contract_address = $2
+              AND l1_block_number = $3
+              AND l1_block_hash = $4
+              AND status NOT IN ('orphaned', 'finalized')
+            RETURNING batch_number, l1_tx_hash, l1_block_hash, l1_log_index
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(contract)
+        .bind(i64::try_from(block_number)?)
+        .bind(block_hash)
+        .fetch_all(&mut *tx)
+        .await?;
+        for row in rows {
+            self.clear_orphaned_batch_projection(
+                &mut tx,
+                contract,
+                u64::try_from(row.get::<i64, _>("batch_number"))?,
+                &row.get::<String, _>("l1_tx_hash"),
+                &row.get::<String, _>("l1_block_hash"),
+                u32::try_from(row.get::<i32, _>("l1_log_index"))?,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn orphan_removed_batch_log(&self, contract: &str, log: &RpcLog) -> Result<()> {
+        let block_hash = normalize_root(&log.block_hash);
+        let tx_hash = log.transaction_hash.to_ascii_lowercase();
+        let log_index = u32::try_from(parse_hex_u64(&log.log_index, "removed log index")?)?;
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            UPDATE l1_batch_finalization_events
+            SET status = 'orphaned', updated_at = now()
+            WHERE chain_id = $1
+              AND contract_address = $2
+              AND l1_block_hash = $3
+              AND l1_tx_hash = $4
+              AND l1_log_index = $5
+              AND status NOT IN ('orphaned', 'finalized')
+            RETURNING batch_number
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(contract)
+        .bind(&block_hash)
+        .bind(&tx_hash)
+        .bind(i32::try_from(log_index)?)
+        .fetch_all(&mut *tx)
+        .await?;
+        for row in rows {
+            self.clear_orphaned_batch_projection(
+                &mut tx,
+                contract,
+                u64::try_from(row.get::<i64, _>("batch_number"))?,
+                &tx_hash,
+                &block_hash,
+                log_index,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn promote_batch_finalization_events(
+        &self,
+        contract: &str,
+        finalized_head: u64,
+    ) -> Result<()> {
+        let rows = sqlx::query(
+            r#"
+            SELECT batch_number, l1_tx_hash, l1_block_number, l1_block_hash, l1_log_index,
+                   l1_gas_used, l1_receipt
+            FROM l1_batch_finalization_events
+            WHERE chain_id = $1
+              AND contract_address = $2
+              AND status IN ('observed', 'safe')
+              AND l1_block_number <= $3
+            ORDER BY l1_block_number, l1_log_index
+            "#,
+        )
+        .bind(i64::try_from(self.chain_id)?)
+        .bind(contract)
+        .bind(i64::try_from(finalized_head)?)
+        .fetch_all(&self.pool)
+        .await?;
+
+        for row in rows {
+            let block_number = u64::try_from(row.get::<i64, _>("l1_block_number"))?;
+            let block_hash: String = row.get("l1_block_hash");
+            let changed = match self.block_by_number(block_number).await {
+                Ok(current) => current.hash != block_hash,
+                Err(_) => true,
+            };
+            if changed {
+                self.orphan_events_at_block(contract, block_number, &block_hash)
+                    .await?;
+                continue;
+            }
+
+            let batch_number = u64::try_from(row.get::<i64, _>("batch_number"))?;
+            let tx_hash: String = row.get("l1_tx_hash");
+            let log_index = u32::try_from(row.get::<i32, _>("l1_log_index"))?;
+            let gas_used = u64::try_from(
+                row.get::<Option<i64>, _>("l1_gas_used")
+                    .context("finalization event lacks receipt gas")?,
+            )?;
+            let receipt: Value = row
+                .get::<Option<Value>, _>("l1_receipt")
+                .context("finalization event lacks receipt")?;
+
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(
+                r#"
+                UPDATE l1_batch_finalization_events
+                SET status = 'finalized', updated_at = now()
+                WHERE chain_id = $1
+                  AND contract_address = $2
+                  AND batch_number = $3
+                  AND l1_block_hash = $4
+                  AND l1_tx_hash = $5
+                  AND l1_log_index = $6
+                  AND status IN ('observed', 'safe')
+                "#,
+            )
+            .bind(i64::try_from(self.chain_id)?)
+            .bind(contract)
+            .bind(i64::try_from(batch_number)?)
+            .bind(&block_hash)
+            .bind(&tx_hash)
+            .bind(i32::try_from(log_index)?)
+            .execute(&mut *tx)
+            .await?;
+            self.project_finalized_event(
+                &mut tx,
+                contract,
+                batch_number,
+                "finalized",
+                &tx_hash,
+                block_number,
+                &block_hash,
+                log_index,
+                gas_used,
+                receipt,
+            )
+            .await?;
+            tx.commit().await?;
+        }
+        Ok(())
+    }
+
+    async fn project_finalized_event(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        contract: &str,
+        batch_number: u64,
+        status: &str,
+        tx_hash: &str,
+        block_number: u64,
+        block_hash: &str,
+        log_index: u32,
+        gas_used: u64,
+        receipt: Value,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
             UPDATE rollup_batches SET
-                status = 'finalized',
-                operator_status = 'finalized',
+                status = CASE
+                    WHEN $8 = 'finalized' THEN 'finalized'
+                    WHEN status = 'finalized' THEN status
+                    ELSE 'submitted'
+                END,
+                operator_status = CASE
+                    WHEN $8 = 'finalized' THEN 'finalized'
+                    ELSE 'broadcast'
+                END,
                 operator_last_error = NULL,
                 operator_updated_at = now(),
                 l1_chain_id = $2,
                 l1_contract_address = $3,
-                l1_submit_tx_hash = $4,
+                l1_submit_tx_hash = COALESCE(l1_submit_tx_hash, $4),
                 l1_submitted_at = COALESCE(l1_submitted_at, now()),
-                l1_submit_block_number = $5,
-                l1_submit_gas_used = $6,
-                l1_submit_receipt = $7,
+                l1_submit_block_number = COALESCE(l1_submit_block_number, $5),
+                l1_submit_gas_used = COALESCE(l1_submit_gas_used, $9),
+                l1_submit_receipt = COALESCE(l1_submit_receipt, $10),
                 l1_finalize_tx_hash = $4,
-                l1_finalized_at = COALESCE(l1_finalized_at, now()),
+                l1_finalized_at = CASE
+                    WHEN $8 = 'finalized' THEN COALESCE(l1_finalized_at, now())
+                    ELSE l1_finalized_at
+                END,
                 l1_finalize_block_number = $5,
-                l1_finalize_gas_used = $6,
-                l1_finalize_receipt = $7
+                l1_finalize_block_hash = $6,
+                l1_finalize_log_index = $7,
+                l1_finality_status = $8,
+                l1_finalize_gas_used = $9,
+                l1_finalize_receipt = $10
             WHERE batch_number = $1
             "#,
         )
-        .bind(i64::try_from(event.batch_number)?)
+        .bind(i64::try_from(batch_number)?)
         .bind(i64::try_from(self.chain_id)?)
         .bind(contract)
-        .bind(&event.tx_hash)
-        .bind(i64::try_from(event.block_number)?)
+        .bind(tx_hash)
+        .bind(i64::try_from(block_number)?)
+        .bind(block_hash)
+        .bind(i32::try_from(log_index)?)
+        .bind(status)
         .bind(i64::try_from(gas_used)?)
-        .bind(receipt_value)
-        .execute(&mut *tx)
+        .bind(receipt)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
-        println!(
-            "indexed finalized batch {} at L1 block {} ({}) commitment {}",
-            event.batch_number, event.block_number, event.tx_hash, event.batch_commitment
-        );
+        Ok(())
+    }
+
+    async fn clear_orphaned_batch_projection(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        contract: &str,
+        batch_number: u64,
+        tx_hash: &str,
+        block_hash: &str,
+        log_index: u32,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE rollup_batches SET
+                status = 'built',
+                operator_status = CASE
+                    WHEN operator_proof_completed_at IS NOT NULL THEN 'proved'
+                    ELSE 'retry'
+                END,
+                operator_updated_at = now(),
+                operator_last_error = 'L1 BatchFinalized event was orphaned by a reorg',
+                operator_broadcast_tx_hash = NULL,
+                l1_submit_tx_hash = NULL,
+                l1_submitted_at = NULL,
+                l1_submit_block_number = NULL,
+                l1_submit_gas_used = NULL,
+                l1_submit_receipt = NULL,
+                l1_finalize_tx_hash = NULL,
+                l1_finalized_at = NULL,
+                l1_finalize_block_number = NULL,
+                l1_finalize_block_hash = NULL,
+                l1_finalize_log_index = NULL,
+                l1_finality_status = 'orphaned',
+                l1_finalize_gas_used = NULL,
+                l1_finalize_receipt = NULL
+            WHERE batch_number = $1
+              AND l1_contract_address = $2
+              AND l1_finalize_tx_hash = $3
+              AND l1_finalize_block_hash = $4
+              AND l1_finalize_log_index = $5
+              AND COALESCE(l1_finality_status, '') <> 'finalized'
+            "#,
+        )
+        .bind(i64::try_from(batch_number)?)
+        .bind(contract)
+        .bind(tx_hash)
+        .bind(block_hash)
+        .bind(i32::try_from(log_index)?)
+        .execute(&mut **tx)
+        .await?;
         Ok(())
     }
 
@@ -1027,7 +1468,9 @@ fn decode_event(log: &RpcLog) -> Result<FinalizedEvent> {
         transaction_count: word_u64(&words[3], "transaction count")?,
         batch_commitment: words[4].clone(),
         block_number: parse_hex_u64(&log.block_number, "log block")?,
+        block_hash: normalize_root(&log.block_hash),
         tx_hash: log.transaction_hash.to_ascii_lowercase(),
+        log_index: u32::try_from(parse_hex_u64(&log.log_index, "log index")?)?,
     })
 }
 

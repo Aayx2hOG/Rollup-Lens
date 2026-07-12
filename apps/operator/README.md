@@ -8,8 +8,14 @@ The operator closes the loop between the transaction pool and
 3. export its persisted validity witness
 4. generate an SP1 Groth16 artifact
 5. submit the proof through `settlement-client --no-persist`
-6. scan confirmed `BatchFinalized` logs and verify every root against Postgres
-7. persist finality and receipt metadata from the authoritative L1 event
+6. scan `BatchFinalized` logs through the L1 `safe` tag and verify every root against Postgres
+7. persist safe/finalized metadata from the authoritative L1 event
+
+Batch finality is driven by the execution client's `safe` and `finalized` block
+tags, not by a hand-picked confirmation depth. The operator stores every
+observed batch finalization event with its L1 block hash, transaction hash, and
+log index, rescans a trailing window, and orphans non-finalized events if the
+canonical block hash changes.
 
 When `L1_DEPOSIT_INBOX` is configured, the same lifecycle tick also scans
 `DepositAccepted` logs from `L1DepositInbox` and persists canonical L1 deposits
@@ -48,6 +54,7 @@ export ROLLUP_SETTLEMENT_CONTRACT=0x...
 export EVM_PRIVATE_KEY=0x...
 export EVM_DEPLOYMENT_BLOCK=0
 export EVM_CONFIRMATIONS=6
+export L1_BATCH_REORG_LOOKBACK=64
 export L1_DEPOSIT_INBOX=0x...
 export L1_DEPOSIT_DEPLOYMENT_BLOCK=0
 export L1_DEPOSIT_REORG_LOOKBACK=12
@@ -107,10 +114,12 @@ deployed database. If the deployed URL uses a transaction pooler, also set
 a persistent session. When both `DATABASE_URL` and `NEON_DATABASE_URL` are set,
 the operator deliberately prefers `DATABASE_URL`.
 
-For Anvil, use `EVM_CONFIRMATIONS=0`. In production, set
+For Anvil, use `EVM_CONFIRMATIONS=0` for deposit indexing. In production, set
 `EVM_DEPLOYMENT_BLOCK` to the settlement contract's deployment block and
-`L1_DEPOSIT_DEPLOYMENT_BLOCK` to the deposit inbox deployment block. Omit
-`L1_DEPOSIT_INBOX` when a deployment does not have an inbox yet.
+`L1_DEPOSIT_DEPLOYMENT_BLOCK` to the deposit inbox deployment block. The L1 RPC
+used by the operator must support `eth_getBlockByNumber` with `safe` and
+`finalized` tags. Omit `L1_DEPOSIT_INBOX` when a deployment does not have an
+inbox yet.
 
 Proof artifacts are retained under `operator-artifacts/` by default. Move the
 directory with `OPERATOR_ARTIFACT_DIR`; it should not be committed.
@@ -119,15 +128,19 @@ directory with `OPERATOR_ARTIFACT_DIR`; it should not be committed.
 
 The submission client uses `--no-persist`: a successful broadcast is only an
 attempted transition. A batch becomes finalized in Postgres after the indexer
-observes a sufficiently confirmed event, fetches its successful receipt, and
-matches its batch number, roots, commitments, and transaction count to local
-data.
+observes the matching event at or below the RPC `finalized` block, fetches its
+successful receipt, and matches its batch number, roots, commitments, and
+transaction count to local data.
 
-The checkpoint advances only after every event in a scanned range is validated
-and applied. Restarting resumes from that checkpoint. Confirmation depth
-protects against ordinary shallow reorgs; after a reorg deeper than
-`EVM_CONFIRMATIONS`, rewind the checkpoint manually and reconcile affected
-batch rows.
+The batch checkpoint advances only after every event in a scanned range is
+validated and applied. Restarting resumes from that checkpoint, but each tick
+rescans the last `L1_BATCH_REORG_LOOKBACK` blocks before the checkpoint. Events
+below the `safe` tag are projected as safe settlement evidence. A batch is marked
+`finalized` in Postgres only after the event's block is at or below the RPC
+`finalized` tag and its stored block hash still matches canonical history.
+Non-finalized events whose block hash changes, or whose log is reported with
+`removed: true`, are marked `orphaned` and their projected batch settlement
+metadata is unwound.
 
 Deposit indexing deliberately rescans the last `L1_DEPOSIT_REORG_LOOKBACK`
 blocks before the checkpoint on every tick. Exact repeats only update

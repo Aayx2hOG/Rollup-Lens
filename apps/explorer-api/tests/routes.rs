@@ -663,6 +663,9 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0009_eip712_ethereum_accounts/migration.sql"),
     include_str!("../../../prisma/migrations/0010_l1_deposits/migration.sql"),
     include_str!("../../../prisma/migrations/0011_deterministic_deposit_execution/migration.sql"),
+    include_str!("../../../prisma/migrations/0012_l2_withdrawals/migration.sql"),
+    include_str!("../../../prisma/migrations/0013_jobs_and_alerts/migration.sql"),
+    include_str!("../../../prisma/migrations/0014_reorg_safe_batch_finality/migration.sql"),
 ];
 
 fn optional_test_database_url() -> Option<String> {

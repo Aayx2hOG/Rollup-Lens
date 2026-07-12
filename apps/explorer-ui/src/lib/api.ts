@@ -107,6 +107,9 @@ export type RollupBatchSummary = {
   l1_finalize_tx_hash: string | null;
   l1_finalized_at: string | null;
   l1_finalize_block_number: number | null;
+  l1_finalize_block_hash: string | null;
+  l1_finalize_log_index: number | null;
+  l1_finality_status: string | null;
   l1_finalize_gas_used: number | null;
   l1_finalize_receipt: unknown | null;
 };

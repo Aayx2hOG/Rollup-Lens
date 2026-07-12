@@ -430,6 +430,9 @@ struct RollupBatchSummary {
     l1_finalize_tx_hash: Option<String>,
     l1_finalized_at: Option<String>,
     l1_finalize_block_number: Option<u64>,
+    l1_finalize_block_hash: Option<String>,
+    l1_finalize_log_index: Option<i32>,
+    l1_finality_status: Option<String>,
     l1_finalize_gas_used: Option<u64>,
     l1_finalize_receipt: Option<Value>,
 }
@@ -1046,7 +1049,11 @@ async fn rollup_batch_withdrawal_proof(
     cached_json(
         state,
         format!("rollup:batches:{batch_number}:withdrawals:{withdrawal_hash}:proof"),
-        |source| async move { source.withdrawal_claim_proof(batch_number, &withdrawal_hash).await },
+        |source| async move {
+            source
+                .withdrawal_claim_proof(batch_number, &withdrawal_hash)
+                .await
+        },
     )
     .await
 }
@@ -1720,8 +1727,7 @@ impl DbSource {
         .await
         .map_err(database_error)?;
 
-        if pending_rows.is_empty() && executable_deposits.is_empty() && withdrawal_rows.is_empty()
-        {
+        if pending_rows.is_empty() && executable_deposits.is_empty() && withdrawal_rows.is_empty() {
             return Err(ApiError::BadRequest(
                 "no pending transactions, withdrawals, or confirmed deposits to sequence"
                     .to_string(),
@@ -2030,7 +2036,11 @@ impl DbSource {
             .into_iter()
             .map(job_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(page_from_items(items, usize_from_i64(total, "job count")?, page))
+        Ok(page_from_items(
+            items,
+            usize_from_i64(total, "job count")?,
+            page,
+        ))
     }
 
     async fn alerts(&self, page: PageParams) -> Result<Page<SystemAlertView>, ApiError> {
@@ -2064,7 +2074,11 @@ impl DbSource {
             .into_iter()
             .map(system_alert_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(page_from_items(items, usize_from_i64(total, "alert count")?, page))
+        Ok(page_from_items(
+            items,
+            usize_from_i64(total, "alert count")?,
+            page,
+        ))
     }
 
     async fn rollup_batches(&self, page: PageParams) -> Result<Page<RollupBatchSummary>, ApiError> {
@@ -2101,6 +2115,9 @@ impl DbSource {
                 l1_finalize_tx_hash,
                 l1_finalized_at::text AS l1_finalized_at,
                 l1_finalize_block_number,
+                l1_finalize_block_hash,
+                l1_finalize_log_index,
+                l1_finality_status,
                 l1_finalize_gas_used,
                 l1_finalize_receipt
             FROM rollup_batches
@@ -2158,6 +2175,9 @@ impl DbSource {
                 l1_finalize_tx_hash,
                 l1_finalized_at::text AS l1_finalized_at,
                 l1_finalize_block_number,
+                l1_finalize_block_hash,
+                l1_finalize_log_index,
+                l1_finality_status,
                 l1_finalize_gas_used,
                 l1_finalize_receipt
             FROM rollup_batches
@@ -2249,12 +2269,17 @@ impl DbSource {
         let mut target_index = None;
         let mut leaf_hashes = Vec::with_capacity(batch.withdrawals.len());
         for (index, withdrawal) in batch.withdrawals.iter().enumerate() {
-            if withdrawal.hash.eq_ignore_ascii_case(normalized_withdrawal_hash) {
+            if withdrawal
+                .hash
+                .eq_ignore_ascii_case(normalized_withdrawal_hash)
+            {
                 target_index = Some(index);
             }
-            leaf_hashes.push(withdrawal_leaf_hash(&withdrawal.withdrawal).map_err(|error| {
-                ApiError::InvalidIndexedData(format!("invalid withdrawal leaf: {error}"))
-            })?);
+            leaf_hashes.push(
+                withdrawal_leaf_hash(&withdrawal.withdrawal).map_err(|error| {
+                    ApiError::InvalidIndexedData(format!("invalid withdrawal leaf: {error}"))
+                })?,
+            );
         }
         let target_index = target_index.ok_or_else(|| {
             ApiError::NotFound(format!(
@@ -2542,6 +2567,9 @@ impl DbSource {
                         l1_finalize_tx_hash,
                         l1_finalized_at::text AS l1_finalized_at,
                         l1_finalize_block_number,
+                        l1_finalize_block_hash,
+                        l1_finalize_log_index,
+                        l1_finality_status,
                         l1_finalize_gas_used,
                         l1_finalize_receipt
                     "#,
@@ -2606,6 +2634,7 @@ impl DbSource {
                             l1_finalize_tx_hash = $4,
                             l1_finalized_at = COALESCE(l1_finalized_at, now()),
                             l1_finalize_block_number = $5,
+                            l1_finality_status = 'finalized',
                             l1_finalize_gas_used = $6,
                             l1_finalize_receipt = $7
                         WHERE batch_number = $1
@@ -2636,6 +2665,9 @@ impl DbSource {
                             l1_finalize_tx_hash,
                             l1_finalized_at::text AS l1_finalized_at,
                             l1_finalize_block_number,
+                            l1_finalize_block_hash,
+                            l1_finalize_log_index,
+                            l1_finality_status,
                             l1_finalize_gas_used,
                             l1_finalize_receipt
                         "#,
@@ -3138,7 +3170,7 @@ async fn append_rollup_batch_tx(
         )?)
         .execute(&mut **tx)
         .await
-            .map_err(database_error)?;
+        .map_err(database_error)?;
     }
     for (withdrawal_index, withdrawal) in block.withdrawals.iter().enumerate() {
         let hash = withdrawal_hash(withdrawal);
@@ -3192,6 +3224,9 @@ async fn append_rollup_batch_tx(
         l1_finalize_tx_hash: None,
         l1_finalized_at: None,
         l1_finalize_block_number: None,
+        l1_finalize_block_hash: None,
+        l1_finalize_log_index: None,
+        l1_finality_status: None,
         l1_finalize_gas_used: None,
         l1_finalize_receipt: None,
     }))
@@ -3671,6 +3706,9 @@ fn rollup_batch_summary_from_row(
             .get::<Option<i64>, _>("l1_finalize_block_number")
             .map(|block_number| from_i64(block_number, "L1 finalize block number"))
             .transpose()?,
+        l1_finalize_block_hash: row.get("l1_finalize_block_hash"),
+        l1_finalize_log_index: row.get("l1_finalize_log_index"),
+        l1_finality_status: row.get("l1_finality_status"),
         l1_finalize_gas_used: row
             .get::<Option<i64>, _>("l1_finalize_gas_used")
             .map(|gas_used| from_i64(gas_used, "L1 finalize gas used"))
@@ -3957,6 +3995,9 @@ mod tests {
             l1_finalize_tx_hash: None,
             l1_finalized_at: None,
             l1_finalize_block_number: None,
+            l1_finalize_block_hash: None,
+            l1_finalize_log_index: None,
+            l1_finality_status: None,
             l1_finalize_gas_used: None,
             l1_finalize_receipt: None,
         };

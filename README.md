@@ -53,7 +53,7 @@ plus the external L1 RPC/network:
    `validity-prover` and `settlement-client` as child processes. It connects
    directly to PostgreSQL for claims, lifecycle state, and `LISTEN`; calls the
    Explorer API for sequencing and immutable witness exports; and calls the EVM
-   RPC to read contract state, submit proofs, and index confirmed events.
+   RPC to read contract state, submit proofs, and index safe/finalized events.
 5. **External EVM RPC and L1 contracts** provide the authoritative settlement
    state. `ValidityRollupSettlement` verifies each SP1 proof through its
    configured verifier and emits `BatchFinalized`.
@@ -74,19 +74,13 @@ See the expanded
 
 ## Setup
 
-Start Postgres:
-
-```bash
-bun run db:up
-```
-
 Create `prisma/.env`:
 
 ```bash
 cp prisma/.env.example prisma/.env
 ```
 
-For the local container above:
+For a local Postgres listening on `localhost:5432`:
 
 ```env
 DATABASE_URL="postgresql://postgres:postgres@localhost:5432/zk_rollup"
@@ -98,9 +92,7 @@ non-pooler connection string from Neon's Connect dialog for
 `DIRECT_DATABASE_URL`. Prisma migrations prefer the direct URL; the running API
 continues to use the pooled URL.
 
-`bun run db:up` and `bun run db:down` are only for the optional local Docker
-database. They are not needed when `prisma/.env` points to Neon. Check the
-configured database without changing it:
+Check the configured database without changing it:
 
 ```bash
 bun run db:status
@@ -136,7 +128,6 @@ L2 transfers, sequence batches, and run mock operator tests. The basic explorer
 demo does not require the full prover.
 
 ```bash
-bun run db:up
 bun run db:migrate
 cargo run -p explorer-api -- --bind 127.0.0.1:3000
 bun run --cwd apps/explorer-ui dev
@@ -306,7 +297,8 @@ transactions arrive.
 After deploying `ValidityRollupSettlement`, the operator runs the complete
 batch lifecycle continuously. It sequences pending transfers, proves only the
 batch currently expected by the L1 contract, submits it, and derives finality
-from confirmed `BatchFinalized` events whose commitments match Postgres.
+from `BatchFinalized` events whose commitments match Postgres and whose L1
+blocks have reached the RPC `safe` or `finalized` tags.
 
 See [`apps/operator/README.md`](apps/operator/README.md) for configuration and
 failure semantics.
