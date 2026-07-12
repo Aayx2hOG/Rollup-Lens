@@ -1,7 +1,13 @@
-# ZK Rollup Portfolio
+# RollupLens
 
-Rust-first rollup infrastructure project with a Postgres-backed execution,
-indexing, explorer, and sequencing path.
+RollupLens is a Rust-based rollup lifecycle explorer. It demonstrates how
+wallet-signed transactions, L1 deposits, L2 sequencing, batch commitments, and
+optional proof/settlement flows fit together. The hosted demo is educational
+and testnet-focused; full proving requires heavier compute.
+
+This repository is an educational infrastructure prototype, not a public
+production L2, a real bridge for user funds, or a trustless live network. Use
+local chains and testnets only.
 
 ## Workspace
 
@@ -31,7 +37,7 @@ in Postgres, not in local JSON files.
 
 ## System Design
 
-The production-shaped topology has four application/data server boundaries,
+The deployment-shaped topology has four application/data server boundaries,
 plus the external L1 RPC/network:
 
 1. **Web server or CDN** serves the compiled explorer UI. An EVM wallet signs
@@ -99,6 +105,59 @@ configured database without changing it:
 ```bash
 bun run db:status
 ```
+
+## Demo and Developer Modes
+
+### Hosted Demo Mode
+
+Use this mode for a public educational demo. The UI runs on Vercel, the API can
+run on Render, Postgres can run on Neon, and the deposit indexer can run from
+GitHub Actions every five minutes. This mode prioritizes readable lifecycle
+evidence over full proof generation.
+
+Required pieces:
+
+```text
+Vercel: explorer UI
+Render: explorer API
+Neon: Postgres
+GitHub Actions: cargo run -p operator -- --once --index-deposits-only
+```
+
+Configure the scheduled indexer with `DATABASE_URL`, `EVM_RPC_URL`,
+`L1_DEPOSIT_INBOX`, and `L1_DEPOSIT_DEPLOYMENT_BLOCK` secrets. It scans deposit
+logs only; it does not sequence, prove, submit settlement transactions, or need
+`EVM_PRIVATE_KEY`.
+
+### Local Developer Mode
+
+Use this mode to run the DB/API/UI, connect a wallet, inspect deposits, submit
+L2 transfers, sequence batches, and run mock operator tests. The basic explorer
+demo does not require the full prover.
+
+```bash
+bun run db:up
+bun run db:migrate
+cargo run -p explorer-api -- --bind 127.0.0.1:3000
+bun run --cwd apps/explorer-ui dev
+bun run operator:index-deposits:local
+```
+
+`operator:index-deposits:local` runs one lightweight deposit indexing tick.
+
+### Full Proof Mode
+
+Use this mode only when you need end-to-end settlement evidence. It requires an
+Anvil or testnet RPC, deployed contracts, release binaries, the full operator,
+and SP1 Groth16 proving resources.
+
+```bash
+bun run settlement:deploy:local
+bun run operator:local
+```
+
+The full proof path can be RAM-heavy because it invokes
+`validity-prover groth16`.
 
 Do not run integration tests against the deployed application's production
 branch. Create a separate Neon test branch, then pass its connection string

@@ -1,0 +1,27 @@
+name: Deposit indexer
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  index-deposits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      EVM_RPC_URL: ${{ secrets.EVM_RPC_URL }}
+      L1_DEPOSIT_INBOX: ${{ secrets.L1_DEPOSIT_INBOX }}
+      L1_DEPOSIT_DEPLOYMENT_BLOCK: ${{ secrets.L1_DEPOSIT_DEPLOYMENT_BLOCK }}
+      L1_DEPOSIT_REORG_LOOKBACK: ${{ vars.L1_DEPOSIT_REORG_LOOKBACK || '12' }}
+      EVM_CONFIRMATIONS: ${{ vars.EVM_CONFIRMATIONS || '6' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Index L1 deposits once
+        run: cargo run -p operator -- --once --index-deposits-only

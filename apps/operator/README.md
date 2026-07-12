@@ -81,6 +81,26 @@ bun run operator:local
 This writes the ignored, owner-readable `.env.operator.local` file used by
 `operator:local`. See the root README for prerequisites and generated values.
 
+## Deposit index-only mode
+
+For hosted demos, RollupLens can index `L1DepositInbox` evidence without running
+the sequencer, prover, or settlement client:
+
+```bash
+bun run operator:index-deposits:local
+```
+
+The underlying command is:
+
+```bash
+cargo run -p operator -- --once --index-deposits-only
+```
+
+This mode requires `DATABASE_URL`, `EVM_RPC_URL`, `L1_DEPOSIT_INBOX`, and
+`L1_DEPOSIT_DEPLOYMENT_BLOCK`. It does not require `EVM_PRIVATE_KEY` or
+`ROLLUP_SETTLEMENT_CONTRACT`, and it is the path used by the scheduled GitHub
+Actions deposit indexer.
+
 Use `DATABASE_URL` for local Docker Postgres and `NEON_DATABASE_URL` for the
 deployed database. If the deployed URL uses a transaction pooler, also set
 `DIRECT_DATABASE_URL` to a direct endpoint because PostgreSQL `LISTEN` requires

@@ -24,6 +24,9 @@ struct Args {
     /// Run one lifecycle tick and exit without starting the polling/listener loop.
     #[arg(long, env = "OPERATOR_ONCE")]
     once: bool,
+    /// Only index L1DepositInbox logs and skip sequencing, proving, and settlement.
+    #[arg(long, env = "OPERATOR_INDEX_DEPOSITS_ONLY")]
+    index_deposits_only: bool,
     #[arg(long, env = "DATABASE_URL")]
     database_url: Option<String>,
     /// Deployed Postgres URL used when DATABASE_URL is not set.
@@ -40,7 +43,7 @@ struct Args {
     #[arg(long, env = "EVM_RPC_URL")]
     rpc_url: String,
     #[arg(long, env = "ROLLUP_SETTLEMENT_CONTRACT")]
-    contract: String,
+    contract: Option<String>,
     /// Optional L1DepositInbox contract to index into l1_deposits.
     #[arg(long, env = "L1_DEPOSIT_INBOX")]
     l1_deposit_inbox: Option<String>,
@@ -49,7 +52,7 @@ struct Args {
     #[arg(long, env = "L1_DEPOSIT_REORG_LOOKBACK", default_value_t = 12)]
     l1_deposit_reorg_lookback: u64,
     #[arg(long, env = "EVM_PRIVATE_KEY")]
-    private_key: String,
+    private_key: Option<String>,
     #[arg(long, env = "EVM_DEPLOYMENT_BLOCK", default_value_t = 0)]
     deployment_block: u64,
     #[arg(long, env = "EVM_CONFIRMATIONS", default_value_t = 6)]
@@ -84,11 +87,11 @@ struct Operator {
     client: Client,
     api_url: String,
     rpc_url: String,
-    contract: String,
+    contract: Option<String>,
     l1_deposit_inbox: Option<String>,
     l1_deposit_deployment_block: u64,
     l1_deposit_reorg_lookback: u64,
-    private_key: String,
+    private_key: Option<String>,
     deployment_block: u64,
     confirmations: u64,
     batch_limit: usize,
@@ -178,9 +181,22 @@ struct DepositEvent {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    validate_address(&args.contract)?;
+    if let Some(contract) = &args.contract {
+        validate_address(contract)?;
+    }
     if let Some(inbox) = &args.l1_deposit_inbox {
         validate_address(inbox)?;
+    }
+    if args.index_deposits_only && args.l1_deposit_inbox.is_none() {
+        bail!("--index-deposits-only requires --l1-deposit-inbox or L1_DEPOSIT_INBOX");
+    }
+    if !args.index_deposits_only {
+        if args.contract.is_none() {
+            bail!("set ROLLUP_SETTLEMENT_CONTRACT or pass --contract");
+        }
+        if args.private_key.is_none() {
+            bail!("set EVM_PRIVATE_KEY or pass --private-key");
+        }
     }
     if args.poll_seconds == 0 || args.batch_limit == 0 || args.max_attempts < 1 {
         bail!("poll seconds, batch limit, and max attempts must be positive");
@@ -206,7 +222,7 @@ async fn main() -> Result<()> {
         client,
         api_url: args.api_url.trim_end_matches('/').to_string(),
         rpc_url: args.rpc_url,
-        contract: args.contract.to_ascii_lowercase(),
+        contract: args.contract.map(|address| address.to_ascii_lowercase()),
         l1_deposit_inbox: args
             .l1_deposit_inbox
             .map(|address| address.to_ascii_lowercase()),
@@ -227,9 +243,42 @@ async fn main() -> Result<()> {
     };
     fs::create_dir_all(&operator.artifact_dir).await?;
 
+    if args.index_deposits_only && args.once {
+        operator.index_deposit_events().await?;
+        return Ok(());
+    }
+
     if args.once {
         operator.tick().await?;
         return Ok(());
+    }
+
+    if args.index_deposits_only {
+        println!(
+            "deposit indexer started for chain {} inbox {} with {} confirmations",
+            operator.chain_id,
+            operator
+                .l1_deposit_inbox
+                .as_deref()
+                .unwrap_or("unconfigured"),
+            operator.confirmations,
+        );
+        let mut interval = tokio::time::interval(Duration::from_secs(args.poll_seconds));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    println!("deposit indexer stopped");
+                    return Ok(());
+                }
+                _ = interval.tick() => {
+                    if let Err(error) = operator.index_deposit_events().await {
+                        eprintln!("deposit indexer tick failed: {error:#}");
+                        operator.record_error(&error).await;
+                    }
+                }
+            }
+        }
     }
 
     let listener_database_url = args.direct_database_url.as_deref().unwrap_or(&database_url);
@@ -248,7 +297,7 @@ async fn main() -> Result<()> {
     println!(
         "operator started for chain {} contract {} with {} confirmations; subscribed to {} and {}",
         operator.chain_id,
-        operator.contract,
+        operator.settlement_contract()?,
         operator.confirmations,
         TRANSACTION_PENDING_CHANNEL,
         WORK_AVAILABLE_CHANNEL
@@ -292,6 +341,18 @@ async fn main() -> Result<()> {
 }
 
 impl Operator {
+    fn settlement_contract(&self) -> Result<&str> {
+        self.contract
+            .as_deref()
+            .context("settlement contract is not configured")
+    }
+
+    fn settlement_private_key(&self) -> Result<&str> {
+        self.private_key
+            .as_deref()
+            .context("EVM private key is not configured")
+    }
+
     async fn tick(&self) -> Result<()> {
         self.index_finalized_events().await?;
         self.index_deposit_events().await?;
@@ -429,6 +490,8 @@ impl Operator {
     }
 
     async fn submit_proof(&self, batch: &ClaimedBatch) -> Result<()> {
+        let contract = self.settlement_contract()?;
+        let private_key = self.settlement_private_key()?;
         let proof_path = self
             .artifact_dir
             .join(format!("batch-{}-proof.json", batch.batch_number));
@@ -439,9 +502,9 @@ impl Operator {
                 .arg("--rpc-url")
                 .arg(&self.rpc_url)
                 .arg("--contract")
-                .arg(&self.contract)
+                .arg(contract)
                 .arg("--private-key")
-                .arg(&self.private_key)
+                .arg(private_key)
                 .arg("--cast-bin")
                 .arg(&self.cast_bin)
                 .arg("--no-persist")
@@ -466,11 +529,12 @@ impl Operator {
     }
 
     async fn onchain_next_batch(&self) -> Result<u64> {
+        let contract = self.settlement_contract()?;
         let value: String = rpc(
             &self.client,
             &self.rpc_url,
             "eth_call",
-            json!([{"to": self.contract, "data": "0xc0decb36"}, "latest"]),
+            json!([{"to": contract, "data": "0xc0decb36"}, "latest"]),
         )
         .await
         .context("failed to read settlement nextBatchNumber")?;
@@ -561,6 +625,7 @@ impl Operator {
     }
 
     async fn index_finalized_events(&self) -> Result<()> {
+        let contract = self.settlement_contract()?;
         let head = parse_hex_u64(
             &rpc::<String>(&self.client, &self.rpc_url, "eth_blockNumber", json!([])).await?,
             "head block",
@@ -578,7 +643,7 @@ impl Operator {
             "#,
         )
         .bind(i64::try_from(self.chain_id)?)
-        .bind(&self.contract)
+        .bind(contract)
         .bind(i64::try_from(self.deployment_block)?)
         .fetch_one(&self.pool)
         .await?;
@@ -590,7 +655,7 @@ impl Operator {
                 &self.rpc_url,
                 "eth_getLogs",
                 json!([{
-                    "address": self.contract,
+                    "address": contract,
                     "fromBlock": hex_u64(from),
                     "toBlock": hex_u64(to),
                     "topics": [BATCH_FINALIZED_TOPIC]
@@ -608,7 +673,7 @@ impl Operator {
                 "UPDATE l1_indexer_checkpoints SET next_block = $3, updated_at = now() WHERE chain_id = $1 AND contract_address = $2",
             )
             .bind(i64::try_from(self.chain_id)?)
-            .bind(&self.contract)
+            .bind(contract)
             .bind(i64::try_from(to.saturating_add(1))?)
             .execute(&self.pool)
             .await?;
@@ -771,6 +836,7 @@ impl Operator {
     }
 
     async fn apply_finalized_event(&self, event: FinalizedEvent) -> Result<()> {
+        let contract = self.settlement_contract()?;
         let row = sqlx::query(
             r#"
             SELECT prev_state_root, new_state_root, transaction_root, block_hash_root,
@@ -823,7 +889,7 @@ impl Operator {
                 .as_deref()
                 .map(str::to_ascii_lowercase)
                 .as_deref()
-                != Some(self.contract.as_str())
+                != Some(contract)
             || parse_hex_u64(&receipt.block_number, "receipt block")? != event.block_number
         {
             bail!("invalid receipt for finalized batch {}", event.batch_number);
@@ -854,7 +920,7 @@ impl Operator {
         )
         .bind(i64::try_from(event.batch_number)?)
         .bind(i64::try_from(self.chain_id)?)
-        .bind(&self.contract)
+        .bind(contract)
         .bind(&event.tx_hash)
         .bind(i64::try_from(event.block_number)?)
         .bind(i64::try_from(gas_used)?)

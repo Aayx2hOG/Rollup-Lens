@@ -35,6 +35,7 @@ import {
   type RollupBatchSummary,
   type SearchResult,
   type Transfer,
+  type TransactionView,
   type TransactionPoolEntry,
 } from "./lib/api";
 import { cn, formatNumber, pluralize, shortHash } from "./lib/utils";
@@ -56,6 +57,25 @@ import { MovingBorderButton } from "./components/aceternity/moving-border";
 
 const tabs = ["Overview", "Deposits", "Send", "Transactions", "Settlement", "Prove", "Operate"] as const;
 type Tab = (typeof tabs)[number];
+
+type NavItem = {
+  label: string;
+  tab: Tab;
+};
+
+const primaryNav: NavItem[] = [
+  { label: "Overview", tab: "Overview" },
+  { label: "Lifecycle", tab: "Transactions" },
+  { label: "Deposits", tab: "Deposits" },
+  { label: "Transfers", tab: "Send" },
+  { label: "Batches", tab: "Settlement" },
+];
+
+const advancedNav: NavItem[] = [
+  { label: "Prove", tab: "Prove" },
+  { label: "Settlement", tab: "Settlement" },
+  { label: "Operate", tab: "Operate" },
+];
 
 type TransactionReferenceFile = {
   format: "rolluplens.transaction-reference";
@@ -297,6 +317,7 @@ export function App() {
         />
       )}
       {isStale && <StaleDataNotice message={connectionMessage} />}
+      <DemoWarning />
 
       <AnimatePresence>
         {(searchResult || searchError) && (
@@ -333,9 +354,17 @@ export function App() {
         <div className="grid gap-5">
           <PageIntro
             icon={<Blocks className="h-5 w-5" />}
-            title="Transactions"
-            description="Inspect transfers, their L2 inclusion, proof batch, and L1 settlement progress."
+            title="Lifecycle"
+            description="Explore wallet signatures and L1 deposits through L2 sequencing, batches, commitments, and optional settlement evidence."
             meta={`${blockItems.length}/${blockTotal} blocks`}
+          />
+          <LifecycleExplorer
+            deposits={l1Deposits.data?.items ?? []}
+            pool={transactionPool.data?.items ?? []}
+            blocks={blockItems}
+            batches={batchItems}
+            selectedTx={selectedTx}
+            selectedTransaction={transaction.data}
           />
           <BlocksView
             blocks={blockItems}
@@ -562,26 +591,49 @@ function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (t
       className="order-3 flex w-full min-w-0 items-center gap-1 overflow-x-auto pt-2 lg:order-none lg:w-auto lg:pt-0"
       aria-label="Primary navigation"
     >
-      {tabs.map((tab) => (
+      {primaryNav.map((item) => (
         <button
-          key={tab}
-          onClick={() => onSelectTab(tab)}
-          aria-current={activeTab === tab ? "page" : undefined}
+          key={item.label}
+          onClick={() => onSelectTab(item.tab)}
+          aria-current={activeTab === item.tab ? "page" : undefined}
           className={cn(
             "relative h-9 shrink-0 rounded-md px-2.5 text-sm text-white/50 transition-colors hover:bg-white/[0.05] hover:text-white",
-            activeTab === tab && "text-white",
+            activeTab === item.tab && "text-white",
           )}
         >
-          {activeTab === tab && (
+          {activeTab === item.tab && (
             <motion.span
               layoutId="active-header-tab"
               className="absolute inset-x-2.5 bottom-0 h-px bg-mint"
               transition={{ type: "spring", bounce: 0.18, duration: 0.45 }}
             />
           )}
-          <span className="relative">{tab}</span>
+          <span className="relative">{item.label}</span>
         </button>
       ))}
+      <div className="ml-1 flex shrink-0 items-center gap-1 border-l border-white/10 pl-2">
+        <span className="px-1 text-xs uppercase tracking-[0.14em] text-white/28">Advanced</span>
+        {advancedNav.map((item) => (
+          <button
+            key={item.label}
+            onClick={() => onSelectTab(item.tab)}
+            aria-current={activeTab === item.tab ? "page" : undefined}
+            className={cn(
+              "relative h-9 shrink-0 rounded-md px-2.5 text-sm text-white/42 transition-colors hover:bg-white/[0.05] hover:text-white",
+              activeTab === item.tab && "text-white",
+            )}
+          >
+            {activeTab === item.tab && (
+              <motion.span
+                layoutId="active-header-tab"
+                className="absolute inset-x-2.5 bottom-0 h-px bg-amber"
+                transition={{ type: "spring", bounce: 0.18, duration: 0.45 }}
+              />
+            )}
+            <span className="relative">{item.label}</span>
+          </button>
+        ))}
+      </div>
     </nav>
   );
 }
@@ -670,6 +722,17 @@ function StaleDataNotice({ message }: { message: string }) {
   );
 }
 
+function DemoWarning() {
+  return (
+    <Panel className="bg-amber/[0.08] p-3">
+      <div className="flex items-start gap-2 text-sm text-amber">
+        <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>Educational prototype. Testnet/local only. Do not use with real funds.</span>
+      </div>
+    </Panel>
+  );
+}
+
 function SearchBox({ onSearch, pending }: { onSearch: (query: string) => void; pending: boolean }) {
   const [value, setValue] = useState("");
 
@@ -722,6 +785,197 @@ function summarizeResult(result: SearchResult | null) {
   return `${result.data.hash} / block ${result.data.block_height ?? "pending"}`;
 }
 
+function LifecycleExplorer({
+  deposits,
+  pool,
+  blocks,
+  batches,
+  selectedTx,
+  selectedTransaction,
+}: {
+  deposits: L1Deposit[];
+  pool: TransactionPoolEntry[];
+  blocks: BlockSummary[];
+  batches: RollupBatchSummary[];
+  selectedTx: string | null;
+  selectedTransaction?: TransactionView;
+}) {
+  const latestDeposit = deposits[0];
+  const selectedPoolEntry = selectedTx ? pool.find((entry) => entry.hash === selectedTx) : undefined;
+  const latestPoolEntry = selectedPoolEntry ?? pool[0];
+  const transferBlockHeight = selectedTransaction?.block_height ?? latestPoolEntry?.included_block_height ?? null;
+  const transferBatch = transferBlockHeight === null
+    ? undefined
+    : batches.find((batch) => transferBlockHeight >= batch.start_block_height && transferBlockHeight <= batch.end_block_height);
+  const depositBatch = latestDeposit ? batchForDeposit(latestDeposit, batches) : undefined;
+  const latestBlock = transferBlockHeight === null
+    ? blocks[0]
+    : blocks.find((block) => block.height === transferBlockHeight) ?? blocks[0];
+
+  return (
+    <Panel className="overflow-hidden">
+      <SectionTitle icon={<Activity className="h-4 w-4" />} title="Lifecycle explorer" action="evidence-first view" />
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <LifecycleCard
+            title="Deposit lifecycle"
+            description="An L1 deposit is not spendable on L2 until it is indexed and sequenced into L2 state."
+            steps={[
+              {
+                label: "Wallet submitted L1 tx",
+                complete: Boolean(latestDeposit),
+                detail: latestDeposit?.l1_tx_hash ?? "No indexed deposit visible",
+              },
+              {
+                label: "L1 event indexed",
+                complete: Boolean(latestDeposit),
+                detail: latestDeposit ? `block ${latestDeposit.l1_block_number}` : "Waiting for deposit indexer",
+              },
+              {
+                label: "Deposit credited to L2",
+                complete: latestDeposit?.status === "executed" || latestDeposit?.status === "finalized",
+                detail: latestDeposit ? depositStatusLabel(latestDeposit.status) : "No indexed deposit",
+              },
+              {
+                label: "Included in L2 block",
+                complete: Boolean(depositBatch),
+                detail: depositBatch ? `batch covers blocks ${depositBatch.start_block_height}-${depositBatch.end_block_height}` : "Waiting for sequencing",
+              },
+              {
+                label: "Included in batch",
+                complete: Boolean(depositBatch),
+                detail: depositBatch ? `batch ${depositBatch.batch_number}` : "No batch yet",
+              },
+              {
+                label: "Settled/proved if available",
+                complete: depositBatch?.status === "finalized",
+                detail: depositBatch?.l1_finalize_tx_hash ?? depositBatch?.status ?? "Optional proof path",
+              },
+            ]}
+          />
+          <LifecycleCard
+            title="Transfer lifecycle"
+            description="A transfer begins as an EIP-712 signature, then moves through pool acceptance, sequencing, batching, and optional settlement."
+            steps={[
+              {
+                label: "EIP-712 signed",
+                complete: Boolean(latestPoolEntry || selectedTransaction),
+                detail: latestPoolEntry?.hash ?? selectedTransaction?.hash ?? "No transfer selected",
+              },
+              {
+                label: "Accepted into pool",
+                complete: Boolean(latestPoolEntry),
+                detail: latestPoolEntry?.status ?? "Already indexed or not submitted",
+              },
+              {
+                label: "Sequenced into block",
+                complete: transferBlockHeight !== null,
+                detail: transferBlockHeight === null ? "Waiting for L2 block" : `block ${transferBlockHeight}`,
+              },
+              {
+                label: "Included in batch",
+                complete: Boolean(transferBatch),
+                detail: transferBatch ? `batch ${transferBatch.batch_number}` : "Waiting for batch builder",
+              },
+              {
+                label: "Settled/proved if available",
+                complete: transferBatch?.status === "finalized",
+                detail: transferBatch?.l1_finalize_tx_hash ?? transferBatch?.status ?? "Optional proof path",
+              },
+            ]}
+          />
+        </div>
+        <EvidencePanel
+          deposit={latestDeposit}
+          transfer={selectedTransaction}
+          poolEntry={latestPoolEntry}
+          batch={transferBatch ?? depositBatch ?? batches[0]}
+          block={latestBlock}
+        />
+      </div>
+    </Panel>
+  );
+}
+
+function LifecycleCard({
+  title,
+  description,
+  steps,
+}: {
+  title: string;
+  description: string;
+  steps: Array<{ label: string; complete: boolean; detail: React.ReactNode }>;
+}) {
+  return (
+    <div className="rounded-xl bg-white/[0.025] p-4">
+      <div className="text-sm font-semibold text-white">{title}</div>
+      <div className="mt-1 text-xs leading-5 text-white/46">{description}</div>
+      <div className="mt-4 grid gap-2">
+        {steps.map((step) => (
+          <div key={step.label} className="grid grid-cols-[auto_1fr] gap-3 rounded-lg bg-white/[0.035] p-3">
+            <span className={cn(
+              "mt-0.5 flex h-5 w-5 items-center justify-center rounded-full",
+              step.complete ? "bg-mint/10 text-mint" : "bg-white/[0.05] text-white/36",
+            )}>
+              {step.complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Clock3 className="h-3.5 w-3.5" />}
+            </span>
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-white/78">{step.label}</div>
+              <div className="hash mt-1 text-xs text-white/42">{step.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EvidencePanel({
+  deposit,
+  transfer,
+  poolEntry,
+  batch,
+  block,
+}: {
+  deposit?: L1Deposit;
+  transfer?: TransactionView;
+  poolEntry?: TransactionPoolEntry;
+  batch?: RollupBatchSummary;
+  block?: BlockSummary;
+}) {
+  return (
+    <div className="rounded-xl bg-black/16 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold text-white">Evidence panel</div>
+        <Badge tone={batch?.status === "finalized" ? "good" : "neutral"}>
+          {batch ? settlementStatusLabel(batch.status) : "No batch"}
+        </Badge>
+      </div>
+      <div className="mt-4 grid gap-2">
+        <EvidenceLine label="L1 tx hash" value={deposit?.l1_tx_hash} />
+        <EvidenceLine label="L1 block" value={deposit?.l1_block_number} />
+        <EvidenceLine label="Confirmations" value={deposit?.confirmations} />
+        <EvidenceLine label="Inbox address" value={deposit?.inbox_address ?? l1DepositInboxAddress} />
+        <EvidenceLine label="L2 block height" value={transfer?.block_height ?? poolEntry?.included_block_height ?? block?.height} />
+        <EvidenceLine label="Batch number" value={batch?.batch_number} />
+        <EvidenceLine label="State root" value={batch?.new_state_root ?? block?.state_root} />
+        <EvidenceLine label="Deposit root" value={batch?.deposit_root} />
+        <EvidenceLine label="Transaction root" value={batch?.transaction_root} />
+        <EvidenceLine label="Settlement tx hash" value={batch?.l1_finalize_tx_hash ?? batch?.l1_submit_tx_hash} />
+      </div>
+    </div>
+  );
+}
+
+function EvidenceLine({ label, value }: { label: string; value: React.ReactNode | null | undefined }) {
+  return (
+    <div className="grid gap-1 rounded-lg bg-white/[0.035] px-3 py-2">
+      <div className="text-[0.68rem] uppercase tracking-[0.14em] text-white/32">{label}</div>
+      <div className="hash text-xs text-white/66">{value ?? "not available"}</div>
+    </div>
+  );
+}
+
 function HomePage({
   readStatus,
   summary,
@@ -757,23 +1011,23 @@ function HomePage({
           <div>
             <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-white/48">
               <span className={cn("h-1.5 w-1.5 rounded-full", live ? "bg-mint shadow-[0_0_16px_rgba(88,244,183,0.9)]" : "bg-amber")} />
-              {live ? "Network operational" : readStatusLabel(readStatus)}
+              {live ? "Lifecycle data available" : readStatusLabel(readStatus)}
             </div>
             <h1 className="mt-5 max-w-3xl font-display text-4xl font-normal leading-[1.02] tracking-[-0.025em] text-white sm:text-6xl">
-              Verify the rollup.
-              <span className="block text-white/42">From L2 activity to L1 finality.</span>
+              RollupLens is a rollup lifecycle explorer.
+              <span className="block text-white/42">Follow deposits, sequencing, batches, and settlement evidence.</span>
             </h1>
             <p className="mt-4 max-w-2xl text-sm leading-6 text-white/56 sm:text-base">
-              Search blocks, transactions, and accounts. Track every batch from execution through proof submission and settlement.
+              Inspect how wallet-signed transactions, L1 deposits, L2 sequencing, batch commitments, and optional proof/settlement flows fit together.
             </p>
             <HomeSearch onSearch={onSearch} />
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <Button onClick={() => onNavigate("Transactions")} variant="primary">
-                Explore activity
+                Open lifecycle
                 <ArrowRight className="h-4 w-4" />
               </Button>
               <Button onClick={() => onNavigate("Settlement")}>
-                View settlement
+                View batches
               </Button>
               {readyBatchCount > 0 && (
                 <Button onClick={() => onNavigate("Prove")} variant="ghost" className="text-amber hover:text-amber">
@@ -833,7 +1087,7 @@ function HomePage({
 
         <CardSpotlight className="surface flex min-h-full flex-col rounded-lg p-5">
           <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-white">Settlement snapshot</div>
+          <div className="text-sm font-semibold text-white">Batch evidence snapshot</div>
             {latestBatch && <Badge tone={settlementStatusTone(latestBatch.status)}>{settlementStatusLabel(latestBatch.status)}</Badge>}
           </div>
           {latestBatch ? (
@@ -853,7 +1107,7 @@ function HomePage({
                 variant="ghost"
                 className="mt-auto w-full justify-between px-0 pt-4 hover:bg-transparent hover:text-mint"
               >
-                {latestBatch.status === "built" ? "Open proof workspace" : "Inspect settlement"}
+                {latestBatch.status === "built" ? "Open advanced proof workspace" : "Inspect evidence"}
                 <ArrowRight className="h-4 w-4" />
               </Button>
             </>

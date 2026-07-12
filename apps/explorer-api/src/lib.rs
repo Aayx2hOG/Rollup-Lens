@@ -3942,6 +3942,8 @@ mod tests {
             transaction_count: 4,
             deposit_count: 0,
             deposit_root: "0".repeat(64),
+            withdrawal_count: 0,
+            withdrawal_root: "0".repeat(64),
             first_deposit_id: None,
             last_deposit_id: None,
             status: "built".to_string(),
