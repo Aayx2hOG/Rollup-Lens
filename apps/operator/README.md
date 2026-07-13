@@ -109,16 +109,17 @@ set +a
 cargo run -p operator -- --once --index-deposits-only
 ```
 
-This mode requires `DATABASE_URL`, `EVM_RPC_URL`, `L1_DEPOSIT_INBOX`, and
-`L1_DEPOSIT_DEPLOYMENT_BLOCK`. It does not require `EVM_PRIVATE_KEY` or
-`ROLLUP_SETTLEMENT_CONTRACT`, and it is the path used by the scheduled GitHub
-Actions deposit indexer.
+This mode requires `DATABASE_URL`, `EVM_RPC_URL`, and `L1_DEPOSIT_INBOX`. Set
+`L1_DEPOSIT_DEPLOYMENT_BLOCK` to the inbox deployment block when available; if
+it is omitted, the operator falls back to `EVM_DEPLOYMENT_BLOCK` and then `0`.
+It does not require `EVM_PRIVATE_KEY` or `ROLLUP_SETTLEMENT_CONTRACT`, and it is
+the path used by the scheduled GitHub Actions deposit indexer.
 
 The scheduled `Deposit indexer` workflow requires these repository secrets:
-`DATABASE_URL` or `NEON_DATABASE_URL`, `EVM_RPC_URL`, `L1_DEPOSIT_INBOX`, and
-`L1_DEPOSIT_DEPLOYMENT_BLOCK`. Keep `L1_DEPOSIT_DEPLOYMENT_BLOCK` set to the
-actual inbox deployment block so a hosted run does not accidentally scan from
-genesis on a public RPC.
+`DATABASE_URL` or `NEON_DATABASE_URL`, `EVM_RPC_URL`, and `L1_DEPOSIT_INBOX`.
+Keep `L1_DEPOSIT_DEPLOYMENT_BLOCK` set to the actual inbox deployment block
+when possible so a hosted run does not accidentally scan from genesis on a
+public RPC.
 
 Use `DATABASE_URL` for local Docker Postgres and `NEON_DATABASE_URL` for the
 deployed database. If the deployed URL uses a transaction pooler, also set

@@ -19,6 +19,7 @@ jobs:
       EVM_RPC_URL: ${{ secrets.EVM_RPC_URL }}
       L1_DEPOSIT_INBOX: ${{ secrets.L1_DEPOSIT_INBOX }}
       L1_DEPOSIT_DEPLOYMENT_BLOCK: ${{ secrets.L1_DEPOSIT_DEPLOYMENT_BLOCK }}
+      EVM_DEPLOYMENT_BLOCK: ${{ vars.EVM_DEPLOYMENT_BLOCK || '0' }}
       L1_DEPOSIT_REORG_LOOKBACK: ${{ vars.L1_DEPOSIT_REORG_LOOKBACK || '12' }}
       EVM_CONFIRMATIONS: ${{ vars.EVM_CONFIRMATIONS || '6' }}
     steps:
@@ -43,10 +44,6 @@ jobs:
           if [[ -z "${L1_DEPOSIT_INBOX:-}" ]]; then
             missing+=("L1_DEPOSIT_INBOX")
           fi
-          if [[ -z "${L1_DEPOSIT_DEPLOYMENT_BLOCK:-}" ]]; then
-            missing+=("L1_DEPOSIT_DEPLOYMENT_BLOCK")
-          fi
-
           if ((${#missing[@]} > 0)); then
             printf 'Missing required deposit indexer configuration:\n' >&2
             printf '  - %s\n' "${missing[@]}" >&2
@@ -58,10 +55,17 @@ jobs:
             exit 1
           fi
 
+          if [[ -z "${L1_DEPOSIT_DEPLOYMENT_BLOCK:-}" ]]; then
+            L1_DEPOSIT_DEPLOYMENT_BLOCK="$EVM_DEPLOYMENT_BLOCK"
+            printf 'L1_DEPOSIT_DEPLOYMENT_BLOCK is not set; using EVM_DEPLOYMENT_BLOCK=%s.\n' "$L1_DEPOSIT_DEPLOYMENT_BLOCK"
+          fi
+
           if [[ ! "$L1_DEPOSIT_DEPLOYMENT_BLOCK" =~ ^[0-9]+$ ]]; then
-            printf 'L1_DEPOSIT_DEPLOYMENT_BLOCK must be a non-negative integer.\n' >&2
+            printf 'L1_DEPOSIT_DEPLOYMENT_BLOCK or fallback EVM_DEPLOYMENT_BLOCK must be a non-negative integer.\n' >&2
             exit 1
           fi
+
+          printf 'L1_DEPOSIT_DEPLOYMENT_BLOCK=%s\n' "$L1_DEPOSIT_DEPLOYMENT_BLOCK" >> "$GITHUB_ENV"
 
       - name: Index L1 deposits once
         run: cargo run -p operator -- --once --index-deposits-only
