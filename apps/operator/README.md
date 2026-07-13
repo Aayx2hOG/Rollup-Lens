@@ -114,6 +114,12 @@ This mode requires `DATABASE_URL`, `EVM_RPC_URL`, `L1_DEPOSIT_INBOX`, and
 `ROLLUP_SETTLEMENT_CONTRACT`, and it is the path used by the scheduled GitHub
 Actions deposit indexer.
 
+The scheduled `Deposit indexer` workflow requires these repository secrets:
+`DATABASE_URL` or `NEON_DATABASE_URL`, `EVM_RPC_URL`, `L1_DEPOSIT_INBOX`, and
+`L1_DEPOSIT_DEPLOYMENT_BLOCK`. Keep `L1_DEPOSIT_DEPLOYMENT_BLOCK` set to the
+actual inbox deployment block so a hosted run does not accidentally scan from
+genesis on a public RPC.
+
 Use `DATABASE_URL` for local Docker Postgres and `NEON_DATABASE_URL` for the
 deployed database. If the deployed URL uses a transaction pooler, also set
 `DIRECT_DATABASE_URL` to a direct endpoint because PostgreSQL `LISTEN` requires

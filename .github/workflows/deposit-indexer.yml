@@ -5,12 +5,17 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: deposit-indexer
+  cancel-in-progress: false
+
 jobs:
   index-deposits:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
       EVM_RPC_URL: ${{ secrets.EVM_RPC_URL }}
       L1_DEPOSIT_INBOX: ${{ secrets.L1_DEPOSIT_INBOX }}
       L1_DEPOSIT_DEPLOYMENT_BLOCK: ${{ secrets.L1_DEPOSIT_DEPLOYMENT_BLOCK }}
@@ -22,6 +27,41 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Validate deposit indexer configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=()
+          if [[ -z "${DATABASE_URL:-}" && -z "${NEON_DATABASE_URL:-}" ]]; then
+            missing+=("DATABASE_URL or NEON_DATABASE_URL")
+          fi
+          if [[ -z "${EVM_RPC_URL:-}" ]]; then
+            missing+=("EVM_RPC_URL")
+          fi
+          if [[ -z "${L1_DEPOSIT_INBOX:-}" ]]; then
+            missing+=("L1_DEPOSIT_INBOX")
+          fi
+          if [[ -z "${L1_DEPOSIT_DEPLOYMENT_BLOCK:-}" ]]; then
+            missing+=("L1_DEPOSIT_DEPLOYMENT_BLOCK")
+          fi
+
+          if ((${#missing[@]} > 0)); then
+            printf 'Missing required deposit indexer configuration:\n' >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+          if [[ ! "$L1_DEPOSIT_INBOX" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            printf 'L1_DEPOSIT_INBOX must be a 0x-prefixed 20-byte hex address.\n' >&2
+            exit 1
+          fi
+
+          if [[ ! "$L1_DEPOSIT_DEPLOYMENT_BLOCK" =~ ^[0-9]+$ ]]; then
+            printf 'L1_DEPOSIT_DEPLOYMENT_BLOCK must be a non-negative integer.\n' >&2
+            exit 1
+          fi
 
       - name: Index L1 deposits once
         run: cargo run -p operator -- --once --index-deposits-only

@@ -44,14 +44,14 @@ struct Args {
     #[arg(long = "operator-api-token", env = "OPERATOR_API_TOKEN")]
     operator_token: Option<String>,
     #[arg(long, env = "EVM_RPC_URL")]
-    rpc_url: String,
+    rpc_url: Option<String>,
     #[arg(long, env = "ROLLUP_SETTLEMENT_CONTRACT")]
     contract: Option<String>,
     /// Optional L1DepositInbox contract to index into l1_deposits.
     #[arg(long, env = "L1_DEPOSIT_INBOX")]
     l1_deposit_inbox: Option<String>,
     #[arg(long, env = "L1_DEPOSIT_DEPLOYMENT_BLOCK")]
-    l1_deposit_deployment_block: Option<u64>,
+    l1_deposit_deployment_block: Option<String>,
     #[arg(long, env = "L1_DEPOSIT_REORG_LOOKBACK", default_value_t = 12)]
     l1_deposit_reorg_lookback: u64,
     #[arg(long, env = "EVM_PRIVATE_KEY")]
@@ -203,31 +203,41 @@ struct L1BlockRef {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if let Some(contract) = &args.contract {
+
+    let database_url = non_empty(args.database_url.clone())
+        .or_else(|| non_empty(args.neon_database_url.clone()))
+        .context("set DATABASE_URL for local Docker or NEON_DATABASE_URL for deployment")?;
+    let direct_database_url = non_empty(args.direct_database_url.clone());
+    let rpc_url = non_empty(args.rpc_url.clone()).context("set EVM_RPC_URL or pass --rpc-url")?;
+    let operator_token = non_empty(args.operator_token.clone());
+    let contract = non_empty(args.contract.clone());
+    let l1_deposit_inbox = non_empty(args.l1_deposit_inbox.clone());
+    let private_key = non_empty(args.private_key.clone());
+    let l1_deposit_deployment_block = parse_optional_u64_env(
+        "L1_DEPOSIT_DEPLOYMENT_BLOCK",
+        args.l1_deposit_deployment_block.as_deref(),
+    )?;
+
+    if let Some(contract) = &contract {
         validate_address(contract)?;
     }
-    if let Some(inbox) = &args.l1_deposit_inbox {
+    if let Some(inbox) = &l1_deposit_inbox {
         validate_address(inbox)?;
     }
-    if args.index_deposits_only && args.l1_deposit_inbox.is_none() {
+    if args.index_deposits_only && l1_deposit_inbox.is_none() {
         bail!("--index-deposits-only requires --l1-deposit-inbox or L1_DEPOSIT_INBOX");
     }
     if !args.index_deposits_only {
-        if args.contract.is_none() {
+        if contract.is_none() {
             bail!("set ROLLUP_SETTLEMENT_CONTRACT or pass --contract");
         }
-        if args.private_key.is_none() {
+        if private_key.is_none() {
             bail!("set EVM_PRIVATE_KEY or pass --private-key");
         }
     }
     if args.poll_seconds == 0 || args.batch_limit == 0 || args.max_attempts < 1 {
         bail!("poll seconds, batch limit, and max attempts must be positive");
     }
-    let database_url = args
-        .database_url
-        .clone()
-        .or_else(|| args.neon_database_url.clone())
-        .context("set DATABASE_URL for local Docker or NEON_DATABASE_URL for deployment")?;
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -236,24 +246,20 @@ async fn main() -> Result<()> {
         .context("failed to connect to Postgres")?;
     let client = Client::new();
     let chain_id = parse_hex_u64(
-        &rpc::<String>(&client, &args.rpc_url, "eth_chainId", json!([])).await?,
+        &rpc::<String>(&client, &rpc_url, "eth_chainId", json!([])).await?,
         "chain id",
     )?;
     let operator = Operator {
         pool,
         client,
         api_url: args.api_url.trim_end_matches('/').to_string(),
-        operator_token: args.operator_token.filter(|value| !value.is_empty()),
-        rpc_url: args.rpc_url,
-        contract: args.contract.map(|address| address.to_ascii_lowercase()),
-        l1_deposit_inbox: args
-            .l1_deposit_inbox
-            .map(|address| address.to_ascii_lowercase()),
-        l1_deposit_deployment_block: args
-            .l1_deposit_deployment_block
-            .unwrap_or(args.deployment_block),
+        operator_token,
+        rpc_url,
+        contract: contract.map(|address| address.to_ascii_lowercase()),
+        l1_deposit_inbox: l1_deposit_inbox.map(|address| address.to_ascii_lowercase()),
+        l1_deposit_deployment_block: l1_deposit_deployment_block.unwrap_or(args.deployment_block),
         l1_deposit_reorg_lookback: args.l1_deposit_reorg_lookback,
-        private_key: args.private_key,
+        private_key,
         deployment_block: args.deployment_block,
         confirmations: args.confirmations,
         l1_batch_reorg_lookback: args.l1_batch_reorg_lookback,
@@ -305,7 +311,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let listener_database_url = args.direct_database_url.as_deref().unwrap_or(&database_url);
+    let listener_database_url = direct_database_url.as_deref().unwrap_or(&database_url);
     let mut listener = PgListener::connect(listener_database_url)
         .await
         .context("failed to create Postgres pub-sub listener")?;
@@ -1549,6 +1555,23 @@ fn parse_hex_u64(value: &str, label: &str) -> Result<u64> {
         .with_context(|| format!("invalid {label}: {value}"))
 }
 
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn parse_optional_u64_env(name: &str, value: Option<&str>) -> Result<Option<u64>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    value
+        .parse::<u64>()
+        .map(Some)
+        .with_context(|| format!("{name} must be a non-negative integer"))
+}
+
 fn normalize_root(value: &str) -> String {
     format!("0x{}", value.trim_start_matches("0x").to_ascii_lowercase())
 }
@@ -1663,6 +1686,28 @@ mod tests {
     #[test]
     fn rejects_oversized_abi_integer() {
         assert!(word_u64(&format!("0x01{}", "00".repeat(31)), "number").is_err());
+    }
+
+    #[test]
+    fn normalizes_empty_env_values_to_absent() {
+        assert_eq!(non_empty(None), None);
+        assert_eq!(non_empty(Some("   ".into())), None);
+        assert_eq!(non_empty(Some("  value  ".into())), Some("value".into()));
+    }
+
+    #[test]
+    fn parses_optional_u64_env_after_empty_normalization() {
+        assert_eq!(parse_optional_u64_env("TEST_BLOCK", None).unwrap(), None);
+        assert_eq!(
+            parse_optional_u64_env("TEST_BLOCK", Some("  ")).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_optional_u64_env("TEST_BLOCK", Some("42")).unwrap(),
+            Some(42)
+        );
+        assert!(parse_optional_u64_env("TEST_BLOCK", Some("-1")).is_err());
+        assert!(parse_optional_u64_env("TEST_BLOCK", Some("latest")).is_err());
     }
 
     #[test]
