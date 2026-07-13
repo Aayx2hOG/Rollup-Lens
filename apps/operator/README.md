@@ -111,9 +111,10 @@ cargo run -p operator -- --once --index-deposits-only
 
 This mode requires `DATABASE_URL`, `EVM_RPC_URL`, and `L1_DEPOSIT_INBOX`. Set
 `L1_DEPOSIT_DEPLOYMENT_BLOCK` to the inbox deployment block when available; if
-it is omitted, the operator falls back to `EVM_DEPLOYMENT_BLOCK` and then `0`.
-It does not require `EVM_PRIVATE_KEY` or `ROLLUP_SETTLEMENT_CONTRACT`, and it is
-the path used by the scheduled GitHub Actions deposit indexer.
+it is omitted, the operator starts at the current confirmed L1 head and only
+tracks new deposits going forward. It does not require `EVM_PRIVATE_KEY` or
+`ROLLUP_SETTLEMENT_CONTRACT`, and it is the path used by the scheduled GitHub
+Actions deposit indexer.
 
 The scheduled `Deposit indexer` workflow requires these repository secrets:
 `DATABASE_URL` or `NEON_DATABASE_URL`, `EVM_RPC_URL`, and `L1_DEPOSIT_INBOX`.

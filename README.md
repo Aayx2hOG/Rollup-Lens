@@ -119,9 +119,9 @@ GitHub Actions or another scheduler: lightweight deposit indexer
 Configure the scheduled indexer with `DATABASE_URL` or `NEON_DATABASE_URL`,
 `EVM_RPC_URL`, and `L1_DEPOSIT_INBOX` secrets. Set
 `L1_DEPOSIT_DEPLOYMENT_BLOCK` to the inbox deployment block when available; if
-it is omitted, the workflow falls back to `EVM_DEPLOYMENT_BLOCK` and then `0`.
-It scans deposit logs only; it does not sequence, prove, submit settlement
-transactions, or need `EVM_PRIVATE_KEY`.
+it is omitted, the indexer starts at the current confirmed L1 head and only
+tracks new deposits going forward. It scans deposit logs only; it does not
+sequence, prove, submit settlement transactions, or need `EVM_PRIVATE_KEY`.
 
 ### Local Developer Mode
 

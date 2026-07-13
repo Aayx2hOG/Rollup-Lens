@@ -95,7 +95,7 @@ struct Operator {
     rpc_url: String,
     contract: Option<String>,
     l1_deposit_inbox: Option<String>,
-    l1_deposit_deployment_block: u64,
+    l1_deposit_deployment_block: Option<u64>,
     l1_deposit_reorg_lookback: u64,
     private_key: Option<String>,
     deployment_block: u64,
@@ -257,7 +257,8 @@ async fn main() -> Result<()> {
         rpc_url,
         contract: contract.map(|address| address.to_ascii_lowercase()),
         l1_deposit_inbox: l1_deposit_inbox.map(|address| address.to_ascii_lowercase()),
-        l1_deposit_deployment_block: l1_deposit_deployment_block.unwrap_or(args.deployment_block),
+        l1_deposit_deployment_block: l1_deposit_deployment_block
+            .or((args.deployment_block > 0).then_some(args.deployment_block)),
         l1_deposit_reorg_lookback: args.l1_deposit_reorg_lookback,
         private_key,
         deployment_block: args.deployment_block,
@@ -746,6 +747,12 @@ impl Operator {
         let Some(confirmed_head) = head.checked_sub(self.confirmations) else {
             return Ok(());
         };
+        let deployment_block = self.l1_deposit_deployment_block.unwrap_or(confirmed_head);
+        if self.l1_deposit_deployment_block.is_none() {
+            println!(
+                "L1_DEPOSIT_DEPLOYMENT_BLOCK is not set; starting deposit indexer at confirmed head block {deployment_block}"
+            );
+        }
         let next: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO l1_indexer_checkpoints (chain_id, contract_address, next_block)
@@ -757,13 +764,13 @@ impl Operator {
         )
         .bind(i64::try_from(self.chain_id)?)
         .bind(inbox)
-        .bind(i64::try_from(self.l1_deposit_deployment_block)?)
+        .bind(i64::try_from(deployment_block)?)
         .fetch_one(&self.pool)
         .await?;
         let checkpoint = u64::try_from(next)?;
         let mut from = checkpoint
             .saturating_sub(self.l1_deposit_reorg_lookback)
-            .max(self.l1_deposit_deployment_block);
+            .max(deployment_block);
         while from <= confirmed_head {
             let to = confirmed_head.min(from.saturating_add(999));
             let logs: Vec<RpcLog> = rpc(
@@ -1457,8 +1464,16 @@ async fn rpc<T: DeserializeOwned>(
         .send()
         .await
         .with_context(|| format!("RPC {method} failed"))?;
-    if !response.status().is_success() {
-        bail!("RPC {method} returned HTTP {}", response.status());
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|error| format!("failed to read response body: {error}"));
+        bail!(
+            "RPC {method} returned HTTP {status}: {}",
+            truncate(&body, 1000)
+        );
     }
     let body: RpcResponse = response.json().await?;
     if let Some(error) = body.error {
