@@ -17,6 +17,7 @@ const DEPOSIT_ACCEPTED_TOPIC: &str =
     "0x68ae3cc39a6751f1e465dbc1b9daec09ddcfd3200f67d8b3e1cbf1166fa914d2";
 const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
 const WORK_AVAILABLE_CHANNEL: &str = "rollup_work_available";
+const TOKEN_HEADER: &str = "x-operator-api-token";
 
 #[derive(Debug, Parser)]
 #[command(about = "Automate rollup sequencing, proving, submission, and L1 indexing")]
@@ -40,6 +41,8 @@ struct Args {
         default_value = "http://127.0.0.1:3000"
     )]
     api_url: String,
+    #[arg(long = "operator-api-token", env = "OPERATOR_API_TOKEN")]
+    operator_token: Option<String>,
     #[arg(long, env = "EVM_RPC_URL")]
     rpc_url: String,
     #[arg(long, env = "ROLLUP_SETTLEMENT_CONTRACT")]
@@ -88,6 +91,7 @@ struct Operator {
     pool: PgPool,
     client: Client,
     api_url: String,
+    operator_token: Option<String>,
     rpc_url: String,
     contract: Option<String>,
     l1_deposit_inbox: Option<String>,
@@ -239,6 +243,7 @@ async fn main() -> Result<()> {
         pool,
         client,
         api_url: args.api_url.trim_end_matches('/').to_string(),
+        operator_token: args.operator_token.filter(|value| !value.is_empty()),
         rpc_url: args.rpc_url,
         contract: args.contract.map(|address| address.to_ascii_lowercase()),
         l1_deposit_inbox: args
@@ -393,10 +398,12 @@ impl Operator {
     }
 
     async fn sequence_pending(&self) -> Result<()> {
-        let response = self
+        let mut request = self
             .client
             .post(format!("{}/rollup/batches", self.api_url))
-            .json(&json!({ "limit": self.batch_limit }))
+            .json(&json!({ "limit": self.batch_limit }));
+        request = with_token(request, self.operator_token.as_deref());
+        let response = request
             .send()
             .await
             .context("failed to request sequencing")?;
@@ -1396,6 +1403,14 @@ impl Operator {
     }
 }
 
+fn with_token(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    if let Some(token) = token.filter(|token| !token.is_empty()) {
+        request.header(TOKEN_HEADER, token)
+    } else {
+        request
+    }
+}
+
 async fn run_command(command: &mut Command, label: &str) -> Result<String> {
     let output = command
         .stdin(Stdio::null())
@@ -1648,5 +1663,20 @@ mod tests {
     #[test]
     fn rejects_oversized_abi_integer() {
         assert!(word_u64(&format!("0x01{}", "00".repeat(31)), "number").is_err());
+    }
+
+    #[test]
+    fn sequencing_request_includes_operator_token_when_configured() {
+        let request = with_token(
+            reqwest::Client::new().post("http://127.0.0.1:3000/rollup/batches"),
+            Some("operator-secret"),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.headers().get(TOKEN_HEADER).unwrap(),
+            "operator-secret"
+        );
     }
 }

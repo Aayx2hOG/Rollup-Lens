@@ -22,6 +22,8 @@ const DRY_RUN_RPC_URL: &str = "http://127.0.0.1:8545";
 const DRY_RUN_CONTRACT: &str = "0x0000000000000000000000000000000000000000";
 const DRY_RUN_PRIVATE_KEY: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000001";
+const TOKEN_HEADER: &str = "x-operator-api-token";
+const LEGACY_TOKEN_HEADER: &str = "x-settlement-update-token";
 
 #[derive(Debug, Parser)]
 #[command(name = "settlement-client")]
@@ -44,6 +46,9 @@ struct Cli {
 
     #[arg(long, env = "SETTLEMENT_UPDATE_TOKEN")]
     settlement_update_token: Option<String>,
+
+    #[arg(long = "operator-api-token", env = "OPERATOR_API_TOKEN")]
+    operator_token: Option<String>,
 
     #[arg(long, global = true)]
     dry_run: bool,
@@ -267,6 +272,7 @@ async fn main() -> Result<()> {
                 block_number,
                 gas_used,
                 &receipt_value,
+                cli.operator_token.as_deref(),
                 cli.settlement_update_token.as_deref(),
             )
             .await?;
@@ -281,6 +287,7 @@ async fn main() -> Result<()> {
                     block_number,
                     gas_used,
                     &receipt_value,
+                    cli.operator_token.as_deref(),
                     cli.settlement_update_token.as_deref(),
                 )
                 .await?;
@@ -502,14 +509,16 @@ async fn persist_settlement_status(
     block_number: u64,
     gas_used: u64,
     receipt: &Value,
-    update_token: Option<&str>,
+    operator_token: Option<&str>,
+    legacy_token: Option<&str>,
 ) -> Result<()> {
     let api_url = api_url.trim_end_matches('/');
     let url = format!("{api_url}/rollup/batches/{batch_number}/settlement");
-    let mut request = reqwest::Client::new().post(&url);
-    if let Some(token) = update_token {
-        request = request.header("x-settlement-update-token", token);
-    }
+    let request = with_auth(
+        reqwest::Client::new().post(&url),
+        operator_token,
+        legacy_token,
+    );
     let response = request
         .json(&SettlementStatusUpdate {
             status,
@@ -531,6 +540,20 @@ async fn persist_settlement_status(
 
     println!("persisted {status} settlement status for batch {batch_number}: {tx_hash}");
     Ok(())
+}
+
+fn with_auth(
+    request: reqwest::RequestBuilder,
+    operator_token: Option<&str>,
+    legacy_token: Option<&str>,
+) -> reqwest::RequestBuilder {
+    if let Some(token) = operator_token.filter(|token| !token.is_empty()) {
+        request.header(TOKEN_HEADER, token)
+    } else if let Some(token) = legacy_token.filter(|token| !token.is_empty()) {
+        request.header(LEGACY_TOKEN_HEADER, token)
+    } else {
+        request
+    }
 }
 
 fn cast_arg(value: &Value) -> String {
@@ -689,6 +712,39 @@ mod tests {
         assert_eq!(
             extract_tx_hash(&hash),
             Some(format!("0x{}", "a".repeat(64)))
+        );
+    }
+
+    #[test]
+    fn settlement_status_request_prefers_operator_token() {
+        let request = with_auth(
+            reqwest::Client::new().post("http://127.0.0.1:3000/rollup/batches/0/settlement"),
+            Some("operator-secret"),
+            Some("legacy-secret"),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.headers().get(TOKEN_HEADER).unwrap(),
+            "operator-secret"
+        );
+        assert!(!request.headers().contains_key(LEGACY_TOKEN_HEADER));
+    }
+
+    #[test]
+    fn settlement_status_request_uses_legacy_token_as_local_fallback() {
+        let request = with_auth(
+            reqwest::Client::new().post("http://127.0.0.1:3000/rollup/batches/0/settlement"),
+            None,
+            Some("legacy-secret"),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.headers().get(LEGACY_TOKEN_HEADER).unwrap(),
+            "legacy-secret"
         );
     }
 }

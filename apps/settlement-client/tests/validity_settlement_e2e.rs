@@ -14,7 +14,9 @@ use std::{
 };
 
 use chain_core::sign_transfer;
-use explorer_api::{app_with_pool_and_tokens_and_deposit_inbox, initialize_genesis, GenesisConfig};
+use explorer_api::{
+    app_with_config, dev_cors, initialize_genesis, new_event_queue, AppConfig, GenesisConfig,
+};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use wallet_core::create_keypair;
@@ -114,11 +116,16 @@ async fn run_scenario(verifier_mode: VerifierMode) {
     let api_task = tokio::spawn(
         axum::serve(
             api_listener,
-            app_with_pool_and_tokens_and_deposit_inbox(
+            app_with_config(
                 pool.clone(),
-                None,
-                None,
-                deposit_inbox.clone(),
+                AppConfig {
+                    operator_token: None,
+                    settlement_token: None,
+                    deposit_token: None,
+                    deposit_inbox: deposit_inbox.clone(),
+                    events: new_event_queue(),
+                    cors: dev_cors(),
+                },
             ),
         )
         .into_future(),

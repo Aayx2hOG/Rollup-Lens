@@ -13,8 +13,8 @@ use chain_core::{
     RollupBatchCommitment,
 };
 use explorer_api::{
-    app_with_pool, app_with_pool_and_tokens, app_with_pool_and_tokens_and_deposit_inbox,
-    initialize_genesis, GenesisConfig,
+    app_with_config, app_with_pool, dev_cors, initialize_genesis, new_event_queue, AppConfig,
+    GenesisConfig,
 };
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -490,11 +490,16 @@ async fn confirmed_deposit_sequences_into_l2_state() {
     initialize_genesis(&pool, GenesisConfig { accounts: vec![] })
         .await
         .unwrap();
-    let app = app_with_pool_and_tokens_and_deposit_inbox(
+    let app = app_with_config(
         pool.clone(),
-        None,
-        None,
-        format!("0x{}", "2".repeat(40)),
+        AppConfig {
+            operator_token: None,
+            settlement_token: None,
+            deposit_token: None,
+            deposit_inbox: format!("0x{}", "2".repeat(40)),
+            events: new_event_queue(),
+            cors: dev_cors(),
+        },
     );
     let deposit = json!({
         "chain_id": 31337,
@@ -559,10 +564,16 @@ async fn settlement_update_token_does_not_block_local_deposit_ingest() {
     };
 
     let (pool, schema) = setup_postgres_test_database(&database_url).await;
-    let app = app_with_pool_and_tokens(
+    let app = app_with_config(
         pool.clone(),
-        Some("__settlement_updates_disabled__".to_string()),
-        None,
+        AppConfig {
+            operator_token: None,
+            settlement_token: Some("__settlement_updates_disabled__".to_string()),
+            deposit_token: None,
+            deposit_inbox: format!("0x{}", "0".repeat(40)),
+            events: new_event_queue(),
+            cors: dev_cors(),
+        },
     );
 
     let observed = post_json(app, "/l1/deposits", &deposit_payload()).await;
@@ -570,6 +581,123 @@ async fn settlement_update_token_does_not_block_local_deposit_ingest() {
     assert_eq!(observed.status(), StatusCode::OK);
     let observed = response_json(observed).await;
     assert_eq!(observed["status"], json!("confirmed"));
+    teardown_postgres_test_database(&pool, &schema).await;
+}
+
+#[tokio::test]
+async fn operator_token_protects_operator_writes_but_not_user_submissions() {
+    let Some(database_url) = optional_test_database_url() else {
+        eprintln!("skipping Postgres integration test; set TEST_DATABASE_URL or DATABASE_URL");
+        return;
+    };
+
+    let fixture = ChainFixture::with_transaction_blocks(1);
+    let (pool, schema) = setup_postgres_test_database(&database_url).await;
+    insert_indexed_chain(&pool, &fixture.chain).await;
+    let app = app_with_config(
+        pool.clone(),
+        AppConfig {
+            operator_token: Some("operator-secret".to_string()),
+            settlement_token: None,
+            deposit_token: None,
+            deposit_inbox: format!("0x{}", "2".repeat(40)),
+            events: new_event_queue(),
+            cors: dev_cors(),
+        },
+    );
+
+    let unauthorized_deposit = post_json(app.clone(), "/l1/deposits", &deposit_payload()).await;
+    assert_eq!(unauthorized_deposit.status(), StatusCode::UNAUTHORIZED);
+    let wrong_deposit = post_json_with_header(
+        app.clone(),
+        "/l1/deposits",
+        &deposit_payload(),
+        "x-operator-api-token",
+        "wrong",
+    )
+    .await;
+    assert_eq!(wrong_deposit.status(), StatusCode::UNAUTHORIZED);
+    let authorized_deposit = post_json_with_header(
+        app.clone(),
+        "/l1/deposits",
+        &deposit_payload(),
+        "x-operator-api-token",
+        "operator-secret",
+    )
+    .await;
+    assert_eq!(authorized_deposit.status(), StatusCode::OK);
+
+    let unauthorized_sequence =
+        post_json(app.clone(), "/rollup/batches", &json!({ "limit": 10 })).await;
+    assert_eq!(unauthorized_sequence.status(), StatusCode::UNAUTHORIZED);
+    let wrong_sequence = post_json_with_header(
+        app.clone(),
+        "/rollup/batches",
+        &json!({ "limit": 10 }),
+        "x-operator-api-token",
+        "wrong",
+    )
+    .await;
+    assert_eq!(wrong_sequence.status(), StatusCode::UNAUTHORIZED);
+    let authorized_sequence = post_json_with_header(
+        app.clone(),
+        "/rollup/batches",
+        &json!({ "limit": 10 }),
+        "x-operator-api-token",
+        "operator-secret",
+    )
+    .await;
+    assert_eq!(authorized_sequence.status(), StatusCode::OK);
+
+    let settlement_payload = json!({
+        "status": "submitted",
+        "tx_hash": format!("0x{}", "a".repeat(64)),
+        "contract_address": format!("0x{}", "b".repeat(40)),
+        "chain_id": 31337,
+        "block_number": 7,
+        "gas_used": 50000,
+        "receipt": {
+            "transactionHash": format!("0x{}", "a".repeat(64)),
+            "to": format!("0x{}", "b".repeat(40)),
+            "status": "0x1"
+        }
+    });
+    let unauthorized_settlement = post_json(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &settlement_payload,
+    )
+    .await;
+    assert_eq!(unauthorized_settlement.status(), StatusCode::UNAUTHORIZED);
+    let wrong_settlement = post_json_with_header(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &settlement_payload,
+        "x-operator-api-token",
+        "wrong",
+    )
+    .await;
+    assert_eq!(wrong_settlement.status(), StatusCode::UNAUTHORIZED);
+    let authorized_settlement = post_json_with_header(
+        app.clone(),
+        "/rollup/batches/0/settlement",
+        &settlement_payload,
+        "x-operator-api-token",
+        "operator-secret",
+    )
+    .await;
+    assert_eq!(authorized_settlement.status(), StatusCode::OK);
+
+    let new_transfer = sign_transfer(
+        &fixture.alice_secret_key,
+        fixture.bob_address,
+        5,
+        fixture.alice_nonce,
+    )
+    .unwrap();
+    let public_transaction = post_json(app, "/rollup/transactions", &new_transfer).await;
+    assert_eq!(public_transaction.status(), StatusCode::OK);
+
     teardown_postgres_test_database(&pool, &schema).await;
 }
 
@@ -665,7 +793,9 @@ const INIT_SQL: &[&str] = &[
     include_str!("../../../prisma/migrations/0011_deterministic_deposit_execution/migration.sql"),
     include_str!("../../../prisma/migrations/0012_l2_withdrawals/migration.sql"),
     include_str!("../../../prisma/migrations/0013_jobs_and_alerts/migration.sql"),
-    include_str!("../../../prisma/migrations/0014_reorg_safe_batch_finality/migration.sql"),
+    include_str!(
+        "../../../prisma/migrations/20260712120000_reorg_safe_batch_finality/migration.sql"
+    ),
 ];
 
 fn optional_test_database_url() -> Option<String> {
@@ -903,6 +1033,26 @@ async fn post_json<T: serde::Serialize>(
             .method("POST")
             .uri(uri)
             .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(payload).unwrap()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn post_json_with_header<T: serde::Serialize>(
+    app: axum::Router,
+    uri: &str,
+    payload: &T,
+    header_name: &'static str,
+    header_value: &'static str,
+) -> Response<Body> {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header(header_name, header_value)
             .body(Body::from(serde_json::to_string(payload).unwrap()))
             .unwrap(),
     )

@@ -8,7 +8,10 @@ use std::{
 
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{
+        header::{HeaderName, CONTENT_TYPE},
+        HeaderMap, Method, StatusCode,
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -39,6 +42,7 @@ const GENESIS_INITIALIZATION_LOCK: i64 = 8_739_912_441;
 const TRANSACTION_PENDING_CHANNEL: &str = "rollup_transaction_pending";
 const WORK_AVAILABLE_CHANNEL: &str = "rollup_work_available";
 const DEFAULT_L1_DEPOSIT_INBOX: &str = "0x0000000000000000000000000000000000000000";
+const OPERATOR_TOKEN_HEADER: &str = "x-operator-api-token";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -137,9 +141,19 @@ struct AppState {
     pool: PgPool,
     cache: Arc<Mutex<ResponseCache>>,
     events: EventQueue,
+    operator_token: Option<String>,
     settlement_update_token: Option<String>,
     l1_deposit_ingest_token: Option<String>,
     l1_deposit_inbox: String,
+}
+
+pub struct AppConfig {
+    pub operator_token: Option<String>,
+    pub settlement_token: Option<String>,
+    pub deposit_token: Option<String>,
+    pub deposit_inbox: String,
+    pub events: EventQueue,
+    pub cors: CorsLayer,
 }
 
 #[derive(Debug, Default)]
@@ -536,58 +550,28 @@ impl fmt::Display for ApiError {
 }
 
 pub fn app_with_pool(pool: PgPool) -> Router {
-    app_with_pool_and_settlement_token(pool, None)
-}
-
-pub fn app_with_pool_and_settlement_token(
-    pool: PgPool,
-    settlement_update_token: Option<String>,
-) -> Router {
-    app_with_pool_and_tokens(pool, settlement_update_token, None)
-}
-
-pub fn app_with_pool_and_tokens(
-    pool: PgPool,
-    settlement_update_token: Option<String>,
-    l1_deposit_ingest_token: Option<String>,
-) -> Router {
-    app_with_pool_and_tokens_and_deposit_inbox(
+    app_with_config(
         pool,
-        settlement_update_token,
-        l1_deposit_ingest_token,
-        DEFAULT_L1_DEPOSIT_INBOX.to_string(),
+        AppConfig {
+            operator_token: None,
+            settlement_token: None,
+            deposit_token: None,
+            deposit_inbox: DEFAULT_L1_DEPOSIT_INBOX.to_string(),
+            events: new_event_queue(),
+            cors: dev_cors(),
+        },
     )
 }
 
-pub fn app_with_pool_and_tokens_and_deposit_inbox(
-    pool: PgPool,
-    settlement_update_token: Option<String>,
-    l1_deposit_ingest_token: Option<String>,
-    l1_deposit_inbox: String,
-) -> Router {
-    app_with_pool_and_tokens_and_deposit_inbox_and_events(
-        pool,
-        settlement_update_token,
-        l1_deposit_ingest_token,
-        l1_deposit_inbox,
-        new_event_queue(),
-    )
-}
-
-pub fn app_with_pool_and_tokens_and_deposit_inbox_and_events(
-    pool: PgPool,
-    settlement_update_token: Option<String>,
-    l1_deposit_ingest_token: Option<String>,
-    l1_deposit_inbox: String,
-    events: EventQueue,
-) -> Router {
-    let l1_deposit_inbox = l1_deposit_inbox.to_ascii_lowercase();
+pub fn app_with_config(pool: PgPool, config: AppConfig) -> Router {
+    let l1_deposit_inbox = config.deposit_inbox.to_ascii_lowercase();
     let state = Arc::new(AppState {
         pool,
         cache: Arc::new(Mutex::new(ResponseCache::default())),
-        events,
-        settlement_update_token,
-        l1_deposit_ingest_token,
+        events: config.events,
+        operator_token: config.operator_token,
+        settlement_update_token: config.settlement_token,
+        l1_deposit_ingest_token: config.deposit_token,
         l1_deposit_inbox,
     });
 
@@ -642,8 +626,28 @@ pub fn app_with_pool_and_tokens_and_deposit_inbox_and_events(
             get(l1_deposits_by_recipient),
         )
         .route("/search/:query", get(search))
-        .layer(CorsLayer::permissive())
+        .layer(config.cors)
         .with_state(state)
+}
+
+pub fn dev_cors() -> CorsLayer {
+    CorsLayer::permissive()
+}
+
+pub fn restricted_cors(origins: &[String]) -> Result<CorsLayer, String> {
+    let parsed = origins
+        .iter()
+        .map(|origin| {
+            origin
+                .parse()
+                .map_err(|_| format!("invalid CORS origin: {origin}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([CONTENT_TYPE, HeaderName::from_static(OPERATOR_TOKEN_HEADER)]))
 }
 
 pub fn new_event_queue() -> EventQueue {
@@ -909,8 +913,11 @@ async fn withdrawal_by_hash(
 
 async fn sequence_rollup_batch(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     payload: Option<Json<SequenceBatchRequest>>,
 ) -> Result<Json<Value>, ApiError> {
+    require_operator_token(&state, &headers)?;
+
     let limit = payload
         .and_then(|Json(payload)| payload.limit)
         .unwrap_or(100);
@@ -1065,7 +1072,14 @@ async fn update_rollup_batch_settlement(
     headers: HeaderMap,
     Json(update): Json<SettlementStatusUpdate>,
 ) -> Result<Json<Value>, ApiError> {
-    if let Some(expected) = &state.settlement_update_token {
+    if let Some(expected) = &state.operator_token {
+        require_token(
+            &headers,
+            OPERATOR_TOKEN_HEADER,
+            expected,
+            "settlement status updates require a valid operator token",
+        )?;
+    } else if let Some(expected) = &state.settlement_update_token {
         let provided = headers
             .get("x-settlement-update-token")
             .and_then(|value| value.to_str().ok());
@@ -1117,7 +1131,14 @@ async fn observe_l1_deposit(
     headers: HeaderMap,
     Json(observation): Json<L1DepositObservation>,
 ) -> Result<Json<Value>, ApiError> {
-    if let Some(expected) = &state.l1_deposit_ingest_token {
+    if let Some(expected) = &state.operator_token {
+        require_token(
+            &headers,
+            OPERATOR_TOKEN_HEADER,
+            expected,
+            "L1 deposit ingestion requires a valid operator token",
+        )?;
+    } else if let Some(expected) = &state.l1_deposit_ingest_token {
         let provided = headers
             .get("x-l1-deposit-ingest-token")
             .and_then(|value| value.to_str().ok());
@@ -1133,6 +1154,34 @@ async fn observe_l1_deposit(
     serde_json::to_value(deposit)
         .map(Json)
         .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))
+}
+
+fn require_operator_token(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    if let Some(expected) = &state.operator_token {
+        require_token(
+            headers,
+            OPERATOR_TOKEN_HEADER,
+            expected,
+            "operator writes require a valid operator token",
+        )?;
+    }
+    Ok(())
+}
+
+fn require_token(
+    headers: &HeaderMap,
+    header_name: &'static str,
+    expected: &str,
+    message: &'static str,
+) -> Result<(), ApiError> {
+    let provided = headers
+        .get(header_name)
+        .and_then(|value| value.to_str().ok());
+    if provided == Some(expected) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(message.to_string()))
+    }
 }
 
 async fn search(
