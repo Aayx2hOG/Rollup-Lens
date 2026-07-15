@@ -239,7 +239,7 @@ async fn main() -> Result<()> {
             persisted_status: None,
         },
         SettlementCommand::SetSequencer { sequencer } => {
-            validate_hex_address(&sequencer, "sequencer address")?;
+            validate_hex_address(sequencer, "sequencer address")?;
             CastCommand {
                 action: "send",
                 args: vec![
@@ -499,6 +499,7 @@ fn run_cast(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn persist_settlement_status(
     api_url: &str,
     batch_number: u64,

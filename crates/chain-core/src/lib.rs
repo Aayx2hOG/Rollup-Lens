@@ -621,8 +621,8 @@ pub fn withdrawal_hash(withdrawal: &Withdrawal) -> String {
 }
 
 pub fn withdrawal_leaf_hash(withdrawal: &Withdrawal) -> Result<[u8; 32], ChainError> {
-    let withdrawal_hash = decode_hex32(&withdrawal_hash(withdrawal))
-        .map_err(|_| ChainError::InvalidSignature)?;
+    let withdrawal_hash =
+        decode_hex32(&withdrawal_hash(withdrawal)).map_err(|_| ChainError::InvalidSignature)?;
     let from = address_word(&withdrawal.from)?;
     let l1_recipient = address_word(&withdrawal.l1_recipient)?;
     let mut payload = Vec::with_capacity(WITHDRAWAL_LEAF_DOMAIN.len() + 32 + 20 + 20 + 32 + 32);
@@ -726,7 +726,7 @@ pub fn rollup_batch_commitment_from_blocks(
     previous_block: &Block,
     blocks: &[Block],
 ) -> Result<RollupBatchCommitment, ChainError> {
-    if previous_block.height == 0 && blocks.first().is_none() {
+    if previous_block.height == 0 && blocks.is_empty() {
         return Err(ChainError::InvalidBatchRange { start: 1, end: 0 });
     }
 

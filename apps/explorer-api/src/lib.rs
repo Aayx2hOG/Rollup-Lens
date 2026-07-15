@@ -3097,9 +3097,12 @@ async fn append_rollup_batch_tx(
             .await
             .map_err(database_error)?;
     let batch_number = from_i64(next_batch_number, "next rollup batch number")?;
-    let commitment =
-        rollup_batch_commitment_from_blocks(batch_number, previous_block, &[block.clone()])
-            .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
+    let commitment = rollup_batch_commitment_from_blocks(
+        batch_number,
+        previous_block,
+        std::slice::from_ref(block),
+    )
+    .map_err(|error| ApiError::InvalidIndexedData(error.to_string()))?;
     let witness = BatchValidityWitness {
         batch_number,
         l1_deposit_inbox: l1_deposit_inbox.to_string(),
@@ -3339,14 +3342,12 @@ async fn load_executable_deposits_tx(
     .map_err(database_error)?;
 
     let mut deposits = Vec::new();
-    let mut expected = from_i64(next_deposit_id, "next deposit id")?;
-    for row in rows {
+    for (expected, row) in (from_i64(next_deposit_id, "next deposit id")?..).zip(rows) {
         let view = l1_deposit_from_row(row)?;
         if view.deposit_id != expected {
             break;
         }
         deposits.push(executable_deposit_from_view(view)?);
-        expected += 1;
     }
     Ok(deposits)
 }
@@ -4012,6 +4013,21 @@ fn usize_from_i32(value: i32, label: &str) -> Result<usize, ApiError> {
     usize::try_from(value).map_err(|_| ApiError::InvalidIndexedData(format!("{label} is negative")))
 }
 
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            ApiError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            ApiError::Database(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+            ApiError::InvalidIndexedData(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
+            ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
+            ApiError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
+        };
+
+        (status, Json(json!({ "error": message }))).into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4076,20 +4092,5 @@ mod tests {
                 json!(format!("0x{}", "e".repeat(64))),
             ]
         );
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, message) = match self {
-            ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            ApiError::NotFound(message) => (StatusCode::NOT_FOUND, message),
-            ApiError::Database(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
-            ApiError::InvalidIndexedData(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
-            ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
-            ApiError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
-        };
-
-        (status, Json(json!({ "error": message }))).into_response()
     }
 }

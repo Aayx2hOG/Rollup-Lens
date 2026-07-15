@@ -1282,6 +1282,7 @@ impl Operator {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn project_finalized_event(
         &self,
         tx: &mut Transaction<'_, Postgres>,

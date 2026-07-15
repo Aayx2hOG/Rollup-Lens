@@ -2,9 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chain_core::{
     account_state_value, apply_deposit_to_state, apply_transaction_to_state,
-    apply_withdrawal_to_state,
-    rollup_batch_commitment_from_blocks, validate_deposit_sequence, Account, Block, ChainError,
-    RollupBatchCommitment,
+    apply_withdrawal_to_state, rollup_batch_commitment_from_blocks, validate_deposit_sequence,
+    Account, Block, ChainError, RollupBatchCommitment,
 };
 use merkle_core::SparseMerkleTree;
 use serde::{Deserialize, Serialize};

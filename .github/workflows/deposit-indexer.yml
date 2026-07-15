@@ -1,0 +1,51 @@
+name: Deposit indexer
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deposit-indexer
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.NEON_DATABASE_URL }}
+  DIRECT_DATABASE_URL: ${{ secrets.DIRECT_DATABASE_URL || secrets.NEON_DIRECT_DATABASE_URL }}
+  EVM_RPC_URL: ${{ secrets.EVM_RPC_URL }}
+  L1_DEPOSIT_INBOX: ${{ secrets.L1_DEPOSIT_INBOX }}
+  L1_DEPOSIT_DEPLOYMENT_BLOCK: ${{ vars.L1_DEPOSIT_DEPLOYMENT_BLOCK }}
+  L1_DEPOSIT_REORG_LOOKBACK: ${{ vars.L1_DEPOSIT_REORG_LOOKBACK || 12 }}
+  EVM_CONFIRMATIONS: ${{ vars.EVM_CONFIRMATIONS || 6 }}
+
+jobs:
+  index-deposits:
+    name: Index deposits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate configuration
+        run: |
+          test -n "$DATABASE_URL"
+          test -n "$EVM_RPC_URL"
+          test -n "$L1_DEPOSIT_INBOX"
+
+      - name: Build operator
+        run: cargo build --release -p operator
+
+      - name: Run deposit indexer
+        run: ./target/release/operator --once --index-deposits-only

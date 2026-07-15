@@ -39,10 +39,7 @@ contract ValidityRollupSettlement {
     );
 
     event WithdrawalClaimed(
-        uint256 indexed batchNumber,
-        bytes32 indexed withdrawalId,
-        address indexed l1Recipient,
-        uint256 amount
+        uint256 indexed batchNumber, bytes32 indexed withdrawalId, address indexed l1Recipient, uint256 amount
     );
 
     address public immutable owner;
@@ -172,14 +169,7 @@ contract ValidityRollupSettlement {
         if (root == bytes32(0)) revert InvalidWithdrawalProof();
         if (proof.length != siblingIsLeft.length) revert InvalidWithdrawalProof();
         bytes32 leafHash = sha256(
-            abi.encodePacked(
-                "zk-rollup-withdrawal-leaf-v1",
-                withdrawalHash,
-                l2Sender,
-                l1Recipient,
-                amount,
-                nonce
-            )
+            abi.encodePacked("zk-rollup-withdrawal-leaf-v1", withdrawalHash, l2Sender, l1Recipient, amount, nonce)
         );
         if (!_verifyWithdrawalProof(root, leafHash, proof, siblingIsLeft)) {
             revert InvalidWithdrawalProof();

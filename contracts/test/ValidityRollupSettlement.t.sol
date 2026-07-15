@@ -166,29 +166,16 @@ contract ValidityRollupSettlementTest {
         uint256 amount = 1 ether;
         uint256 nonce = 4;
         bytes32 leaf = sha256(
-            abi.encodePacked(
-                "zk-rollup-withdrawal-leaf-v1",
-                withdrawalHash,
-                L2_SENDER,
-                L1_RECIPIENT,
-                amount,
-                nonce
-            )
+            abi.encodePacked("zk-rollup-withdrawal-leaf-v1", withdrawalHash, L2_SENDER, L1_RECIPIENT, amount, nonce)
         );
-        submit(0, GENESIS_ROOT, NEW_ROOT, publicValuesWithWithdrawalRoot(0, GENESIS_ROOT, NEW_ROOT, 12, leaf, 1), "proof");
+        submit(
+            0, GENESIS_ROOT, NEW_ROOT, publicValuesWithWithdrawalRoot(0, GENESIS_ROOT, NEW_ROOT, 12, leaf, 1), "proof"
+        );
         vm.deal(address(settlement), amount);
 
         uint256 beforeBalance = L1_RECIPIENT.balance;
         settlement.claimWithdrawal(
-            0,
-            0,
-            withdrawalHash,
-            L2_SENDER,
-            L1_RECIPIENT,
-            amount,
-            nonce,
-            new bytes32[](0),
-            new bool[](0)
+            0, 0, withdrawalHash, L2_SENDER, L1_RECIPIENT, amount, nonce, new bytes32[](0), new bool[](0)
         );
 
         assertEq(L1_RECIPIENT.balance, beforeBalance + amount, "recipient paid");
