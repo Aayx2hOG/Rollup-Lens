@@ -522,7 +522,7 @@ fn abi_word_address(value: &str) -> String {
         "0".repeat(24),
         "ABI address must be left padded"
     );
-    format!("0x{}", &word[24..].to_ascii_lowercase())
+    format!("0x{}", word[24..].to_ascii_lowercase())
 }
 
 fn abi_word_u64(value: &str) -> u64 {
