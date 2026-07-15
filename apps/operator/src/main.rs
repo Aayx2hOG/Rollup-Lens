@@ -62,6 +62,8 @@ struct Args {
     confirmations: u64,
     #[arg(long, env = "L1_BATCH_REORG_LOOKBACK", default_value_t = 64)]
     l1_batch_reorg_lookback: u64,
+    #[arg(long, env = "L1_LOG_CHUNK_BLOCKS", default_value_t = 10)]
+    l1_log_chunk_blocks: u64,
     #[arg(long, env = "OPERATOR_POLL_SECONDS", default_value_t = 5)]
     poll_seconds: u64,
     #[arg(long, env = "OPERATOR_BATCH_LIMIT", default_value_t = 100)]
@@ -101,6 +103,7 @@ struct Operator {
     deployment_block: u64,
     confirmations: u64,
     l1_batch_reorg_lookback: u64,
+    l1_log_chunk_blocks: u64,
     batch_limit: usize,
     max_attempts: i32,
     artifact_dir: PathBuf,
@@ -235,8 +238,12 @@ async fn main() -> Result<()> {
             bail!("set EVM_PRIVATE_KEY or pass --private-key");
         }
     }
-    if args.poll_seconds == 0 || args.batch_limit == 0 || args.max_attempts < 1 {
-        bail!("poll seconds, batch limit, and max attempts must be positive");
+    if args.poll_seconds == 0
+        || args.batch_limit == 0
+        || args.max_attempts < 1
+        || args.l1_log_chunk_blocks == 0
+    {
+        bail!("poll seconds, batch limit, max attempts, and L1 log chunk blocks must be positive");
     }
 
     let pool = PgPoolOptions::new()
@@ -264,6 +271,7 @@ async fn main() -> Result<()> {
         deployment_block: args.deployment_block,
         confirmations: args.confirmations,
         l1_batch_reorg_lookback: args.l1_batch_reorg_lookback,
+        l1_log_chunk_blocks: args.l1_log_chunk_blocks,
         batch_limit: args.batch_limit,
         max_attempts: args.max_attempts,
         artifact_dir: args.artifact_dir,
@@ -695,7 +703,7 @@ impl Operator {
         self.orphan_reorged_batch_events(contract, from, safe_head)
             .await?;
         while from <= safe_head {
-            let to = safe_head.min(from.saturating_add(999));
+            let to = safe_head.min(from.saturating_add(self.l1_log_chunk_blocks - 1));
             let logs: Vec<RpcLog> = rpc(
                 &self.client,
                 &self.rpc_url,
@@ -772,7 +780,7 @@ impl Operator {
             .saturating_sub(self.l1_deposit_reorg_lookback)
             .max(deployment_block);
         while from <= confirmed_head {
-            let to = confirmed_head.min(from.saturating_add(999));
+            let to = confirmed_head.min(from.saturating_add(self.l1_log_chunk_blocks - 1));
             let logs: Vec<RpcLog> = rpc(
                 &self.client,
                 &self.rpc_url,
