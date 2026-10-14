@@ -72,12 +72,11 @@ const primaryNav: NavItem[] = [
   { label: "Lifecycle", tab: "Transactions" },
   { label: "Deposits", tab: "Deposits" },
   { label: "Transfers", tab: "Send" },
-  { label: "Batches", tab: "Settlement" },
+  { label: "Batches & settlement", tab: "Settlement" },
 ];
 
 const advancedNav: NavItem[] = [
   { label: "Prove", tab: "Prove" },
-  { label: "Settlement", tab: "Settlement" },
   { label: "Operate", tab: "Operate" },
 ];
 
@@ -323,6 +322,7 @@ export function App() {
       )}
       {isStale && <StaleDataNotice message={connectionMessage} />}
       <DemoWarning />
+      <UsageGuide key={activeTab} activeTab={activeTab} onNavigate={setActiveTab} />
 
       <AnimatePresence>
         {(searchResult || searchError) && (
@@ -598,10 +598,49 @@ function ConnectionState({
   );
 }
 
+const usageSteps: { tab: Tab; title: string; description: string }[] = [
+  { tab: "Transactions", title: "Explore without a wallet", description: "Open Lifecycle to select a block and inspect its transactions and accounts. Search by block height, hash, or account address." },
+  { tab: "Deposits", title: "Add test funds", description: "Connect an EVM wallet, open Deposits, enter the L2 recipient and ETH amount, then approve the L1 transaction. Wait for indexing and confirmation; sequencing credits the L2 balance." },
+  { tab: "Send", title: "Send or withdraw", description: "Open Transfers with a funded L2 wallet. Enter a recipient and amount, then sign the request. Transfers use L2 balance units. For withdrawals, use the exit form; claiming on L1 requires a finalized batch and a separate wallet transaction." },
+  { tab: "Operate", title: "Include pending activity", description: "If an automatic operator is not running, open Operate and choose Build block. It sequences pending transfers, withdrawals, and confirmed deposits. Refresh to see the resulting block and batch." },
+  { tab: "Settlement", title: "Follow the batch", description: "Open Batches & settlement and select a batch to inspect commitments and L1 evidence. A built batch is included on L2; it is not yet finalized on L1." },
+  { tab: "Prove", title: "Prove and settle (advanced)", description: "Export the batch witness, generate a proof with the external prover, then load the matching proof artifact and submit it from your wallet. The operator must index L1 finality before the explorer reports finalization." },
+];
+
+function UsageGuide({ activeTab, onNavigate }: { activeTab: Tab; onNavigate: (tab: Tab) => void }) {
+  const current = usageSteps.find((step) => step.tab === activeTab);
+  return (
+    <details open={activeTab === "Overview"} className="rounded-xl border border-mint/15 bg-mint/[0.03] p-4 sm:p-5">
+      <summary className="cursor-pointer rounded text-sm font-semibold text-mint">
+        {current ? `How to use this page: ${current.title}` : "Start here · How to use RollupLens"}
+      </summary>
+      <p className="mt-3 max-w-4xl text-sm leading-6 text-white/70">
+        {current?.description ?? "Browse the rollup without connecting a wallet, or follow the steps below to try a transfer. L1 is the connected Ethereum chain; L2 is this rollup. Connecting a wallet does not create a balance."}
+      </p>
+      <ol className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {usageSteps.map((step, index) => (
+          <li key={step.tab} className={cn("rounded-lg border p-3", activeTab === step.tab ? "border-mint/40 bg-mint/5" : "border-white/10 bg-black/10")}>
+            <span className="text-xs font-medium text-mint">STEP {index + 1}{index > 2 ? " · ADVANCED" : ""}</span>
+            <h2 className="mt-1 text-sm font-semibold text-white">{step.title}</h2>
+            <p className="mt-2 text-sm leading-6 text-white/65">{step.description}</p>
+            <button className="mt-3 inline-flex items-center gap-2 rounded text-sm font-medium text-mint hover:underline" onClick={() => onNavigate(step.tab)}>
+              {activeTab === step.tab ? "You are here" : `Open ${[...primaryNav, ...advancedNav].find((item) => item.tab === step.tab)?.label}`}
+              <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </li>
+        ))}
+      </ol>
+      <p className="mt-4 text-sm leading-6 text-white/65">
+        Before moving funds: use a local chain or testnet, a browser EVM wallet, and either a genesis-funded L2 account or a configured deposit inbox. L1 deposits and claims need test ETH for gas. If activity stays pending, check Operate for errors and confirm the indexer or sequencer is running. Use Refresh data in the header after an external action.
+      </p>
+    </details>
+  );
+}
+
 function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (tab: Tab) => void }) {
   return (
     <nav
-      className="order-3 flex w-full min-w-0 items-center gap-1 overflow-x-auto pt-2 lg:order-none lg:w-auto lg:pt-0"
+      className="order-3 flex w-full min-w-0 flex-wrap items-center gap-1 pt-2"
       aria-label="Primary navigation"
     >
       {primaryNav.map((item) => (
@@ -624,7 +663,7 @@ function HeaderNav({ activeTab, onSelectTab }: { activeTab: Tab; onSelectTab: (t
           <span className="relative">{item.label}</span>
         </button>
       ))}
-      <div className="ml-1 flex shrink-0 items-center gap-1 border-l border-white/10 pl-2">
+      <div className="flex flex-wrap items-center gap-1 sm:ml-1 sm:border-l sm:border-white/10 sm:pl-2">
         <span className="px-1 text-xs uppercase tracking-[0.14em] text-white/28">Advanced</span>
         {advancedNav.map((item) => (
           <button

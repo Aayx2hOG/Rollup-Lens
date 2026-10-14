@@ -28,6 +28,13 @@ struct Args {
     /// Only index L1DepositInbox logs and skip sequencing, proving, and settlement.
     #[arg(long, env = "OPERATOR_INDEX_DEPOSITS_ONLY")]
     index_deposits_only: bool,
+    /// Index deposits and sequence L2 activity without proving or submitting L1 transactions.
+    #[arg(
+        long,
+        env = "OPERATOR_PROCESS_L2_ONLY",
+        conflicts_with = "index_deposits_only"
+    )]
+    process_l2_only: bool,
     #[arg(long, env = "DATABASE_URL")]
     database_url: Option<String>,
     /// Deployed Postgres URL used when DATABASE_URL is not set.
@@ -227,10 +234,14 @@ async fn main() -> Result<()> {
     if let Some(inbox) = &l1_deposit_inbox {
         validate_address(inbox)?;
     }
-    if args.index_deposits_only && l1_deposit_inbox.is_none() {
-        bail!("--index-deposits-only requires --l1-deposit-inbox or L1_DEPOSIT_INBOX");
+    let lightweight = args.index_deposits_only || args.process_l2_only;
+    if lightweight && l1_deposit_inbox.is_none() {
+        bail!("lightweight processing requires --l1-deposit-inbox or L1_DEPOSIT_INBOX");
     }
-    if !args.index_deposits_only {
+    if args.process_l2_only && l1_deposit_deployment_block.is_none() {
+        bail!("--process-l2-only requires L1_DEPOSIT_DEPLOYMENT_BLOCK so existing deposits are not skipped");
+    }
+    if !lightweight {
         if contract.is_none() {
             bail!("set ROLLUP_SETTLEMENT_CONTRACT or pass --contract");
         }
@@ -251,7 +262,7 @@ async fn main() -> Result<()> {
         .connect(&database_url)
         .await
         .context("failed to connect to Postgres")?;
-    let client = Client::new();
+    let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
     let chain_id = parse_hex_u64(
         &rpc::<String>(&client, &rpc_url, "eth_chainId", json!([])).await?,
         "chain id",
@@ -282,8 +293,8 @@ async fn main() -> Result<()> {
     };
     fs::create_dir_all(&operator.artifact_dir).await?;
 
-    if args.index_deposits_only && args.once {
-        operator.index_deposit_events().await?;
+    if lightweight && args.once {
+        operator.lightweight_tick(args.process_l2_only).await?;
         return Ok(());
     }
 
@@ -292,7 +303,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.index_deposits_only {
+    if lightweight {
+        println!("automatic L2 sequencing: {}", args.process_l2_only);
         println!(
             "deposit indexer started for chain {} inbox {} with {} confirmations",
             operator.chain_id,
@@ -311,7 +323,7 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
                 _ = interval.tick() => {
-                    if let Err(error) = operator.index_deposit_events().await {
+                    if let Err(error) = operator.lightweight_tick(args.process_l2_only).await {
                         eprintln!("deposit indexer tick failed: {error:#}");
                         operator.record_error(&error).await;
                     }
@@ -390,6 +402,15 @@ impl Operator {
         self.private_key
             .as_deref()
             .context("EVM private key is not configured")
+    }
+
+    async fn lightweight_tick(&self, sequence: bool) -> Result<()> {
+        // Never sequence deposits after an unsuccessful canonical L1 scan.
+        self.index_deposit_events().await?;
+        if sequence {
+            self.sequence_pending().await?;
+        }
+        Ok(())
     }
 
     async fn tick(&self) -> Result<()> {
@@ -1631,6 +1652,81 @@ fn truncate(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lightweight_modes_are_mutually_exclusive() {
+        assert!(
+            Args::try_parse_from(["operator", "--process-l2-only", "--index-deposits-only"])
+                .is_err()
+        );
+        let args = Args::try_parse_from(["operator", "--process-l2-only", "--once"]).unwrap();
+        assert!(args.process_l2_only && args.once);
+    }
+
+    #[tokio::test]
+    async fn lightweight_processing_sequences_without_prover_and_stops_on_indexer_failure() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let app = Router::new()
+            // A chain below the confirmation threshold needs no database writes.
+            .route(
+                "/",
+                post(|| async { Json(json!({"jsonrpc":"2.0", "id":1, "result":"0x0"})) }),
+            )
+            .route(
+                "/rollup/batches",
+                post(move |headers: axum::http::HeaderMap| {
+                    let counter = counter.clone();
+                    async move {
+                        assert_eq!(headers.get(TOKEN_HEADER).unwrap(), "test-token");
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::CONFLICT
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut operator = Operator {
+            pool: PgPoolOptions::new()
+                .connect_lazy("postgresql://localhost/unused")
+                .unwrap(),
+            client: Client::new(),
+            api_url: url.clone(),
+            rpc_url: url,
+            operator_token: Some("test-token".into()),
+            contract: None,
+            private_key: None,
+            l1_deposit_inbox: Some(format!("0x{}", "11".repeat(20))),
+            l1_deposit_deployment_block: Some(0),
+            l1_deposit_reorg_lookback: 12,
+            deployment_block: 0,
+            confirmations: 6,
+            l1_batch_reorg_lookback: 64,
+            l1_log_chunk_blocks: 10,
+            batch_limit: 100,
+            max_attempts: 3,
+            artifact_dir: PathBuf::new(),
+            validity_prover_bin: PathBuf::from("must-not-run"),
+            settlement_client_bin: PathBuf::from("must-not-run"),
+            cast_bin: PathBuf::from("must-not-run"),
+            chain_id: 11155111,
+        };
+        operator.lightweight_tick(false).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        operator.lightweight_tick(true).await.unwrap();
+        operator.lightweight_tick(true).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        operator.rpc_url.push_str("/missing");
+        assert!(operator.lightweight_tick(true).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
 
     #[test]
     fn decodes_validity_finalization_event() {

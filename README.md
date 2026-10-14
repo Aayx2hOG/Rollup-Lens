@@ -80,11 +80,17 @@ Create `prisma/.env`:
 cp prisma/.env.example prisma/.env
 ```
 
-For a local Postgres listening on `localhost:5432`:
+Start the local Postgres service:
+
+```bash
+docker compose up -d postgres
+```
+
+The Docker service is exposed on `localhost:5434`:
 
 ```env
-DATABASE_URL="postgresql://postgres:postgres@localhost:5432/zk_rollup"
-DIRECT_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/zk_rollup"
+DATABASE_URL="postgresql://postgres:postgres@localhost:5434/zk_rollup"
+DIRECT_DATABASE_URL="postgresql://postgres:postgres@localhost:5434/zk_rollup"
 ```
 
 With Neon, use the pooled connection string for `DATABASE_URL` and the
@@ -122,6 +128,12 @@ Configure the scheduled indexer with `DATABASE_URL` or `NEON_DATABASE_URL`,
 it is omitted, the indexer starts at the current confirmed L1 head and only
 tracks new deposits going forward. It scans deposit logs only; it does not
 sequence, prove, submit settlement transactions, or need `EVM_PRIVATE_KEY`.
+
+### Sepolia deposits
+
+To use Sepolia test ETH with the hosted API/Neon database, follow the
+[Sepolia deployment guide](contracts/SEPOLIA.md). The helper deploys the deposit
+inbox and writes its address into the local UI environment.
 
 ### Local Developer Mode
 
@@ -373,8 +385,14 @@ bun run dev
 ```
 
 Vite proxies `/api/*` to `http://127.0.0.1:3000` during development. The UI
-includes overview, block, account, rollup batch, sequencer, and API health
-views.
+includes an expanded getting-started guide on Overview and collapsible help on
+each page. Use **Lifecycle** to browse blocks and transactions without a wallet,
+**Deposits** to add test funds, **Transfers** to send or request withdrawals,
+and **Batches & settlement** to follow L1 evidence. **Operate** and **Prove**
+contain the advanced sequencing and proof workflows.
+
+See the [UI usage guide and browser checklist](apps/explorer-ui/README.md) for
+step-by-step instructions and expected results.
 
 ## Production deployment
 
@@ -405,8 +423,8 @@ transfer. The private key remains inside the wallet; the explorer receives only
 the Ethereum address and signature.
 
 Connecting a wallet does not allocate funds. Its address must already be
-part of the explicit genesis allocation (or receive funds through a future
-deposit path) before it can submit transfers.
+part of the explicit genesis allocation or receive a confirmed, sequenced L1
+deposit before it can submit transfers.
 
 ## Development wallet CLI
 
@@ -459,7 +477,70 @@ forge test
 
 ## Checks
 
+Run commands below from the repository root. Install Rust/Cargo, Bun, and
+Foundry (`forge`, `anvil`, `cast`); database tests also require PostgreSQL.
+
+### UI and standard automated checks
+
 ```bash
+bun install --cwd apps/explorer-ui
+bun run --cwd apps/explorer-ui test
+bun run --cwd apps/explorer-ui build
 cargo test
-cd apps/explorer-ui && bun test && bun run build
+forge test
 ```
+
+The UI tests cover formatting and wallet/signature interactions; the build
+checks TypeScript and creates the production bundle. They do not replace the
+[manual browser checklist](apps/explorer-ui/README.md#manual-browser-checklist),
+which covers navigation, mobile layout, keyboard access, search, wallet flows,
+and error recovery. `cargo test` skips ignored integration tests, and API
+Postgres tests can return early when no database URL is set. A green default
+run alone does not verify the full lifecycle.
+
+### Database and operator integration checks
+
+Use a disposable local database or separate Neon test branch, with a role that
+can create/drop schemas. These suites create isolated schemas. Do not point
+tests at the deployed application's production database.
+
+```bash
+docker compose up -d postgres
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
+cargo test -p explorer-api --test routes -- --nocapture
+
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
+cargo test -p operator --test operator_once -- --ignored --nocapture
+```
+
+The API suite checks routes against Postgres; inspect output for skipped tests.
+The operator suite uses fake prover/settlement processes and a mock RPC to
+verify orchestration through finalization without running SP1.
+
+### End-to-end settlement
+
+With Postgres and Foundry available, run the fast lifecycle test (real local
+contracts and a deterministic verifier mock):
+
+```bash
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
+cargo test -p settlement-client --test validity_settlement_e2e \
+  deposit_transfer_proof_and_settlement_lifecycle -- --ignored --nocapture
+```
+
+For real cryptographic proof coverage, install the SP1 toolchain and provide
+sufficient proving resources, then run:
+
+```bash
+cargo build --release -p validity-prover
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/zk_rollup \
+VALIDITY_PROVER_BIN="$PWD/target/release/validity-prover" \
+cargo test -p settlement-client --test validity_settlement_e2e \
+  proves_sequences_and_finalizes_a_batch_on_anvil -- --ignored --nocapture
+```
+
+Both tiers check deposits, transfer execution, balances/nonces, batch settlement,
+and receipt metadata. See the [settlement test guide](apps/settlement-client/README.md#end-to-end-validity-settlement-tests)
+for prerequisites and the [operator guide](apps/operator/README.md) for service
+configuration. Complete the UI browser checklist separately, including the
+withdrawal claim flow when full settlement is configured.

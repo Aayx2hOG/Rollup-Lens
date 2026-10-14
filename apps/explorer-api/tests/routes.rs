@@ -167,6 +167,14 @@ async fn postgres_source_serves_indexed_chain_pages_and_details() {
     .await;
     assert_eq!(account["address"], json!(fixture.alice_address));
 
+    // Wallets commonly display checksummed addresses with uppercase hex digits.
+    let wallet_address = format!("0x{}", fixture.alice_address[2..].to_ascii_uppercase());
+    let account = get_json(app.clone(), &format!("/accounts/{wallet_address}")).await;
+    assert_eq!(account["address"], json!(fixture.alice_address));
+    let search = get_json(app.clone(), &format!("/search/{wallet_address}")).await;
+    assert_eq!(search["kind"], json!("Account"));
+    assert_eq!(search["data"]["address"], json!(fixture.alice_address));
+
     let transaction = get_json(
         app.clone(),
         &format!("/transactions/{}", fixture.transaction_hash),

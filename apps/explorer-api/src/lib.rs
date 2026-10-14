@@ -1420,7 +1420,7 @@ impl DbSource {
             WHERE address = $1
             "#,
         )
-        .bind(address)
+        .bind(address.to_ascii_lowercase())
         .fetch_optional(&self.pool)
         .await
         .map_err(database_error)?;

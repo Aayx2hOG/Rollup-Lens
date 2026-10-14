@@ -6,7 +6,8 @@
     "db:migrate:neon": "bun scripts/migrate-deploy.mjs --neon",
     "db:status": "bunx prisma migrate status --schema prisma/schema.prisma",
     "settlement:deploy:local": "bun scripts/deploy-local-settlement.mjs",
-    "dev": "bun run --cwd apps/explorer-ui dev"
+    "dev": "bun run --cwd apps/explorer-ui dev",
+    "deposit:deploy:sepolia": "node scripts/deploy-sepolia-deposit.mjs"
   },
   "dependencies": {
     "@prisma/client": "^7.8.0"

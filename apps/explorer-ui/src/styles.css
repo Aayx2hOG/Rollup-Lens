@@ -47,6 +47,7 @@ button {
 
 button:focus-visible,
 a:focus-visible,
+summary:focus-visible,
 label:has(input:focus-visible) {
   outline: 2px solid rgba(88, 244, 183, 0.52);
   outline-offset: 2px;

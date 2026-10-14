@@ -4,8 +4,37 @@ services:
     runtime: rust
     plan: free
     buildCommand: bun install --frozen-lockfile && cargo build --release -p explorer-api
-    startCommand: ./target/release/explorer-api --bind 0.0.0.0:$PORT --auto-sequence
+    startCommand: ./target/release/explorer-api --bind 0.0.0.0:$PORT
     healthCheckPath: /ready
     envVars:
       - key: DATABASE_URL
         sync: false
+      - key: L1_DEPOSIT_INBOX
+        sync: false
+      - key: OPERATOR_API_TOKEN
+        sync: false
+  - type: worker
+    name: rollup-lens-processor
+    runtime: rust
+    plan: 0.5c-512mb
+    buildCommand: cargo build --release -p operator
+    startCommand: ./target/release/operator --process-l2-only
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SETTLEMENT_API_URL
+        sync: false
+      - key: OPERATOR_API_TOKEN
+        sync: false
+      - key: EVM_RPC_URL
+        sync: false
+      - key: L1_DEPOSIT_INBOX
+        sync: false
+      - key: L1_DEPOSIT_DEPLOYMENT_BLOCK
+        sync: false
+      - key: EVM_CONFIRMATIONS
+        value: "6"
+      - key: OPERATOR_POLL_SECONDS
+        value: "5"
+      - key: L1_LOG_CHUNK_BLOCKS
+        value: "10"

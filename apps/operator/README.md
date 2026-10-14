@@ -198,3 +198,97 @@ cargo test -p operator --test operator_once -- --ignored --nocapture
 The test creates and drops its own uniquely named schema. It is marked ignored
 so a normal `cargo test` never connects to the database implicitly. It never
 falls back to `NEON_DATABASE_URL`.
+
+## Automatic deposits and L2 transfers (without proving)
+
+Use `--process-l2-only` for the hosted demo. Every poll (five seconds by default)
+it indexes canonical, confirmed L1 deposits, then calls the API sequencer to
+include pending deposits, transfers, and withdrawals. Users do not need to run
+an indexer or click Build block. This mode does not prove, settle, or claim
+withdrawals; batches remain built until a full settlement operator processes them.
+
+It requires no signing key, settlement contract, SP1 installation, or persistent
+Postgres LISTEN connection. It reuses the existing durable indexer checkpoints,
+reorg handling, and transactional sequencing. Run one processing worker per
+rollup, and disable the scheduled deposit-indexer workflow for that rollup to
+avoid concurrent indexers. Do not run this mode alongside the full operator.
+
+### Deployment
+
+`render.yaml` now declares a `rollup-lens-processor` background worker and leaves
+sequencing to that worker instead of the API's auto-sequence loop. Apply the
+updated Blueprint or create a Background Worker manually (pushing code to an
+existing standalone API service does not create the worker):
+
+```text
+Build: cargo build --release -p operator
+Start: ./target/release/operator --process-l2-only
+```
+
+The configured worker compute plan is paid. No hosting resources are provisioned
+by editing the YAML. See [Render worker documentation](https://render.com/docs/background-workers)
+and [compute plans](https://render.com/docs/compute-plans).
+
+Set these values once in the hosting dashboard:
+
+| Variable | Where / value |
+| --- | --- |
+| `DATABASE_URL` | API and worker: the same Neon database containing the initialized rollup. |
+| `L1_DEPOSIT_INBOX` | API and worker: the same deployed inbox as the UI. Restart the API after changing it. |
+| `OPERATOR_API_TOKEN` | API and worker: the same secret token; never put this in the frontend. |
+| `SETTLEMENT_API_URL` | Worker: deployed API base URL, without `/api`. |
+| `EVM_RPC_URL` | Worker: RPC URL for the chain containing the inbox, e.g. Sepolia. |
+| `L1_DEPOSIT_DEPLOYMENT_BLOCK` | Worker: actual inbox deployment block, required to avoid skipping earlier deposits. |
+| `EVM_CONFIRMATIONS` | Worker: `6` by default. |
+| `OPERATOR_POLL_SECONDS` | Worker: `5` by default. |
+| `L1_LOG_CHUNK_BLOCKS` | Worker: `10` by default; tune for your RPC provider. |
+
+Apply committed database migrations separately before starting the services.
+Keep the API available: a sleeping/free API can delay sequencing during cold
+starts. Indexing old blocks can take multiple RPC calls; the poll interval is
+not a guarantee that a deposit is credited within five seconds. Six L1
+confirmations must also elapse.
+
+The worker logs startup and failures, records tick errors in the existing
+`error_events` table, and retries on the next poll. An indexer failure stops
+that tick before sequencing. HTTP calls time out after 60 seconds. API failure
+after indexing leaves confirmed deposits in Postgres for the next attempt.
+
+### Local verification
+
+Export the variables above using a local/test environment, then start the API
+and worker in separate terminals:
+
+```bash
+cargo run -p explorer-api -- --bind 127.0.0.1:3000
+```
+
+```bash
+export SETTLEMENT_API_URL=http://127.0.0.1:3000
+cargo run -p operator -- --process-l2-only
+```
+
+For one processing pass use:
+
+```bash
+cargo run -p operator -- --process-l2-only --once
+```
+
+Test in the UI by making one small testnet deposit, waiting for confirmations,
+and watching it become executed without Build block. Submit an L2 transfer;
+it should also be included automatically. Stop/restart the worker and verify
+pending activity resumes. Stop the API briefly: the worker should log failures,
+then recover once it returns. These manual checks require a configured chain,
+inbox, database, and funded test wallet.
+
+Automated checks:
+
+```bash
+cargo test -p operator --bin operator
+```
+
+The lightweight-mode regression test uses a local mock RPC/API (no database or
+wallet required). It verifies sequencing, token forwarding, repeated polls,
+index-only behavior, and no sequencing after an RPC failure. Existing ignored
+Postgres integration suites remain separate; this unit check does not verify
+live deposit crediting.
